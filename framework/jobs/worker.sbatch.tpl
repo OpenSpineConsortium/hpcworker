@@ -63,7 +63,7 @@ json_str() { hpcw_json_str "$1"; }
 now_s() { date +%s; }
 STARTED_AT=$(date -u +%FT%TZ)
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
-STATE=starting; MESSAGE=""; REQUESTED_NAME="$SITE-$JOB"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
+STATE=starting; MESSAGE=""; REQUESTED_NAME="$SITE-$RUN"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
 AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
 NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false
 # trust for the workspace as Claude Code has it on record (the second of the two booleans read); the seed below may add it later
@@ -288,7 +288,7 @@ on_term() {
   trap - TERM INT
   rc_stop
   if [ -n "$NEXT_JOB" ]; then write_status preempted "job $JOB ending (wall time or preemption); the next job in the chain, $NEXT_JOB, takes over and resumes the session"; say "ending: successor $NEXT_JOB takes over"
-  else write_status preempted "job $JOB ending (wall time or preemption) with no successor queued; start the worker again within 4 h to resume: hpcworker worker start --name $RUN"; say "preempted: left cleanly"; fi
+  else write_status preempted "job $JOB ending (wall time or preemption) with no successor queued; start the worker again within seven days to resume the same session: hpcworker worker start --name $RUN"; say "preempted: left cleanly"; fi
   exit 0
 }
 trap on_term TERM INT

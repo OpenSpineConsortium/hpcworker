@@ -12,6 +12,8 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+with open(os.path.join(ROOT, "VERSION")) as _fh:
+    CURRENT_VERSION = _fh.read().strip()  # the framework version the install writes (an integer; bumps move this file, not the tests)
 BASH = os.environ.get("HPCW_BASH") or "bash"
 PY = os.environ.get("HPCW_PYTHON") or ("python" if os.name == "nt" else sys.executable)
 
@@ -340,9 +342,9 @@ class InstallAndGuard(unittest.TestCase):
             self.assertIn(b"hpcw_login_main", data)
             self.assertNotIn(b"\r", data)
             rc, out, _ = bash("bash '%s/bin/hpcworker' version" % posix(home), env=env)
-            self.assertEqual((rc, out), (0, "2"))
+            self.assertEqual((rc, out), (0, CURRENT_VERSION))
             with open(os.path.join(home, "VERSION")) as fh:
-                self.assertEqual(fh.read().strip(), "2")
+                self.assertEqual(fh.read().strip(), CURRENT_VERSION)
 
     def test_install_again_is_an_upgrade_or_a_refresh(self):
         # over version 1 (an older copy of the command and its VERSION file): the files are replaced and
@@ -362,12 +364,12 @@ class InstallAndGuard(unittest.TestCase):
                 before = fh.read()
             rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
             self.assertEqual(rc, 0, err)
-            self.assertIn("upgraded 1 -> 2", out)
+            self.assertIn("upgraded 1 -> %s" % CURRENT_VERSION, out)
             self.assertIn("profile.json exists; kept", out)
             with open(os.path.join(home, "VERSION")) as fh:
-                self.assertEqual(fh.read().strip(), "2")
+                self.assertEqual(fh.read().strip(), CURRENT_VERSION)
             rc, out, _ = bash("bash '%s/bin/hpcworker' version" % posix(home), env=env)
-            self.assertEqual((rc, out), (0, "2"))
+            self.assertEqual((rc, out), (0, CURRENT_VERSION))
             with open(os.path.join(home, "profile.json")) as fh:
                 self.assertEqual(fh.read(), before, "an upgrade never touches the profile")
             rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)

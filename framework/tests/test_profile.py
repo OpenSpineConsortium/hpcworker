@@ -75,10 +75,39 @@ class Validate(unittest.TestCase):
         self.assertTrue(any("egress.class" in e for e in errs))
         self.assertTrue(any("image_store.type" in e for e in errs))
 
-    def test_unknown_field_rejected(self):
+    def test_unknown_field_is_ignored_with_a_note_not_rejected(self):
+        # a profile.json written by another release keeps working: the field is named once and left out
         prof = P.load(WAYNE)
         prof["origin_of_image"] = "x"
-        self.assertTrue(any("unknown field" in e for e in P.validate(prof)))
+        self.assertEqual(P.validate(prof), [])
+        self.assertEqual(P.unknown_fields(prof), ["origin_of_image"])
+        self.assertIn("origin_of_image", P.unknown_note(prof))
+        self.assertNotIn("P_origin_of_image", P.shellenv(prof))
+        self.assertEqual(P.unknown_note(P.load(WAYNE)), "")
+
+    def test_older_profile_with_email_domain_still_loads(self):
+        # releases up to framework 2 wrote "email_domain" into profile.json; it is not a field any more
+        self.assertNotIn("email_domain", [row[0] for row in P.SCHEMA])
+        prof = P.load(WAYNE)
+        prof["email_domain"] = "wayne.edu"
+        self.assertEqual(P.validate(prof), [])
+        self.assertEqual(P.unknown_fields(prof), ["email_domain"])
+        self.assertNotIn("email_domain", P.shellenv(prof))
+        os.environ.update(ENV)
+        try:
+            self.assertEqual(P.mapping(prof, {"RUN": "worker"})["SITE"], "wayne")
+        finally:
+            for k in ENV:
+                os.environ.pop(k, None)
+
+    def test_set_refuses_a_new_unknown_field(self):
+        prof = P.load(WAYNE)
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "p.json")
+            P.save(prof, path)
+            self.assertEqual(P.main(["profile.py", "set", path, "partition_cpu_batc", "reqp"]), 1)
+            self.assertNotIn("partition_cpu_batc", P.load(path))
+            self.assertEqual(P.main(["profile.py", "set", path, "partition_cpu_batch", "reqp"]), 0)
 
     def test_tmpdir_trap(self):
         prof = P.load(WAYNE)

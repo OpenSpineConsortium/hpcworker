@@ -157,7 +157,7 @@ sign-in status, it submits the same file again with a dependency on itself (`aft
 `afterok`, plus `singleton` so two links never run at once) and records the successor in `next.id`:
 one successor per link, once, also across a Slurm requeue of the same job. When the wall time or a
 preemption ends a link, the scheduler starts the successor, which runs `claude remote-control
---continue` in the same directory when `connection.json` is younger than four hours (tried once per
+--continue` in the same directory when `connection.json` is younger than seven days (tried once per
 link) and otherwise registers afresh; the environment id is stable per machine, so a fresh
 registration from the same login joins the same environment. `--no-chain` starts a single job. The
 chain is armed only after the container check passes, so a broken setup never loops through
@@ -214,7 +214,11 @@ Continue coding in the Claude mobile app or https://claude.ai/code?environment=e
 ## Adding a university
 
 1. `hpcworker install --discover` on its login node, or copy `profiles/wayne.json` and edit. The
-   schema is `hpcworker profile schema`; `hpcworker profile validate` must pass.
+   schema is `hpcworker profile schema`; `hpcworker profile validate` must pass. A field the file
+   carries that the installed version does not know (written by an older or a newer release) is
+   not an error: `validate` names it once (`ok: ...; ignored 1 field(s) this version does not know: ...`)
+   and every command leaves it out, so a `profile.json` already on a cluster keeps working after an
+   upgrade. `profile set` still refuses to add a field the schema does not name.
 2. `hpcworker probe`, then set `egress.class` (and `proxy_env`), `tmpdir_is_node_local`, `runtime_bin`
    or `runtime_module` from `probe.json`.
 3. An image: `jobs/build_image.sbatch` builds a SIF from `docker://node:22-bookworm` with Claude Code

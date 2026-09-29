@@ -23,7 +23,7 @@
 # directories under the state directory and a job's own node-local temp; the one subcommand that
 # replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
 set -uo pipefail
-VERSION=2
+VERSION=3
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "$0")
 SRC_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)

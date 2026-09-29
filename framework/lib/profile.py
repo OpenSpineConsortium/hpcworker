@@ -7,6 +7,11 @@ know about a cluster. It is seeded by hand (profiles/<site>.json) or by
 is used, and only syntax that Python 3.6 accepts: the login node this was
 written against runs CentOS 7, whose system python3 is 3.6.
 
+A field the file carries that this version's SCHEMA does not name (written by an
+older or a newer release) is ignored and named once in the validate and render
+output; it is never an error, so a profile.json already on a cluster keeps
+working across releases. `set` still refuses to add such a field.
+
 Command line (used by bin/hpcworker; nothing here runs a container or talks to
 a scheduler):
     profile.py validate <profile>
@@ -46,7 +51,6 @@ def framework_version():
 SCHEMA = [
     ("schema_version", int, True, SCHEMA_VERSION, "profile schema version (integer)"),
     ("site", str, True, None, "short site id used in session names, e.g. wayne"),
-    ("email_domain", str, False, "", "the institution's e-mail domain (a site licence names it; the panel binds a domain key to it)"),
     ("display_name", str, False, "", "the university's name for messages"),
     ("scheduler", ("slurm", "pbs", "lsf", "sge", "htcondor"), True, None, "scheduler family"),
     ("submit_host", str, False, "", "login node the scheduler client runs on"),
@@ -132,14 +136,33 @@ def _type_ok(typ, value):
     return isinstance(value, typ)
 
 
+def known_fields():
+    return set(key for key, _typ, _req, _default, _desc in SCHEMA)
+
+
+def unknown_fields(prof):
+    """Top-level fields this version's schema does not name, in file order. A profile written by
+    another release (an older one that still carried a field since dropped, or a newer one) is
+    not an error: the field is ignored and reported once, and everything else works."""
+    if not isinstance(prof, dict):
+        return []
+    known = known_fields()
+    return [key for key in prof if key not in known]
+
+
+def unknown_note(prof):
+    """One clause for a message, or '' when every field is known."""
+    unk = unknown_fields(prof)
+    return "ignored %d field(s) this version does not know: %s" % (len(unk), ", ".join(unk)) if unk else ""
+
+
 def validate(prof):
-    """Return a list of problems (empty when the profile is usable)."""
+    """Return a list of problems (empty when the profile is usable). A field the schema does not
+    name is not a problem (see unknown_fields); a wrong type or a missing required field is."""
     errs = []
     if not isinstance(prof, dict):
         return ["profile is not a JSON object"]
-    known = set()
     for key, typ, required, _default, _desc in SCHEMA:
-        known.add(key)
         if key not in prof:
             if required:
                 errs.append("missing required field: %s" % key)
@@ -147,9 +170,6 @@ def validate(prof):
         if not _type_ok(typ, prof[key]):
             want = "/".join(typ) if isinstance(typ, tuple) else (typ if isinstance(typ, str) else typ.__name__)
             errs.append("field %s: expected %s, got %r" % (key, want, prof[key]))
-    for key in prof:
-        if key not in known:
-            errs.append("unknown field: %s" % key)
     img = prof.get("image_store")
     if isinstance(img, dict):
         if img.get("type") not in IMAGE_TYPES:
@@ -250,8 +270,9 @@ def shellenv(prof):
     """P_<key>=<value> lines a bash script can eval. Lists become
     space-separated strings; dicts flatten to P_<key>_<sub>. Values are
     shell-quoted; $HOME/$USER are expanded here so bash never evals a profile
-    string."""
+    string. Fields this version does not know are left out."""
     lines = []
+    known = known_fields()
 
     def emit(name, val):
         # a nested key such as egress.measured."api.anthropic.com" must still be a bash name
@@ -267,6 +288,8 @@ def shellenv(prof):
         lines.append("P_%s=%s" % (name, shlex.quote(val)))
 
     for key, val in prof.items():
+        if key not in known:
+            continue
         if isinstance(val, dict):
             for sub, sv in val.items():
                 if isinstance(sv, dict):
@@ -441,7 +464,7 @@ def mapping(prof, overrides=None):
         "AUTH_EVERY_S": str(o.get("AUTH_EVERY_S", 300)),
         # how often a job waiting in need_login asks `claude auth status` again (the panel signs in, then starts or waits)
         "LOGIN_RECHECK_S": str(o.get("LOGIN_RECHECK_S", 60)),
-        "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 4 * 3600)),
+        "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 7 * 24 * 3600)),
         "HPCW_HOME": hpcw_home,
     }
     m["HEADER"] = header_lines(prof, m)
@@ -589,6 +612,8 @@ def main(argv):
         if errs:
             sys.stderr.write("profile invalid:\n  " + "\n  ".join(errs) + "\n")
             return 1
+        if unknown_fields(prof):
+            sys.stderr.write("profile: %s\n" % unknown_note(prof))
         sys.stdout.write(render(tpl, mapping(prof, _kv_args(argv[4:]))))
         return 0
     path = argv[2] if len(argv) > 2 else None
@@ -600,7 +625,8 @@ def main(argv):
         for e in errs:
             print("ERROR: " + e)
         if not errs:
-            print("ok: %s (%s, %s)" % (prof.get("site"), prof.get("scheduler"), prof.get("runtime")))
+            note = unknown_note(prof)
+            print("ok: %s (%s, %s)%s" % (prof.get("site"), prof.get("scheduler"), prof.get("runtime"), "; " + note if note else ""))
         return 1 if errs else 0
     if cmd == "get":
         v = get(prof, argv[3])
@@ -626,6 +652,11 @@ def main(argv):
             val = json.loads(raw)
         except ValueError:
             val = raw
+        # a field already in the file that this version does not know is tolerated; adding one is a typo until proven otherwise
+        top = argv[3].split(".")[0]
+        if top not in known_fields():
+            sys.stderr.write("refusing: %s is not a field of this version's profile (hpcworker profile schema lists them)\n" % top)
+            return 1
         set_key(prof, argv[3], val)
         errs = validate(prof)
         if errs:
