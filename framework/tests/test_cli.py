@@ -311,6 +311,40 @@ class GuardedRemove(unittest.TestCase):
 
 
 class InstallAndGuard(unittest.TestCase):
+    def test_install_puts_the_command_on_path_for_terminals(self):
+        # the default install location gets ONE managed block in ~/.bashrc, kept across reinstalls,
+        # appended after what was there; a custom HPCW_HOME (every other test here) never touches it
+        begin = '# >>> hpcworker (managed; "hpcworker install" rewrites this block) >>>'
+        with tempfile.TemporaryDirectory() as td:
+            fake_home = os.path.join(td, "home")
+            os.makedirs(fake_home)
+            rc_path = os.path.join(fake_home, ".bashrc")
+            with open(rc_path, "w") as fh:
+                fh.write("# mine\nexport EDITOR=vi")  # no trailing newline on purpose
+            env = {"HOME": posix(fake_home), "HPCW_HOME": posix(os.path.join(fake_home, ".hpcworker"))}
+            for _ in range(2):
+                rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("managed block in ~/.bashrc", out)
+                with open(rc_path) as fh:
+                    text = fh.read()
+                self.assertEqual(text.count(begin), 1, text)
+                self.assertEqual(text.count("# <<< hpcworker <<<"), 1)
+                self.assertIn('export PATH="$HOME/.hpcworker/bin:$PATH"', text)
+                self.assertTrue(text.startswith("# mine\nexport EDITOR=vi\n"), "what was there is kept, with a newline restored")
+            # the block works: a new shell that reads ~/.bashrc finds the command
+            # (the /c/... spelling on a Windows checkout: a drive letter inside a colon-joined PATH would split)
+            rc, out, _ = bash("HOME='%s'; export HOME; . \"$HOME/.bashrc\"; command -v hpcworker && hpcworker version" % msys(fake_home), env={"HOME": msys(fake_home)})
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.endswith(CURRENT_VERSION), out)
+            # opting out leaves ~/.bashrc alone
+            other = os.path.join(td, "home2")
+            os.makedirs(other)
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne --no-shell-path" % posix(ROOT), env={"HOME": posix(other), "HPCW_HOME": posix(os.path.join(other, ".hpcworker"))})
+            self.assertEqual(rc, 0, err)
+            self.assertFalse(os.path.exists(os.path.join(other, ".bashrc")))
+            self.assertIn("add it to your PATH", out)
+
     def test_install_then_force_refused_under_agent(self):
         with tempfile.TemporaryDirectory() as td:
             home = os.path.join(td, "hpcw")

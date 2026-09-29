@@ -11,6 +11,12 @@ stops that job through your Open OnDemand portal.
 
 ## Install, in one line
 
+`hpcworker install` also puts `~/.hpcworker/bin` on PATH for terminals through one managed block in
+`~/.bashrc` (rewritten in place on every install, never duplicated; `--no-shell-path` leaves the file
+alone, and a custom `HPCW_HOME` only prints the one-line hint). The extension never depends on it: it
+calls the command by its full path. A terminal opened before the install needs
+`export PATH="$HOME/.hpcworker/bin:$PATH"` once.
+
 ```
 git clone <this repository> && bash ashley-bridge/framework/bin/hpcworker install --profile wayne
 ```

@@ -6,6 +6,7 @@
 #
 #   hpcworker install [--profile NAME | --discover] [--force]   copy into ~/.hpcworker (again: refresh or upgrade), write profile.json
 #   hpcworker profile show|path|validate|set KEY VALUE          the site profile
+#   hpcworker install [--profile NAME] [--discover] [--force] [--no-shell-path]   (--no-shell-path: do not touch ~/.bashrc)
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
 #   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain]
@@ -23,7 +24,7 @@
 # directories under the state directory and a job's own node-local temp; the one subcommand that
 # replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
 set -uo pipefail
-VERSION=3
+VERSION=4
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "$0")
 SRC_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
@@ -72,9 +73,34 @@ clean_env_args() { # the environment Claude Code gets inside the container (matc
 }
 
 # ---- install -----------------------------------------------------------------------------------
+# ---- the shell: ~/.hpcworker/bin on PATH for a person at a terminal -----------------------------
+# The extension never needs this (it calls the command by its full path through the portal's shell);
+# a person opening the portal's terminal does. One managed block in ~/.bashrc, rewritten in place and
+# never duplicated, the way Ashley's grid CLI does it. Only for the default install location: a custom
+# HPCW_HOME (or --no-shell-path) gets the one-line hint instead and nothing of theirs is touched.
+SHELL_BLOCK_BEGIN='# >>> hpcworker (managed; "hpcworker install" rewrites this block) >>>'
+SHELL_BLOCK_END='# <<< hpcworker <<<'
+shell_path_block() {
+  local rc="$HOME/.bashrc" tmp pf
+  if [ ! -e "$rc" ]; then : > "$rc" 2>/dev/null || { say "could not create $rc; add the PATH line yourself: export PATH=\"\$HOME/.hpcworker/bin:\$PATH\""; return 0; }; fi
+  [ -w "$rc" ] || { say "$rc is not writable; add the PATH line yourself: export PATH=\"\$HOME/.hpcworker/bin:\$PATH\""; return 0; }
+  tmp=$(mktemp "$HOME/.bashrc.hpcw.XXXXXX") || return 0
+  awk -v b="$SHELL_BLOCK_BEGIN" -v e="$SHELL_BLOCK_END" '$0==b{skip=1;next} $0==e{skip=0;next} !skip{print}' "$rc" > "$tmp"
+  { cat "$tmp"; [ -s "$tmp" ] && [ -n "$(tail -c1 "$tmp")" ] && echo
+    printf '%s\n' "$SHELL_BLOCK_BEGIN" '# The hpcworker command for terminals (hpcworker worker status, hpcworker claude login ...).' \
+      'case ":$PATH:" in *":$HOME/.hpcworker/bin:"*) ;; *) export PATH="$HOME/.hpcworker/bin:$PATH";; esac' "$SHELL_BLOCK_END"; } > "$rc" && rm -f "$tmp"
+  # a login shell that reads only ~/.bash_profile or ~/.profile must be told to read ~/.bashrc
+  for pf in "$HOME/.bash_profile" "$HOME/.profile"; do
+    [ -f "$pf" ] || continue
+    grep -q '\.bashrc' "$pf" || say "note: $pf does not read ~/.bashrc, so login shells will not see the PATH line until it does"
+    break
+  done
+  case ":$PATH:" in *":$HOME/.hpcworker/bin:"*) ;; *) say "PATH: ~/.hpcworker/bin is added by a managed block in ~/.bashrc; new terminals have it, this one needs: export PATH=\"\$HOME/.hpcworker/bin:\$PATH\"";; esac
+}
+
 cmd_install() {
-  local name="" discover=0 force=0
-  while [ $# -gt 0 ]; do case "$1" in --profile) name="$2"; shift 2;; --discover) discover=1; shift;; --force) force=1; shift;; *) die "install: unknown option $1";; esac; done
+  local name="" discover=0 force=0 shellpath=1
+  while [ $# -gt 0 ]; do case "$1" in --profile) name="$2"; shift 2;; --discover) discover=1; shift;; --force) force=1; shift;; --no-shell-path) shellpath=0; shift;; *) die "install: unknown option $1";; esac; done
   # --force replaces profile.json, a file of yours: only for a person at a terminal, and only when a profile is in the way
   if [ $force = 1 ] && [ -s "$PROFILE" ]; then refuse_if_agent "install --force"; fi
   # the copy already there, if any: install runs again over it (the same version refreshes the
@@ -104,7 +130,8 @@ cmd_install() {
   elif [ "$old" = "$VERSION" ]; then say "hpcworker $VERSION at $HPCW_HOME: files refreshed (same version)"
   elif [[ "$old" =~ ^[0-9]+$ ]] && [ "$old" -gt "$VERSION" ]; then say "replaced hpcworker $old with $VERSION at $HPCW_HOME (this checkout is the older one)"
   else say "upgraded $old -> $VERSION at $HPCW_HOME"; fi
-  case ":$PATH:" in *":$HPCW_HOME/bin:"*) ;; *) say "add it to your PATH:  export PATH=\"\$HOME/.hpcworker/bin:\$PATH\"";; esac
+  if [ $shellpath = 1 ] && [ "$(cd "$HPCW_HOME" 2>/dev/null && pwd -P)" = "$(cd "$HOME/.hpcworker" 2>/dev/null && pwd -P)" ]; then shell_path_block
+  else case ":$PATH:" in *":$HPCW_HOME/bin:"*) ;; *) say "add it to your PATH:  export PATH=\"$HPCW_HOME/bin:\$PATH\"";; esac; fi
   say "next: hpcworker diag, then hpcworker probe, then hpcworker claude login (once, it covers the Remote Control question too), then hpcworker worker start"
 }
 
