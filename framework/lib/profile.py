@@ -46,6 +46,7 @@ def framework_version():
 SCHEMA = [
     ("schema_version", int, True, SCHEMA_VERSION, "profile schema version (integer)"),
     ("site", str, True, None, "short site id used in session names, e.g. wayne"),
+    ("email_domain", str, False, "", "the institution's e-mail domain (a site licence names it; the panel binds a domain key to it)"),
     ("display_name", str, False, "", "the university's name for messages"),
     ("scheduler", ("slurm", "pbs", "lsf", "sge", "htcondor"), True, None, "scheduler family"),
     ("submit_host", str, False, "", "login node the scheduler client runs on"),
