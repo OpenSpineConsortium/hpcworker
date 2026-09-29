@@ -1,0 +1,15 @@
+{
+    "timestamp":1759130000,
+    "pbs_version":"2022.1.3",
+    "pbs_server":"pbsserver01",
+    "Jobs":{
+        "7890123.pbsserver01":{
+            "Job_Name":"hpcw_worker",
+            "job_state":"F",
+            "queue":"workq",
+            "exec_host":"cn042/0*2",
+            "Exit_status":0,
+            "obittime":"Tue Sep 29 04:01:20 2026"
+        }
+    }
+}

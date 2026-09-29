@@ -1,0 +1,379 @@
+#!/bin/bash
+# hpcworker: your own Claude Code, as a batch job on your university's cluster, reachable from
+# claude.ai/code and the Claude app through Claude Code's Remote Control. This is the one command;
+# it lives at ~/.hpcworker/bin/hpcworker and runs on the login node with bash, coreutils and the
+# system python3 only. Nothing heavy runs here: the container and Claude Code run inside jobs.
+#
+#   hpcworker install [--profile NAME | --discover] [--force]   copy into ~/.hpcworker, write profile.json
+#   hpcworker profile show|path|validate|set KEY VALUE          the site profile
+#   hpcworker discover [--save]                                  phase-1 discovery on the login node (< 1 s CPU)
+#   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] five-minute probe job; writes probe.json
+#   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K]
+#   hpcworker worker stop|status|list|log [--name N] [--json] [--lines N]
+#   hpcworker claude login|consent|status [--alloc]              your Claude sign-in (Claude Code's own flow)
+#   hpcworker diag [--json]                                      one line per check
+#   hpcworker version
+#
+# Rules this command keeps: it never reads, copies or prints a Claude credential (Claude Code keeps
+# its own; the framework reads only `claude auth status`); no token ever goes on a command line or
+# into a job file; the login node gets one sbatch/squeue/scancel per action and never a loop; state
+# is read from files the job writes. Never use the word "provenance". Versions are integers.
+set -uo pipefail
+VERSION=1
+HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
+SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "$0")
+SRC_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
+# run from the installed copy or from a checkout: lib, jobs and profiles come from where this file lives
+LIB="$SRC_ROOT/lib"; JOBS="$SRC_ROOT/jobs"; PROFILES="$SRC_ROOT/profiles"
+PROFILE="${HPCW_PROFILE:-$HPCW_HOME/profile.json}"
+PY=""; for p in python3 /usr/bin/python3 /usr/libexec/platform-python; do command -v "$p" >/dev/null 2>&1 && { PY=$(command -v "$p"); break; }; done
+die() { echo "hpcworker: $*" >&2; exit 1; }
+say() { echo "$*"; }
+need_py() { [ -n "$PY" ] || die "python3 is needed on this node (the system one is enough; nothing is installed)"; }
+prof_py() { need_py; "$PY" "$LIB/profile.py" "$@"; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | tr -d '\000-\010\013-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | tr '\n' ' ')"; }
+in_job() { [ -n "${SLURM_JOB_ID:-${PBS_JOBID:-${LSB_JOBID:-}}}" ]; }
+load_profile() {
+  [ -s "$PROFILE" ] || die "no profile at $PROFILE: run 'hpcworker install --profile wayne' (or 'hpcworker install --discover')"
+  local env; env=$(prof_py shellenv "$PROFILE") || die "profile $PROFILE unreadable"
+  eval "$env"
+  ADAPTER="$LIB/adapters/${P_scheduler}.sh"; [ -s "$ADAPTER" ] || die "no adapter for scheduler '$P_scheduler' (have: $(ls "$LIB/adapters" | sed 's/\.sh$//' | grep -v common | tr '\n' ' '))"
+  # shellcheck disable=SC1090
+  source "$ADAPTER"
+  STATE_DIR="$P_shared_state_dir"; WORKSPACES="$STATE_DIR/workspaces"
+  CCD="$P_claude_config_dir"
+  export RUNTIME="$P_runtime" RUNTIME_BIN="$P_runtime_bin" RUNTIME_MODULE="$P_runtime_module"
+  export HPCW_NODE_TMP_PATTERN="$P_node_tmp" HPCW_NODE_TMP_VAR="$P_node_tmp_var" HPCW_TMPDIR_IS_NODE_LOCAL="$([ "$P_tmpdir_is_node_local" = true ] && echo 1 || echo 0)"
+}
+# "heavy" = a container or Claude Code itself: only inside a job, never on the login node
+refuse_heavy() { in_job || die "$1 would run a container or Claude Code on this node ($(hostname -s)); that is not allowed on a login node, so hpcworker does it inside a job for you: $2"; }
+consent_markers() { printf '%s\n' "$HPCW_HOME/consent"; local m; for m in $P_consent_markers; do printf '%s\n' "$m"; done; }
+consent_given() { local m; while read -r m; do [ -n "$m" ] && [ -e "$m" ] && return 0; done < <(consent_markers); return 1; }
+clean_env_args() { # the environment Claude Code gets inside the container (matches worker.sbatch.tpl)
+  printf '%s\n' env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR -u CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR \
+    -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC -u DISABLE_GROWTHBOOK HOME="$HOME" CLAUDE_CONFIG_DIR="$CCD" DISABLE_AUTOUPDATER=1 TERM="${TERM:-xterm-256color}" BROWSER=/bin/false TMPDIR=/tmp
+  [ "$P_xdg_runtime_fix" = true ] && printf '%s\n' XDG_RUNTIME_DIR="$P_ipc_dir/$USER/xdg"
+}
+
+# ---- install -----------------------------------------------------------------------------------
+cmd_install() {
+  local name="" discover=0 force=0
+  while [ $# -gt 0 ]; do case "$1" in --profile) name="$2"; shift 2;; --discover) discover=1; shift;; --force) force=1; shift;; *) die "install: unknown option $1";; esac; done
+  mkdir -p "$HPCW_HOME"/{bin,lib/adapters,jobs,profiles,log} || die "cannot create $HPCW_HOME"
+  chmod 700 "$HPCW_HOME"
+  if [ "$SRC_ROOT" != "$HPCW_HOME" ]; then
+    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
+      && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
+    [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
+  fi
+  # files uploaded from a Windows checkout may carry CR line endings, which break bash and sbatch
+  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/profile.py "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
+  chmod +x "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/jobs/*.sbatch 2>/dev/null
+  LIB="$HPCW_HOME/lib"; JOBS="$HPCW_HOME/jobs"; PROFILES="$HPCW_HOME/profiles"
+  if [ -n "$name" ]; then
+    [ -s "$PROFILES/$name.json" ] || die "no profile named '$name' (have: $(ls "$PROFILES" | sed 's/\.json$//' | tr '\n' ' '))"
+    if [ -s "$PROFILE" ] && [ $force = 0 ]; then say "profile.json exists; kept (use --force to replace it with '$name')"; else cp "$PROFILES/$name.json" "$PROFILE"; say "profile.json written from '$name'"; fi
+  elif [ $discover = 1 ]; then
+    cmd_discover > "$HPCW_HOME/discover.json" || die "discovery failed"
+    if [ -s "$PROFILE" ] && [ $force = 0 ]; then say "profile.json exists; kept (use --force to replace it with a discovered seed)"
+    else prof_py from-discovery "$HPCW_HOME/discover.json" "${HPCW_SITE:-$(hostname -s | tr -cd 'a-z0-9-')}" > "$PROFILE" || die "could not seed a profile from discovery"; say "profile.json seeded from discovery: edit partition_cpu, image_store, claude_bin, then run hpcworker probe"; fi
+  fi
+  [ -s "$PROFILE" ] && { prof_py validate "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
+  say "installed hpcworker $VERSION at $HPCW_HOME"
+  case ":$PATH:" in *":$HPCW_HOME/bin:"*) ;; *) say "add it to your PATH:  export PATH=\"\$HOME/.hpcworker/bin:\$PATH\"";; esac
+  say "next: hpcworker diag, then hpcworker probe, then hpcworker claude login (once), hpcworker claude consent (once), hpcworker worker start"
+}
+
+# ---- profile -----------------------------------------------------------------------------------
+cmd_profile() {
+  local sub="${1:-show}"; shift || true
+  case "$sub" in
+    show) [ -s "$PROFILE" ] || die "no profile at $PROFILE"; prof_py show "$PROFILE";;
+    path) echo "$PROFILE";;
+    validate) [ -s "$PROFILE" ] || die "no profile at $PROFILE"; prof_py validate "$PROFILE";;
+    set) [ $# -ge 2 ] || die "profile set KEY VALUE"; prof_py set "$PROFILE" "$1" "$2";;
+    schema) prof_py schema;;
+    *) die "profile: show|path|validate|set KEY VALUE|schema";;
+  esac
+}
+
+# ---- discover: phase 1, on the login node, under a second of CPU, no container, no network ----------
+cmd_discover() {
+  local save=0; [ "${1:-}" = "--save" ] && save=1
+  # shellcheck disable=SC1090
+  source "$LIB/adapters/common.sh"
+  local fam; fam=$(hpcw_detect_scheduler || true)
+  local out; out=$( {
+    printf '{"version":%s,"when":%s,"host":%s,"user":%s,' "$VERSION" "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
+    printf '"os":%s,"glibc":%s,' "$(json_str "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")")" "$(json_str "$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')")"
+    printf '"scheduler":{"family":%s,"bins":{' "$(json_str "$fam")"
+    local first=1 c p; for c in sbatch squeue scancel sacct sinfo srun qsub qstat qdel bsub bjobs bkill condor_submit; do p=$(command -v "$c" 2>/dev/null) || continue; [ $first = 1 ] || printf ','; first=0; printf '"%s":%s' "$c" "$(json_str "$p")"; done
+    printf '}},"runtime":%s,' "$(hpcw_detect_runtime)"
+    printf '"partitions":['; first=1
+    if [ "$fam" = slurm ]; then
+      while IFS='|' read -r name tl av; do [ -n "$name" ] || continue; local def=false; case "$name" in *\*) def=true; name=${name%\*};; esac; [ $first = 1 ] || printf ','; first=0; printf '{"name":%s,"timelimit":%s,"avail":%s,"default":%s}' "$(json_str "$name")" "$(json_str "$tl")" "$(json_str "$av")" "$def"; done < <(timeout 10 sinfo -h -o '%P|%l|%a' 2>/dev/null | sort -u)
+    fi
+    printf '],"qos":%s,' "$(json_str "$([ "$fam" = slurm ] && command -v sacctmgr >/dev/null 2>&1 && timeout 10 sacctmgr -n -P show assoc where user="$USER" format=qos 2>/dev/null | tr ',' '\n' | sort -u | tr '\n' ' ')")"
+    printf '"env":{"TMPDIR":%s,"SLURM_TMPDIR":%s,"L_SCRATCH":%s,"https_proxy":%s,"no_proxy":%s},' "$(json_str "${TMPDIR:-}")" "$(json_str "${SLURM_TMPDIR:-}")" "$(json_str "${L_SCRATCH:-}")" "$(json_str "$(printf '%s' "${https_proxy:-${HTTPS_PROXY:-}}" | sed 's#//[^/@]*@#//#')")" "$(json_str "${no_proxy:-${NO_PROXY:-}}")"
+    printf '"tools":{"tmux":%s,"script":%s,"python3":%s,"curl":%s},' "$(json_str "$(command -v tmux 2>/dev/null)")" "$(json_str "$(command -v script 2>/dev/null)")" "$(json_str "$PY")" "$(json_str "$(command -v curl 2>/dev/null)")"
+    printf '"home_fs":%s,"home_dev":%s,"process_count":%s}\n' "$(json_str "$(stat -f -c %T "$HOME" 2>/dev/null)")" "$(json_str "$(df -P "$HOME" 2>/dev/null | awk 'NR==2{print $1}')")" "$(ps -u "$USER" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  } )
+  printf '%s\n' "$out"
+  [ $save = 1 ] && { printf '%s\n' "$out" > "$HPCW_HOME/discover.json"; say "saved $HPCW_HOME/discover.json" >&2; }
+  return 0
+}
+
+# ---- probe: one five-minute job; results in a file, read from a file ---------------------------------
+probe_env() { # what probe.sbatch needs, as shell assignments (no secrets; paths only)
+  printf 'HPCW_HOME=%q\nRUNTIME=%q\nRUNTIME_BIN=%q\nRUNTIME_MODULE=%q\nIMAGE=%q\nIMAGE_TYPE=%q\nCLAUDE_BIN=%q\nBINDS=%q\nCLAUDE_CONFIG_DIR=%q\nCONSENT_MARKERS=%q\nHPCW_NODE_TMP_PATTERN=%q\nHPCW_NODE_TMP_VAR=%q\nHPCW_TMPDIR_IS_NODE_LOCAL=%q\nIPC_DIR=%q\nWORKSPACE=%q\n' \
+    "$HPCW_HOME" "$P_runtime" "$P_runtime_bin" "$P_runtime_module" "$P_image_store_path" "$P_image_store_type" "$P_claude_bin" "$(bind_args)" "$CCD" "$(consent_markers | paste -sd: -)" \
+    "$P_node_tmp" "$P_node_tmp_var" "$([ "$P_tmpdir_is_node_local" = true ] && echo 1 || echo 0)" "$P_ipc_dir" "$WORKSPACES/probe"
+}
+bind_args() { local b out=""; for b in $P_binds; do out="$out${out:+ }-B $b"; done; printf '%s' "$out"; }
+cmd_probe() {
+  load_profile
+  local show=0 wait_min=0 part="$P_partition_cpu" qos="$P_qos_cpu" time="00:05:00"
+  while [ $# -gt 0 ]; do case "$1" in --show) show=1; shift;; --wait) wait_min="$2"; shift 2;; --partition) part="$2"; shift 2;; --qos) qos="$2"; shift 2;; --time) time="$2"; shift 2;; *) die "probe: unknown option $1";; esac; done
+  local pd="$STATE_DIR/probe"
+  if [ $show = 1 ]; then [ -s "$pd/probe.json" ] || die "no probe result yet at $pd/probe.json (submit one with: hpcworker probe)"; if [ -n "$PY" ]; then "$PY" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=1, sort_keys=True))' "$pd/probe.json"; else cat "$pd/probe.json"; fi; return 0; fi
+  mkdir -p "$pd" "$WORKSPACES/probe" || die "cannot create $pd (is shared_state_dir right?)"
+  probe_env > "$pd/probe.env"
+  rm -f "$pd/probe.json"
+  local id; id=$(cd "$pd" && adapter_submit "$JOBS/probe.sbatch" -J hpcw_probe -p "$part" ${qos:+-q "$qos"} -t "$time" -D "$pd" --export=ALL,HPCW_PROBE_DIR="$pd" 2>&1) || die "the scheduler refused the probe: $id"
+  echo "$id" > "$pd/job.id"
+  say "probe job $id submitted ($part${qos:+/$qos}, $time). It writes $pd/probe.json; read it with: hpcworker probe --show"
+  say "(the file appears when the job has run; do not poll the scheduler: 'hpcworker probe --wait 15' checks the file once a minute)"
+  if [ "$wait_min" -gt 0 ] 2>/dev/null; then
+    local i; for ((i = 0; i < wait_min; i++)); do [ -s "$pd/probe.json" ] && break; sleep 60; done
+    [ -s "$pd/probe.json" ] && cmd_probe --show || say "no probe.json after $wait_min min; the job may still be queued (hpcworker worker list shows nothing for it; check $pd/probe_$id.out later)"
+  fi
+}
+
+# ---- worker: start/stop submit and cancel once; status/list/log read files ---------------------------
+run_dir() { echo "$STATE_DIR/$1"; }
+read_field() { # FILE KEY -> string value (python-free; strings and simple scalars)
+  [ -s "$1" ] || return 1
+  tr -d '\n' < "$1" | grep -o "\"$2\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$2\": *//" -e 's/^"//' -e 's/"$//'
+}
+job_state_once() { # one scheduler call, never in a loop: STATE|NODE|RAW or UNKNOWN
+  local id="$1"; [ -n "$id" ] || { echo "UNKNOWN||no job"; return 0; }
+  adapter_status "$id" 2>/dev/null || echo "UNKNOWN||"
+}
+cmd_worker() {
+  load_profile
+  local sub="${1:-list}"; shift || true
+  local name="worker" hours="$P_worker_defaults_hours" cpus="$P_worker_defaults_cpus" mem="$P_worker_defaults_mem" part="" qos="" pm="$P_worker_defaults_permission_mode" cap="$P_worker_defaults_capacity" as_json=0 lines=60 requeue=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --name) name="$2"; shift 2;; --hours) hours="$2"; shift 2;; --cpus) cpus="$2"; shift 2;; --mem) mem="$2"; shift 2;;
+    --partition) part="$2"; shift 2;; --qos) qos="$2"; shift 2;; --permission-mode) pm="$2"; shift 2;; --capacity) cap="$2"; shift 2;;
+    --requeue) requeue=1; shift;; --no-requeue) requeue=0; shift;; --json) as_json=1; shift;; --lines) lines="$2"; shift 2;; *) die "worker: unknown option $1";; esac; done
+  [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "worker name must be letters, digits, _ or -"
+  local rd; rd=$(run_dir "$name")
+  case "$sub" in
+    start)
+      [[ "$hours" =~ ^[0-9]+$ ]] || die "--hours must be an integer"
+      mkdir -p "$rd" "$WORKSPACES/$name" || die "cannot create $rd (is shared_state_dir right and writable?)"
+      chmod 700 "$rd" 2>/dev/null
+      local jid st; jid=$(cat "$rd/job.id" 2>/dev/null || true)
+      if [ -n "$jid" ]; then st=$(job_state_once "$jid"); case "${st%%|*}" in PENDING|RUNNING) say "worker $name already has job $jid (${st%%|*}${st#*|:+ on }$(echo "$st" | cut -d'|' -f2)); nothing submitted"; return 0;; esac; fi
+      rm -f "$rd/stop" "$rd/stop.done"
+      # first-time notice, in plain words (the report's disclosure text, shortened for a terminal)
+      if [ ! -e "$rd/.notice-shown" ]; then
+        cat <<'EOT'
+Before your first worker starts, know this: files the worker reads and every command's output go to
+Anthropic; while you are connected through claude.ai or the app the transcript is also stored on
+Anthropic's servers (a personal plan keeps it 30 days, or five years if you left model training on);
+no BAA covers a personal plan, so keep patient data, FERPA records, IRB data and export-controlled
+material out of the worker's directory; and Remote Control draws from your plan's shared usage limit.
+EOT
+        touch "$rd/.notice-shown"
+      fi
+      consent_given || say "note: you have not recorded your Remote Control answer yet (hpcworker claude consent); the job will start and wait for it"
+      local kv=(RUN="$name" HOURS="$hours" CPUS="$cpus" MEM="$mem" PERMISSION_MODE="$pm" CAPACITY="$cap" HPCW_HOME="$HPCW_HOME")
+      [ -n "$part" ] && kv+=(PARTITION="$part"); [ -n "$qos" ] && kv+=(QOS="$qos"); [ -n "$requeue" ] && kv+=(REQUEUE="$requeue")
+      prof_py render "$JOBS/worker.sbatch.tpl" "$PROFILE" "${kv[@]}" > "$rd/job.sbatch.part" || die "could not render the job (see the message above)"
+      mv -f "$rd/job.sbatch.part" "$rd/job.sbatch"
+      printf '%s\n' "${kv[@]}" > "$rd/params"
+      local out; out=$(cd "$rd" && adapter_submit "$rd/job.sbatch" -D "$rd" 2>&1) || die "the scheduler refused the job: $out"
+      echo "$out" > "$rd/job.id"; rm -f "$rd/node"
+      say "worker $name submitted as job $out ($(grep -m1 -o -- '--partition=[^ ]*' "$rd/job.sbatch" | cut -d= -f2)${qos:+/$qos}, ${hours} h). When it runs, open claude.ai/code (or Code in the Claude app) and find the session named $P_site-$out."
+      say "watch it with: hpcworker worker status --name $name   (reads $rd/status.json; no scheduler polling)";;
+    stop)
+      [ -d "$rd" ] || die "no worker named $name"
+      rm -f "$rd/stop.done"; touch "$rd/stop"
+      local jid; jid=$(cat "$rd/job.id" 2>/dev/null || true)
+      # the job notices the stop file within a few seconds and leaves on its own (Remote Control
+      # deregisters); one scancel afterwards frees the allocation if it did not
+      local i; for i in 1 2 3; do [ -e "$rd/stop.done" ] && break; sleep 5; done
+      [ -n "$jid" ] && adapter_cancel "$jid"
+      say "worker $name: stopped ($([ -e "$rd/stop.done" ] && echo "the job left on its own" || echo "job ${jid:-none} cancelled"))";;
+    status)
+      [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
+      local sj="$rd/status.json" cj="$rd/connection.json"
+      if [ $as_json = 1 ]; then printf '{"run":%s,"job":%s,"status":%s,"connection":%s}\n' "$(json_str "$name")" "$(json_str "$(cat "$rd/job.id" 2>/dev/null)")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)"; return 0; fi
+      local jid; jid=$(cat "$rd/job.id" 2>/dev/null || true)
+      if [ ! -s "$sj" ]; then say "worker $name: job ${jid:-none} submitted, no status yet (queued, or not started); slurm output: $(ls -t "$rd"/slurm_*.out 2>/dev/null | head -1)"; return 0; fi
+      local st upd age; st=$(read_field "$sj" state); upd=$(read_field "$sj" updated_at)
+      age=$(( $(date +%s) - $(stat -c %Y "$sj") ))
+      say "worker $name: $st (job $(read_field "$sj" job) on $(read_field "$sj" node); heartbeat ${age}s ago at $upd)"
+      say "  $(read_field "$sj" message)"
+      say "  session: $(read_field "$sj" session_name)${cj:+ }$( [ -s "$cj" ] && read_field "$cj" session_url)"
+      say "  signed in: $(tr -d '\n' < "$sj" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false') $(tr -d '\n' < "$sj" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4); consent recorded: $(read_field "$sj" consent); restarts: $(read_field "$sj" restarts)"
+      [ "$age" -gt 120 ] && case "$st" in stopped|preempted) ;; *) say "  (no heartbeat for ${age}s: the job may have ended; hpcworker worker start --name $name starts it again)";; esac
+      return 0;;
+    list)
+      local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/job.id" ] || continue; any=1; local n; n=$(basename "$d"); [ "$n" = probe ] && continue
+        local sj="$d/status.json"; if [ -s "$sj" ]; then printf '%-16s job %-10s %-12s %s (%ss ago)\n' "$n" "$(cat "$d/job.id")" "$(read_field "$sj" state)" "$(read_field "$sj" node)" "$(( $(date +%s) - $(stat -c %Y "$sj") ))"; else printf '%-16s job %-10s %s\n' "$n" "$(cat "$d/job.id")" "no status yet"; fi; done
+      [ $any = 1 ] || say "no workers yet (hpcworker worker start)";;
+    log)
+      [ -d "$rd" ] || die "no worker named $name"
+      say "--- rc.log (Claude Code's terminal, last $lines lines, codes stripped)"
+      [ -s "$rd/rc.log" ] && tail -c 20000 "$rd/rc.log" | tr -d '\000' | sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g' | grep -v '^[[:space:]]*$' | tail -n "$lines"
+      say "--- job output"; ls -t "$rd"/slurm_*.out "$rd"/pbs.out "$rd"/lsf_*.out 2>/dev/null | head -1 | xargs -r tail -n 30;;
+    *) die "worker: start|stop|status|list|log";;
+  esac
+}
+
+# ---- claude: the student's own sign-in and consent, through Claude Code's own flow ---------------------
+in_job_exec() { # inside an allocation: run claude (or any command) inside the image in the worker workspace
+  load_profile
+  refuse_heavy "claude" "hpcworker claude login|consent|status"
+  # shellcheck disable=SC1090
+  source "$LIB/adapters/common.sh"
+  local ws="$WORKSPACES/${HPCW_WS:-worker}"; mkdir -p "$ws" "$CCD"; chmod 700 "$CCD" 2>/dev/null
+  export HPCW_BINDS; HPCW_BINDS=$(bind_args)
+  # node-local temp for this short allocation, removed when it ends
+  HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP; trap 'rm -rf "$HPCW_NODE_TMP"' EXIT
+  [ "$P_xdg_runtime_fix" = true ] && { mkdir -p "$P_ipc_dir/$USER/xdg" && chmod 700 "$P_ipc_dir/$USER/xdg"; }
+  local -a ce; mapfile -t ce < <(clean_env_args)
+  # first-run settings so Claude Code asks no onboarding questions in the terminal (settings, not credentials)
+  # shellcheck disable=SC2016
+  local seed='const fs=require("fs"),p=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};j.hasCompletedOnboarding=true;j.theme=j.theme||"dark";j.projects=j.projects||{};j.projects[process.cwd()]=Object.assign({},j.projects[process.cwd()]||{},{hasTrustDialogAccepted:true});fs.writeFileSync(p+".part",JSON.stringify(j,null,1),{mode:0o600});fs.renameSync(p+".part",p);'
+  hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c 'cd "$1" && node -e "$2" && exec "$3" "${@:4}"' _ "$ws" "$seed" "$P_claude_bin" "$@"
+}
+cmd_claude() {
+  load_profile
+  local sub="${1:-status}"; shift || true
+  local self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
+  case "$sub" in
+    login)
+      cat <<'EOT'
+Sign in to Claude on the cluster.
+
+Claude Code itself does the sign-in, in your own account on a compute node, and keeps its
+credential in its own folder; hpcworker never sees, copies or stores it. Claude will print a link:
+open it in your browser, sign in with your own Claude account (Pro or Max), press Authorize, then
+paste the code the page shows back into this terminal. Use `claude auth login` only: a long-lived
+token from the other command cannot host Remote Control.
+EOT
+      say "(asking the scheduler for a short session on a compute node: $P_partition_cpu${P_qos_cpu:+/$P_qos_cpu}, 30 min; this can take a minute)"
+      adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:30:00 hpcw_claude 2G -- "$self" _exec auth login
+      say; say "Done. Next, once: hpcworker claude consent";;
+    consent)
+      if consent_given; then say "your Remote Control answer is already recorded ($(consent_markers | while read -r m; do [ -e "$m" ] && echo "$m"; done | head -1)); nothing to do"; return 0; fi
+      cat <<'EOT'
+Remote Control: Claude Code asks once whether to enable it. Answer that question yourself here.
+
+When it asks "Enable Remote Control? (y/n)" type y; if it asks to trust the folder, type y. When
+you see the session link, press Ctrl+C to leave. From then on your worker hosts Remote Control for
+you. While connected, the session transcript (your messages, Claude's answers, tool activity) is
+stored on Anthropic's servers: keep confidential data out of these sessions.
+EOT
+      say "(asking the scheduler for a short session on a compute node; this can take a minute)"
+      adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:30:00 hpcw_claude 2G -- "$self" _exec remote-control || true
+      local a; printf '\nDid you answer y to "Enable Remote Control?" [y/N] '; read -r a
+      if [[ "$a" =~ ^[Yy] ]]; then date -u +%FT%TZ > "$HPCW_HOME/consent"; say "recorded in $HPCW_HOME/consent: your workers may now host Remote Control"; else say "not recorded; run this again when you want it"; fi;;
+    status)
+      local alloc=0; [ "${1:-}" = "--alloc" ] && alloc=1
+      local present=false; [ -d "$CCD" ] && present=true
+      local consent=false; consent_given && consent=true
+      # the newest worker heartbeat carries Claude Code's own answer; otherwise ask inside a short allocation
+      local best="" bt=0 d m; for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; m=$(stat -c %Y "$d/status.json"); [ "$m" -gt "$bt" ] && { bt=$m; best="$d/status.json"; }; done
+      local age=$(( $(date +%s) - bt ))
+      if [ -n "$best" ] && [ "$age" -lt 900 ] && [ $alloc = 0 ]; then
+        say "sign-in folder present: $present; consent recorded: $consent; a worker said ${age}s ago: $(tr -d '\n' < "$best" | grep -o '"claude_login": *{[^}]*}' | sed 's/^"claude_login": *//')"
+      elif [ $alloc = 1 ] || [ -z "$best" ]; then
+        say "sign-in folder present: $present; consent recorded: $consent; asking Claude Code inside a short allocation..."
+        local out; out=$(adapter_run_short "$P_partition_cpu" "$P_qos_cpu" 00:10:00 hpcw_claude 2G -- "$self" _exec auth status 2>/dev/null)
+        say "claude auth status: loggedIn=$(printf '%s' "$out" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false') $(printf '%s' "$out" | grep -o '"subscriptionType": *"[^"]*"' | head -1) $(printf '%s' "$out" | grep -o '"email": *"[^"]*"' | head -1)"
+      else say "sign-in folder present: $present; consent recorded: $consent; last worker heartbeat is ${age}s old (hpcworker claude status --alloc asks Claude Code now)"; fi;;
+    *) die "claude: login|consent|status [--alloc]";;
+  esac
+}
+
+# ---- diag: every assumption as one line ------------------------------------------------------------
+DIAG_FIRST=1; DIAG_JSON=0
+emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
+  if [ $DIAG_JSON = 1 ]; then [ $DIAG_FIRST = 1 ] || printf ','; DIAG_FIRST=0; printf '{"id":%s,"ok":%s,"warn":%s,"skip":%s,"detail":%s}' "$(json_str "$1")" "$2" "$3" "$4" "$(json_str "$5")"
+  else local tag=FAIL; [ "$2" = true ] && tag=ok; [ "$3" = true ] && tag=warn; [ "$4" = true ] && tag=skip; printf '%-5s %-24s %s\n' "$tag" "$1" "$5"; fi
+}
+cmd_diag() {
+  [ "${1:-}" = "--json" ] && DIAG_JSON=1
+  [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
+  local miss="" f; for f in bin/hpcworker lib/profile.py lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
+  grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
+  if [ -z "$miss" ]; then emit hpcw.scripts true false false "hpcworker $VERSION in $SRC_ROOT"; else emit hpcw.scripts false false false "missing or damaged:$miss"; fi
+  if [ -n "$PY" ]; then emit hpcw.python3 true false false "$PY ($("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null))"; else emit hpcw.python3 false false false "no python3 on this node; the system package is enough"; fi
+  if [ ! -s "$PROFILE" ]; then emit hpcw.profile false false false "no profile at $PROFILE (hpcworker install --profile NAME or --discover)"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
+  local v; if v=$(prof_py validate "$PROFILE" 2>&1); then emit hpcw.profile true false false "$v"; else emit hpcw.profile false false false "$(echo "$v" | tr '\n' ' ')"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
+  load_profile
+  # shellcheck disable=SC1090
+  source "$LIB/adapters/common.sh"
+  local fam; fam=$(hpcw_detect_scheduler || true)
+  if [ "$fam" = "$P_scheduler" ]; then emit hpcw.scheduler true false false "$fam client present"; else emit hpcw.scheduler false false false "profile says $P_scheduler, this node shows '$fam'"; fi
+  if in_job; then emit hpcw.login-node true true false "running inside job $(hpcw_job_id) (fine for a check; the CLI is meant for the login node)"
+  else local n; n=$(ps -u "$USER" --no-headers 2>/dev/null | wc -l | tr -d ' '); local cap="$P_login_node_rules_max_processes"
+    if [ "$n" -ge "$cap" ]; then emit hpcw.login-node false false false "$n processes of yours on $(hostname -s); the site's cap is $cap"; elif [ "$n" -ge $((cap * 3 / 4)) ]; then emit hpcw.login-node true true false "$n processes of yours on $(hostname -s) (cap $cap)"; else emit hpcw.login-node true false false "$n processes of yours on $(hostname -s) (cap $cap)"; fi; fi
+  if [ "$fam" = slurm ]; then
+    local parts; parts=$(adapter_partitions | cut -d'|' -f1 | sed 's/\*$//' | tr '\n' ' ')
+    local want="$P_partition_cpu $P_partition_cpu_batch $P_partitions_gpu" bad="" p; for p in $want; do case " $parts " in *" $p "*) ;; *) bad="$bad $p";; esac; done
+    if [ -z "$bad" ]; then emit hpcw.partitions true false false "profile partitions exist: $want"; else emit hpcw.partitions false false false "not in sinfo:$bad (have: $parts)"; fi
+    local q; q=$(adapter_my_qos); local qb="" x; for x in $P_qos_cpu $P_qos_batch; do case " $q " in *" $x "*) ;; *) qb="$qb $x";; esac; done
+    if [ -z "$q" ]; then emit hpcw.qos true true false "QoS list not readable (sacctmgr); profile wants $P_qos_cpu/$P_qos_batch"; elif [ -z "$qb" ]; then emit hpcw.qos true false false "QoS available: $q"; else emit hpcw.qos false false false "QoS not on your account:$qb (have: $q)"; fi
+  fi
+  if [ -n "$P_runtime_bin" ] && [ -x "$P_runtime_bin" ]; then emit hpcw.runtime true false false "$P_runtime_bin"
+  elif [ -n "$P_runtime_module" ] && timeout 8 bash -lc "module -t avail 2>&1" 2>/dev/null | grep -q "^$P_runtime_module"; then emit hpcw.runtime true false false "module $P_runtime_module listed (binary not on this node's PATH; the probe checks the compute node)"
+  else emit hpcw.runtime true true false "runtime $P_runtime not visible from here (bin '$P_runtime_bin', module '$P_runtime_module'); login nodes may hide it: the probe decides"; fi
+  if [ "$P_image_store_type" = sandbox ]; then if [ -x "$P_image_store_path/usr/local/bin/node" ]; then emit hpcw.image true false false "sandbox readable: $P_image_store_path"; else emit hpcw.image false false false "sandbox not readable or has no node: $P_image_store_path (build one: jobs/build_image.sbatch, or ask your lead)"; fi
+  else if [ -r "$P_image_store_path" ]; then emit hpcw.image true false false "SIF readable: $P_image_store_path"; else emit hpcw.image false false false "SIF missing: $P_image_store_path (jobs/build_image.sbatch builds it)"; fi; fi
+  if [ -r "$P_claude_bin" ] || [ "${P_claude_bin#/usr/local/bin/}" != "$P_claude_bin" ]; then emit hpcw.claude-bin true false false "$P_claude_bin"; else emit hpcw.claude-bin false false false "not readable from here: $P_claude_bin"; fi
+  if mkdir -p "$STATE_DIR" 2>/dev/null && [ -w "$STATE_DIR" ]; then emit hpcw.state-dir true false false "$STATE_DIR ($(stat -f -c %T "$STATE_DIR" 2>/dev/null))"; else emit hpcw.state-dir false false false "cannot write $STATE_DIR"; fi
+  case "$P_node_tmp" in \$TMPDIR*) [ "$P_tmpdir_is_node_local" = true ] && emit hpcw.node-tmp true false false "node_tmp under \$TMPDIR (profile says it is node-local)" || emit hpcw.node-tmp false false false "node_tmp uses \$TMPDIR but the profile does not trust it";; *) emit hpcw.node-tmp true false false "$P_node_tmp (TMPDIR here is ${TMPDIR:-unset}, which is not trusted)";; esac
+  # the sign-in: presence of Claude Code's folder only; its contents are never read
+  if [ -d "$CCD" ]; then emit hpcw.claude-config-dir true false false "$CCD present (Claude Code's own; not read)"; else emit hpcw.claude-config-dir false false false "no Claude Code folder at $CCD yet: hpcworker claude login"; fi
+  if consent_given; then emit hpcw.consent true false false "Remote Control answer recorded"; else emit hpcw.consent false false false "not recorded yet: hpcworker claude consent (a worker waits for it)"; fi
+  local left; left=$(find /tmp -maxdepth 1 -user "$USER" \( -name 'hpcworker*' -o -name 'rootfs-*' -o -name 'build-temp-*' -o -name 'apptainer*' -o -name 'singularity*' \) 2>/dev/null | head -5 | tr '\n' ' ')
+  if in_job; then emit hpcw.login-tmp true false true "not a login node"; elif [ -z "$left" ]; then emit hpcw.login-tmp true false false "nothing of ours under /tmp on $(hostname -s)"; else emit hpcw.login-tmp false false false "files of yours under /tmp on the login node: $left (remove them; C&IT asks that /tmp here stays free)"; fi
+  local pj="$STATE_DIR/probe/probe.json"
+  if [ -s "$pj" ]; then local eg li; eg=$(read_field "$pj" class); li=$(tr -d '\n' < "$pj" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false')
+    local age=$(( ( $(date +%s) - $(stat -c %Y "$pj") ) / 86400 ))
+    if [ "$eg" = none ]; then emit hpcw.probe false false false "probe ${age}d old: compute nodes cannot reach api.anthropic.com/platform.claude.com; ask your center for an HTTP proxy"
+    else emit hpcw.probe true "$([ "$age" -gt 30 ] && echo true || echo false)" false "probe ${age}d old on $(read_field "$pj" hostname): egress $eg, claude $(read_field "$pj" claude_version), loggedIn=$li, tmux=$(tr -d '\n' < "$pj" | grep -o '"tmux": *{[^}]*}' | grep -o '"present": *\(true\|false\)' | grep -o 'true\|false')"; fi
+  else emit hpcw.probe false true false "no probe yet: hpcworker probe (five minutes on a compute node)"; fi
+  local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
+    local st age; st=$(read_field "$d/status.json" state); age=$(( $(date +%s) - $(stat -c %Y "$d/status.json") ))
+    case "$st" in
+      online) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true false false "online: job $(read_field "$d/status.json" job) on $(read_field "$d/status.json" node), session $(read_field "$d/status.json" session_name)" || emit "hpcw.worker.$n" false false false "last said online ${age}s ago; the job has probably ended (hpcworker worker start --name $n)";;
+      starting|running) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true true false "$st: $(read_field "$d/status.json" message)" || emit "hpcw.worker.$n" false false false "stale ($st, ${age}s): $(read_field "$d/status.json" message)";;
+      need_consent|need_login) emit "hpcw.worker.$n" false false false "$st: $(read_field "$d/status.json" message)";;
+      stopped|preempted) emit "hpcw.worker.$n" true false true "$st ${age}s ago";;
+      *) emit "hpcw.worker.$n" false false false "$st: $(read_field "$d/status.json" message)";;
+    esac; done
+  [ $any = 1 ] || emit hpcw.worker true false true "no worker started yet"
+  [ $DIAG_JSON = 1 ] && echo ']}'
+  return 0
+}
+
+case "${1:-help}" in
+  install) shift; cmd_install "$@";;
+  profile) shift; cmd_profile "$@";;
+  discover) shift; cmd_discover "$@";;
+  probe) shift; cmd_probe "$@";;
+  worker) shift; cmd_worker "$@";;
+  claude) shift; cmd_claude "$@";;
+  diag) shift; cmd_diag "$@";;
+  _exec) shift; in_job_exec "$@";;
+  version) echo "$VERSION";;
+  help|-h|--help) sed -n '2,17p' "$SELF";;
+  *) die "unknown command '$1' (hpcworker help)";;
+esac
