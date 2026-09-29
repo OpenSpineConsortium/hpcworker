@@ -4,7 +4,7 @@
 # image (node and claude versions, the flags `claude remote-control` accepts), the egress matrix to
 # Anthropic's hosts with and without inherited proxy variables, what `claude auth status` says
 # (loggedIn, subscriptionType, email; never a token), the XDG_RUNTIME_DIR fix, and tmux.
-# Result: <state_dir>/probe/probe.json (atomic). Read it with `hpcworker probe --show`.
+# Result: <state_dir>/probe/probe.json (mode 0600, atomic). Read it with `hpcworker probe --show`.
 # Submitted by `hpcworker probe` with the profile's partition/QoS and -D <state_dir>/probe, where
 # it left probe.env; the directives below are the fallback when submitted by hand.
 #SBATCH --job-name=hpcw_probe
@@ -15,6 +15,7 @@
 #SBATCH --time=00:05:00
 #SBATCH --output=probe_%j.out
 set -uo pipefail
+umask 077   # probe.json carries the plan and the e-mail of the sign-in: the student's eyes only
 PROBE_DIR="${HPCW_PROBE_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 cd "$PROBE_DIR" || { echo "REFUSING: cannot enter $PROBE_DIR"; exit 1; }
 [ -s probe.env ] || { echo "REFUSING: no probe.env in $PROBE_DIR (submit with: hpcworker probe)"; exit 1; }
@@ -34,7 +35,8 @@ export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VA
 # ---- node-local temp, /dev/shm, namespaces ----------------------------------------------------
 HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP
 mkdir -p "$HPCW_NODE_TMP/tmp" "$HPCW_NODE_TMP/cache" 2>/dev/null && NT_OK=true || NT_OK=false
-trap 'rm -rf "$HPCW_NODE_TMP" "$IPC_DIR/$USER/hpcw_probe_$JOB"' EXIT
+# the only deletion the probe performs: its own per-job directories, through the guarded helper
+trap 'hpcw_rm_own_tmp "$HPCW_NODE_TMP" "$IPC_DIR/$USER/hpcw_probe_$JOB"' EXIT
 NT_FREE_GB=$(df -Pk "$HPCW_NODE_TMP" 2>/dev/null | awk 'NR==2{printf "%.1f", $4/1048576}'); NT_FREE_GB=${NT_FREE_GB:-0}
 NT_FS=$(stat -f -c %T "$HPCW_NODE_TMP" 2>/dev/null || echo unknown)
 NT_DEV=$(df -P "$HPCW_NODE_TMP" 2>/dev/null | awk 'NR==2{print $1}')
@@ -52,10 +54,11 @@ XDG="$IPC_DIR/$USER/xdg"; mkdir -p "$XDG" 2>/dev/null && chmod 700 "$XDG" && XDG
 TMUX_V=$(tmux -V 2>/dev/null || true); SCRIPT_OK=false; command -v script >/dev/null 2>&1 && SCRIPT_OK=true
 GLIBC=$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')
 OS=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")
-say "node_tmp $HPCW_NODE_TMP ($NT_FS, ${NT_FREE_GB} GB free); TMPDIR=$TMPDIR_VAL ($TMPDIR_FS, local=$TMPDIR_LOCAL); shm ${SHM_KB}k; ns max=$NS_MAX unshare=$NS_UNSHARE; tmux='${TMUX_V}'"
+SBATCH_ON_NODE=false; command -v sbatch >/dev/null 2>&1 && SBATCH_ON_NODE=true   # the always-on chain re-submits from the compute node
+say "node_tmp $HPCW_NODE_TMP ($NT_FS, ${NT_FREE_GB} GB free); TMPDIR=$TMPDIR_VAL ($TMPDIR_FS, local=$TMPDIR_LOCAL); shm ${SHM_KB}k; ns max=$NS_MAX unshare=$NS_UNSHARE; tmux='${TMUX_V}'; sbatch on node=$SBATCH_ON_NODE"
 
 # ---- the runtime and the image ----------------------------------------------------------------
-RT_OK=false; RT_VER=""; NODE_V=""; CLAUDE_V=""; RC_FLAGS=""; EXEC_S=0
+RT_OK=false; RT_VER=""; NODE_V=""; CLAUDE_V=""; RC_FLAGS=""; EXEC_S=0; HELP_HEAD=""
 export HPCW_BINDS="$BINDS"
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR")
 mkdir -p "$WORKSPACE" 2>/dev/null || true
@@ -76,11 +79,9 @@ if hpcw_load_runtime; then
   EXEC_S=$(( $(date +%s) - t0 ))
   CLAUDE_V=$(in_image 120 "$CLAUDE_BIN" --version 2>&1 | tail -1)
   HELP=$(in_image 90 "$CLAUDE_BIN" remote-control --help 2>&1 || true)
-  RC_FLAGS=$(printf '%s' "$HELP" | grep -o -- '--[a-z][a-z-]*' | sort -u | tr '
-' ' ')
+  RC_FLAGS=$(printf '%s' "$HELP" | grep -o -- '--[a-z][a-z-]*' | sort -u | tr '\n' ' ')
   # the first lines of what --help printed, so an error ("not logged in", a TTY complaint) is visible
-  HELP_HEAD=$(printf '%s' "$HELP" | tr -d '\000' | sed -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\r//g' | grep -v '^[[:space:]]*$' | head -6 | cut -c1-160 | tr '\n' ' ')
-' ' ')
+  HELP_HEAD=$(printf '%s' "$HELP" | hpcw_strip_codes | grep -v '^[[:space:]]*$' | head -6 | cut -c1-160 | tr '\n' ' ')
   # Claude Code's own account of its stored login: three fields, never the token
   AUTH=$(in_image 90 "$CLAUDE_BIN" auth status 2>/dev/null || true)
   LOGGED_IN=$(printf '%s' "$AUTH" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false'); LOGGED_IN=${LOGGED_IN:-false}
@@ -92,7 +93,7 @@ if hpcw_load_runtime; then
   CURL_IN=$(in_image 60 bash -c 'curl -s -m 10 -o /dev/null -w "%{http_code}" https://api.anthropic.com/' 2>&1 | tail -1)
   say "runtime $RT_VER; node $NODE_V (${EXEC_S}s); claude $CLAUDE_V; flags: $RC_FLAGS; loggedIn=$LOGGED_IN; xdg in image: $XDG_IN; curl in image: $CURL_IN"
 else
-  LOGGED_IN=false; AUTH_EMAIL=""; AUTH_SUB=""; AUTH_METHOD=""; XDG_IN=""; CURL_IN=""; HELP_HEAD=""
+  LOGGED_IN=false; AUTH_EMAIL=""; AUTH_SUB=""; AUTH_METHOD=""; XDG_IN=""; CURL_IN=""
   say "no container runtime could be loaded on $NODE (RUNTIME=$RUNTIME RUNTIME_BIN=$RUNTIME_BIN RUNTIME_MODULE=$RUNTIME_MODULE)"
 fi
 
@@ -111,9 +112,13 @@ elif [ "$(reach "$E_API")" = true ] && [ "$(reach "$E_PLAT")" = true ]; then EGR
 else EGRESS=none; fi
 say "egress: inherited api=$E_API platform=$E_PLAT claude.ai=$E_CLAUDE; bare api=$N_API platform=$N_PLAT claude.ai=$N_CLAUDE; statsig: $STATSIG; class $EGRESS"
 
-# ---- consent and config-dir presence (presence only) --------------------------------------------
-CONSENT=false; IFS=':' read -r -a MARKERS <<< "${CONSENT_MARKERS:-}"; for m in "${MARKERS[@]}"; do [ -n "$m" ] && [ -e "$m" ] && CONSENT=true; done
+# ---- consent and config-dir presence ----------------------------------------------------------------
+# Claude Code's own record first (remoteDialogSeen, one boolean in .claude.json), the marker files second
+CONSENT=false; CONSENT_SOURCE=none
+if hpcw_consent_seen "$CCD"; then CONSENT=true; CONSENT_SOURCE=claude_config
+else IFS=':' read -r -a MARKERS <<< "${CONSENT_MARKERS:-}"; for m in "${MARKERS[@]}"; do [ -n "$m" ] && [ -e "$m" ] && { CONSENT=true; CONSENT_SOURCE=marker; }; done; fi
 CCD_PRESENT=false; [ -d "$CCD" ] && CCD_PRESENT=true
+WS_TRUSTED=false; hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
 
 # ---- probe.json ------------------------------------------------------------------------------
 cat > probe.json.part <<EOF
@@ -124,12 +129,12 @@ cat > probe.json.part <<EOF
  "user_namespaces":{"max":${NS_MAX},"unshare_works":$NS_UNSHARE},
  "run_user_dir":{"path":$(J "$RUN_USER_DIR"),"present":$RUN_USER},
  "xdg_fix":{"dir":$(J "$XDG"),"host_writable":$XDG_HOST,"in_image":$(J "$XDG_IN")},
- "tmux":{"present":$([ -n "$TMUX_V" ] && echo true || echo false),"version":$(J "$TMUX_V")},"script_present":$SCRIPT_OK,
+ "tmux":{"present":$([ -n "$TMUX_V" ] && echo true || echo false),"version":$(J "$TMUX_V")},"script_present":$SCRIPT_OK,"sbatch_on_node":$SBATCH_ON_NODE,
  "runtime":{"ok":$RT_OK,"name":$(J "$RUNTIME"),"bin":$(J "${RUNTIME_BIN:-}"),"module":$(J "${RUNTIME_MODULE:-}"),"version":$(J "$RT_VER")},
  "image":{"type":$(J "$IMAGE_TYPE"),"path":$(J "$IMAGE"),"node_version":$(J "$NODE_V"),"claude_version":$(J "$CLAUDE_V"),"first_exec_seconds":${EXEC_S},"curl_api_from_image":$(J "$CURL_IN")},
- "remote_control_flags":$(J "$RC_FLAGS"),"remote_control_help_head":$(J "${HELP_HEAD:-}"),
+ "remote_control_flags":$(J "$RC_FLAGS"),"remote_control_help_head":$(J "$HELP_HEAD"),
  "claude_auth":{"loggedIn":$LOGGED_IN,"subscriptionType":$(J "$AUTH_SUB"),"email":$(J "$AUTH_EMAIL"),"authMethod":$(J "$AUTH_METHOD"),"config_dir_present":$CCD_PRESENT},
- "consent_recorded":$CONSENT,
+ "consent_recorded":$CONSENT,"consent_source":$(J "$CONSENT_SOURCE"),"workspace_trusted":$WS_TRUSTED,
  "egress":{"class":$(J "$EGRESS"),"inherited_proxy":$PROXY_JSON,
   "with_inherited_env":{"api.anthropic.com":$(J "$E_API"),"platform.claude.com":$(J "$E_PLAT"),"claude.ai":$(J "$E_CLAUDE")},
   "without_proxy_vars":{"api.anthropic.com":$(J "$N_API"),"platform.claude.com":$(J "$N_PLAT"),"claude.ai":$(J "$N_CLAUDE")},

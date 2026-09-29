@@ -71,7 +71,17 @@ class Render(unittest.TestCase):
         self.assertIn("IPC_DIR='/dev/shm'", text)
         self.assertIn("remote-control", text)
         self.assertIn("--continue", text)
-        self.assertNotIn("provenance", text)
+        self.assertIn("SCHEDULER='slurm'", text)
+        self.assertIn("CHAIN=1", text)
+        self.assertIn("afterany", text)
+        self.assertIn("remoteDialogSeen", text)
+        self.assertIn("hpcw_parse_registration", text)
+        self.assertIn("hpcw_rm_own_tmp", text)
+        self.assertNotIn("rm -rf", text)
+
+    def test_chain_off_renders(self):
+        text = self.rendered(CHAIN="0")
+        self.assertIn("CHAIN=0", text)
 
     def test_rendered_is_valid_bash(self):
         text = self.rendered()

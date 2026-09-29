@@ -4,20 +4,30 @@
 # Remote Control. Rendered by `hpcworker worker start` from worker.sbatch.tpl; do not edit by hand.
 #
 # What this job does, in order: settle on node-local temp, fix XDG_RUNTIME_DIR, mint a per-job
-# token, write status.json (starting), start `claude remote-control` inside the container under a
-# pseudo-terminal (tmux, or `script` with a held-open pipe), answer Claude Code's one-time
-# "Enable Remote Control?" question ONLY if the student recorded that answer themselves (a marker
-# file), parse the session link out of rc.log into connection.json, heartbeat status.json every
-# @HEARTBEAT_S@ s, and leave cleanly on SIGTERM (preempted) or a stop file (stopped).
+# token, write status.json (starting), check the container and the sign-in (`claude auth status`,
+# never the credential), queue its own successor so the worker is always on (one successor per
+# link, started by the scheduler when this job ends; a stop file ends the chain), start
+# `claude remote-control` inside the container under a pseudo-terminal (tmux, or `script` with a
+# held-open pipe), parse the session name and the environment link out of rc.log into
+# connection.json, heartbeat status.json every @HEARTBEAT_S@ s, and leave cleanly on SIGTERM
+# (wall time or preemption: the successor takes over) or the stop file (stopped, chain ended).
 #
-# What it never does: read, copy or print the student's Claude credential (Claude Code alone
-# uses CLAUDE_CONFIG_DIR; the framework only asks `claude auth status`), put a token on a command
-# line, or keep anything under a swept /tmp that must survive.
+# Consent: Claude Code records the student's answer to "Enable Remote Control?" itself, as
+# "remoteDialogSeen": true in <CLAUDE_CONFIG_DIR>/.claude.json. That boolean (and the workspace's
+# hasTrustDialogAccepted) is all this job reads from that file; a marker file the student wrote is
+# the fallback. The file is written only to add hasCompletedOnboarding/theme/hasTrustDialogAccepted
+# for the workspace, only when a session is about to start, never removing a key, never touching an
+# unparseable file.
+#
+# What it never does: read, copy or print the student's Claude credential (Claude Code alone uses
+# CLAUDE_CONFIG_DIR; the framework only asks `claude auth status`), put a token on a command line,
+# keep anything under a swept /tmp that must survive, or delete anything outside this run directory
+# and its own per-job node-local temp.
 @HEADER@
 set -uo pipefail
 HPCW_VERSION=@VERSION@
 SITE='@SITE@'; RUN='@RUN@'; RUN_DIR='@RUN_DIR@'; STATE_DIR='@STATE_DIR@'; WORKSPACE='@WORKSPACE@'
-HPCW_HOME='@HPCW_HOME@'
+HPCW_HOME='@HPCW_HOME@'; SCHEDULER='@SCHEDULER@'; CHAIN=@CHAIN@
 RUNTIME='@RUNTIME@'; RUNTIME_BIN='@RUNTIME_BIN@'; RUNTIME_MODULE='@RUNTIME_MODULE@'
 IMAGE='@IMAGE@'; IMAGE_TYPE='@IMAGE_TYPE@'; CLAUDE_BIN='@CLAUDE_BIN@'
 BINDS='@BINDS@'
@@ -29,44 +39,60 @@ XDG_FIX=@XDG_FIX@
 PERMISSION_MODE='@PERMISSION_MODE@'; CAPACITY='@CAPACITY@'
 HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@
 export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VAR HPCW_TMPDIR_IS_NODE_LOCAL
+ORIG_TMPDIR="${TMPDIR:-}"   # what a successor should inherit: not this node's per-job temp
 
 say() { echo "$(date -u +%FT%TZ) $*"; }
 # shellcheck disable=SC1090
 source "$HPCW_HOME/lib/adapters/common.sh" || { echo "REFUSING: $HPCW_HOME/lib/adapters/common.sh missing (run hpcworker install)"; exit 1; }
+HAVE_ADAPTER=0
+# shellcheck disable=SC1090
+if [ -s "$HPCW_HOME/lib/adapters/$SCHEDULER.sh" ] && source "$HPCW_HOME/lib/adapters/$SCHEDULER.sh"; then HAVE_ADAPTER=1; fi
 JOB=$(hpcw_job_id)
 [ -n "$JOB" ] || { echo "REFUSING: this is a batch job body and runs only inside a scheduler job, not on $(hostname -s)"; exit 1; }
 NODE=$(hostname -s)
 mkdir -p "$RUN_DIR" "$WORKSPACE" || { echo "REFUSING: cannot create $RUN_DIR"; exit 1; }
 cd "$RUN_DIR" || exit 1
 echo "$JOB" > job.id; echo "$NODE" > node; rm -f stop.done
-say "hpcworker $HPCW_VERSION worker $RUN job $JOB on $NODE (site $SITE); image $IMAGE_TYPE $IMAGE"
+say "hpcworker $HPCW_VERSION worker $RUN job $JOB on $NODE (site $SITE); image $IMAGE_TYPE $IMAGE; chain=$CHAIN"
 
 json_str() { hpcw_json_str "$1"; }
 now_s() { date +%s; }
 STARTED_AT=$(date -u +%FT%TZ)
-STATE=starting; MESSAGE=""; SESSION_NAME="$SITE-$JOB"; SESSION_URL=""; AUTH_JSON=null; RESTARTS=0; RESUMED=false; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
-consent_given() { # the student answered "Enable Remote Control?" themselves and recorded it (any marker)
-  local m; local IFS=':'; for m in $CONSENT_MARKERS; do [ -n "$m" ] && [ -e "$m" ] && return 0; done; return 1
+CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
+STATE=starting; MESSAGE=""; REQUESTED_NAME="$SITE-$JOB"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
+AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
+NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false
+# trust for the workspace as Claude Code has it on record (the second of the two booleans read); the seed below may add it later
+hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
+consent_source() { # claude_config | marker | none : where the student's recorded answer was found
+  if hpcw_consent_seen "$CCD"; then echo claude_config; return 0; fi
+  local m; local IFS=':'; for m in $CONSENT_MARKERS; do [ -n "$m" ] && [ -e "$m" ] && { echo marker; return 0; }; done
+  echo none
 }
+consent_given() { [ "$(consent_source)" != none ]; }
 write_status() { # STATE MESSAGE : atomic status.json, the one file clients read (never the scheduler)
   STATE="$1"; MESSAGE="$2"
-  local consent=false; consent_given && consent=true
-  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"session_url":%s,"claude_login":%s,"consent":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
+  local src; src=$(consent_source); local consent=false; [ "$src" != none ] && consent=true
+  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
     "$HPCW_VERSION" "$(json_str "$SITE")" "$(json_str "$RUN")" "$(json_str "$JOB")" "$(json_str "$NODE")" "$$" "$(json_str "$STATE")" "$(json_str "$MESSAGE")" \
-    "$(json_str "$STARTED_AT")" "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$SESSION_NAME")" "$(json_str "$SESSION_URL")" "$AUTH_JSON" "$consent" "$RC_ALIVE" "$RESUMED" "$USING_TMUX" "$RESTARTS" \
+    "$(json_str "$STARTED_AT")" "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" \
+    "$AUTH_JSON" "$consent" "$(json_str "$src")" "$WS_TRUSTED" "$RC_ALIVE" "$RESUMED" "$USING_TMUX" "$RESTARTS" "$([ "$CHAIN" = 1 ] && echo true || echo false)" "$(json_str "$NEXT_JOB")" "$(json_str "$CHAIN_NOTE")" \
     "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$RUN_DIR/job.token")" > status.json.part && mv -f status.json.part status.json
 }
 write_connection() {
-  printf '{"session_name":%s,"session_url":%s,"node":%s,"job":%s,"pid":%s,"started_at":%s,"token_path":%s,"workspace":%s,"rc_log":%s,"permission_mode":%s,"capacity":%s,"resumed":%s}\n' \
-    "$(json_str "$SESSION_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$NODE")" "$(json_str "$JOB")" "${RC_PID:-0}" "$(json_str "$STARTED_AT")" "$(json_str "$RUN_DIR/job.token")" \
-    "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$PERMISSION_MODE")" "$(json_str "$CAPACITY")" "$RESUMED" > connection.json.part && mv -f connection.json.part connection.json
+  printf '{"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"node":%s,"job":%s,"pid":%s,"started_at":%s,"token_path":%s,"workspace":%s,"rc_log":%s,"permission_mode":%s,"capacity":%s,"resumed":%s,"next_job":%s}\n' \
+    "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" "$(json_str "$NODE")" "$(json_str "$JOB")" "${RC_PID:-0}" "$(json_str "$STARTED_AT")" "$(json_str "$RUN_DIR/job.token")" \
+    "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$PERMISSION_MODE")" "$(json_str "$CAPACITY")" "$RESUMED" "$(json_str "$NEXT_JOB")" > connection.json.part && mv -f connection.json.part connection.json
 }
+# a stop asked for while the previous link was ending: this link ends the chain and leaves at once
+if [ -e stop ]; then rm -f stop; touch stop.done; write_status stopped "stopped by request; the chain ended"; say "stop file present at start: chain ended"; exit 0; fi
 
 # ---- 1. node-local temp, IPC under /dev/shm, XDG fix ------------------------------------------
 HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP
 mkdir -p "$HPCW_NODE_TMP/tmp" "$HPCW_NODE_TMP/cache" || { write_status error "cannot create node-local temp $HPCW_NODE_TMP on $NODE"; exit 1; }
 IPC="$IPC_DIR/$USER/hpcw_$JOB"; mkdir -p "$IPC" && chmod 700 "$IPC" || { write_status error "cannot create $IPC"; exit 1; }
-cleanup() { type rc_stop >/dev/null 2>&1 && rc_stop; rm -rf "$HPCW_NODE_TMP" "$IPC"; }
+# the only deletion this job performs: its own per-job directories, through the guarded helper
+cleanup() { type rc_stop >/dev/null 2>&1 && rc_stop; hpcw_rm_own_tmp "$HPCW_NODE_TMP" "$IPC"; say "cleanup: removed $HPCW_NODE_TMP and $IPC on $NODE"; }
 trap cleanup EXIT
 export TMPDIR="$HPCW_NODE_TMP/tmp"
 XDG=""
@@ -83,7 +109,6 @@ say "node temp $HPCW_NODE_TMP ($(df -Pk "$HPCW_NODE_TMP" 2>/dev/null | awk 'NR==
 write_status starting "checking the container and the sign-in"
 
 # ---- 3. the container, the sign-in status (never the credential), the accepted flags ------------
-CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 export HPCW_BINDS="$BINDS"
 if [ "$IMAGE_TYPE" = sandbox ]; then [ -x "$IMAGE/usr/local/bin/node" ] || { write_status error "image $IMAGE is not a readable sandbox with node"; exit 1; }
 else [ -r "$IMAGE" ] || { write_status error "image $IMAGE is not readable"; exit 1; }; fi
@@ -114,25 +139,53 @@ check_auth() { # Claude Code's own answer about its stored login; loggedIn/email
   LAST_AUTH=$(now_s); LOGGED_IN="$li"
 }
 check_auth
-say "claude auth status: loggedIn=$LOGGED_IN"
+say "claude auth status: loggedIn=$LOGGED_IN; consent: $(consent_source)"
 HELP=$(in_image 90 "$CLAUDE_BIN" remote-control --help 2>&1 || true)
 # when --help did not answer at all, assume the documented flags rather than starting bare
 if ! printf '%s' "$HELP" | grep -q -i -E 'usage|remote-control|options'; then HELP='--name --capacity --continue --permission-mode'; say "remote-control --help gave no usable text; assuming the documented flags"; fi
 accepts() { printf '%s' "$HELP" | grep -q -- "$1"; }
 say "remote-control flags accepted: $(printf '%s' "$HELP" | grep -o -- '--[a-z-]*' | sort -u | tr '\n' ' ')"
 
-# ---- 4. the launcher: claude remote-control under a pseudo-terminal, transcript in rc.log -------
+# ---- 4. the always-on chain: one successor per link, queued now, started when this job ends ----
+arm_chain() {
+  [ "$CHAIN" = 1 ] || { CHAIN_NOTE="chain off for this worker"; return 0; }
+  [ $HAVE_ADAPTER = 1 ] || { CHAIN_NOTE="no $SCHEDULER adapter in $HPCW_HOME/lib/adapters; this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
+  [ -e stop ] && return 0
+  [ -s job.sbatch ] || { CHAIN_NOTE="no job.sbatch in $RUN_DIR to re-submit; this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
+  local nid np
+  if [ -s next.id ]; then read -r nid np < next.id; if [ "$np" = "$JOB" ]; then NEXT_JOB="$nid"; CHAIN_NOTE="successor $nid was queued by this job before a restart"; say "chain: $CHAIN_NOTE"; return 0; fi; fi
+  # the successor inherits this shell's environment minus this node's per-job temp and sockets
+  local out; out=$( ( if [ -n "$ORIG_TMPDIR" ]; then export TMPDIR="$ORIG_TMPDIR"; else unset TMPDIR; fi; unset XDG_RUNTIME_DIR HPCW_NODE_TMP HPCW_BINDS APPTAINER_TMPDIR APPTAINER_CACHEDIR SINGULARITY_TMPDIR SINGULARITY_CACHEDIR
+                        adapter_submit_after "$RUN_DIR/job.sbatch" "$JOB" -D "$RUN_DIR" ) 2>&1 ) || { CHAIN_NOTE="the scheduler refused the successor: $(printf '%s' "$out" | tail -1 | cut -c1-160); this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
+  NEXT_JOB="$out"; printf '%s %s\n' "$NEXT_JOB" "$JOB" > next.id.part && mv -f next.id.part next.id
+  echo "$(date -u +%FT%TZ) $JOB on $NODE -> $NEXT_JOB" >> chain.log
+  CHAIN_NOTE="successor $NEXT_JOB queued (afterany:$JOB)"; say "chain: $CHAIN_NOTE; it takes over when this job ends"
+}
+end_chain() { # a stop was asked for: the queued successor must not start
+  local nid np; [ -s next.id ] || return 0
+  read -r nid np < next.id
+  if [ -n "$nid" ] && [ $HAVE_ADAPTER = 1 ]; then adapter_cancel "$nid"; say "chain: successor $nid cancelled"; fi
+  rm -f next.id; NEXT_JOB=""; CHAIN_NOTE="chain ended by request"
+}
+arm_chain
+
+# ---- 5. the launcher: claude remote-control under a pseudo-terminal, transcript in rc.log -------
+# The seed adds three settings to this login's .claude.json (never a credential): onboarding done,
+# a theme, and trust for this workspace, which Remote Control requires. It only ADDS keys, writes
+# nothing when they are already there, and refuses to touch a file it cannot parse. It runs only
+# from start_rc, i.e. only when a session is about to start for a signed-in student.
 # shellcheck disable=SC2016
-SEED='const fs=require("fs"),p=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};j.hasCompletedOnboarding=true;j.theme=j.theme||"dark";j.projects=j.projects||{};j.projects[process.cwd()]=Object.assign({},j.projects[process.cwd()]||{},{hasTrustDialogAccepted:true});fs.writeFileSync(p+".part",JSON.stringify(j,null,1),{mode:0o600});fs.renameSync(p+".part",p);'
-pretrust() { # mark the workspace trusted in this login's settings file (settings, not credentials): the
-  # consent marker records that the student agreed to Remote Control in the framework's own workspace
-  in_image 60 bash -c 'cd "$1" && node -e "$2"' _ "$WORKSPACE" "$SEED" >/dev/null 2>&1 || say "note: could not pre-trust $WORKSPACE (the trust question is answered from the marker instead)"
+SEED='const fs=require("fs"),p=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={},had=false;try{const t=fs.readFileSync(p,"utf8");had=true;j=JSON.parse(t)}catch(e){if(had){console.log("unreadable");process.exit(0)}}if(!j||typeof j!=="object")j={};let ch=false;if(j.hasCompletedOnboarding!==true){j.hasCompletedOnboarding=true;ch=true}if(!j.theme){j.theme="dark";ch=true}j.projects=j.projects||{};const d=process.cwd();const pr=j.projects[d]||{};if(pr.hasTrustDialogAccepted!==true){pr.hasTrustDialogAccepted=true;j.projects[d]=pr;ch=true}if(ch){fs.writeFileSync(p+".part",JSON.stringify(j,null,1),{mode:0o600});fs.renameSync(p+".part",p)}console.log(ch?"seeded":"already");'
+pretrust() {
+  local r; r=$(in_image 60 bash -c 'cd "$1" && node -e "$2"' _ "$WORKSPACE" "$SEED" 2>/dev/null | tail -1)
+  case "$r" in seeded|already) WS_TRUSTED=true; say "workspace trust for $WORKSPACE: $r";; *) WS_TRUSTED=false; say "note: could not record trust for $WORKSPACE (${r:-no answer}); Claude Code will ask, and the answer comes from your recorded consent";; esac
 }
 RC_ARGS=()
-accepts '--name' && RC_ARGS+=(--name "$SESSION_NAME")
+accepts '--name' && RC_ARGS+=(--name "$REQUESTED_NAME")
 accepts '--capacity' && [ -n "$CAPACITY" ] && RC_ARGS+=(--capacity "$CAPACITY")
 accepts '--permission-mode' && [ -n "$PERMISSION_MODE" ] && RC_ARGS+=(--permission-mode "$PERMISSION_MODE")
-resume_wanted() { # a previous session younger than the resume window: bring it back instead of a new one
+resume_wanted() { # a previous session younger than the resume window: bring it back with --continue, tried once per job
+  [ "$RESUME_TRIED" = 0 ] || return 1
   [ -s connection.json ] || return 1
   local age=$(( $(now_s) - $(stat -c %Y connection.json 2>/dev/null || echo 0) ))
   [ "$age" -lt "$RESUME_WINDOW_S" ] && accepts '--continue'
@@ -140,9 +193,9 @@ resume_wanted() { # a previous session younger than the resume window: bring it 
 TMUX_SOCK="$IPC/tmux"; FIFO="$IPC/stdin"
 command -v tmux >/dev/null 2>&1 && USING_TMUX=true
 RC_OFF=0; LAST_ANSWER=0; RC_STARTED=0
-write_launcher() { # [extra args]: the command line claude gets, as a file
+write_launcher() { # [extra args]: the command line claude gets, as a file; a wide terminal so the link is never wrapped
   local a; { echo '#!/bin/bash'; echo "# written by hpcworker job $JOB on $NODE; runs under a pseudo-terminal (tmux or script)"
-    printf 'exec %q bash -c %q _ %q %q' "$RUN_DIR/in_image.sh" 'cd "$1" && exec "$2" remote-control "${@:3}"' "$WORKSPACE" "$CLAUDE_BIN"
+    printf 'exec %q bash -c %q _ %q %q' "$RUN_DIR/in_image.sh" 'stty cols 220 rows 50 2>/dev/null; cd "$1" && exec "$2" remote-control "${@:3}"' "$WORKSPACE" "$CLAUDE_BIN"
     for a in ${RC_ARGS[@]+"${RC_ARGS[@]}"} "$@"; do printf ' %q' "$a"; done; echo; } > launch.sh.part
   chmod 700 launch.sh.part && mv -f launch.sh.part launch.sh
 }
@@ -152,7 +205,7 @@ start_rc() { # [extra args]
   RC_OFF=$(stat -c %s rc.log 2>/dev/null || echo 0)
   { echo; echo "===== $(date -u +%FT%TZ) job $JOB on $NODE: starting claude remote-control ${RC_ARGS[*]} $* ====="; } >> rc.log
   if [ "$USING_TMUX" = true ]; then
-    tmux -S "$TMUX_SOCK" new-session -d -s rc -x 200 -y 50 "script -qfc '$RUN_DIR/launch.sh' '$RUN_DIR/rc.log'; sleep 2"
+    tmux -S "$TMUX_SOCK" new-session -d -s rc -x 220 -y 50 "script -qfc '$RUN_DIR/launch.sh' '$RUN_DIR/rc.log'; sleep 2"
     sleep 1; RC_PID=$(tmux -S "$TMUX_SOCK" list-panes -t rc -F '#{pane_pid}' 2>/dev/null | head -1); RC_PID=${RC_PID:-0}
   else
     # no tmux on this node: `script` still gives claude a real terminal; its stdin is a pipe we hold
@@ -163,7 +216,7 @@ start_rc() { # [extra args]
     RC_PID=$!
   fi
   RC_ALIVE=true; RC_STARTED=$(now_s)
-  say "remote-control started (pid $RC_PID, tmux=$USING_TMUX${RESUMED:+, resumed=$RESUMED})"
+  say "remote-control started (pid $RC_PID, tmux=$USING_TMUX, resumed=$RESUMED)"
 }
 rc_alive() {
   if [ "$USING_TMUX" = true ]; then tmux -S "$TMUX_SOCK" has-session -t rc 2>/dev/null; else [ "$RC_PID" -gt 0 ] && kill -0 "$RC_PID" 2>/dev/null; fi
@@ -181,54 +234,60 @@ rc_stop() { # Ctrl-C first, so Remote Control deregisters; then end the session
 clean_tail() { # what claude printed since offset $1 (last 6000 bytes at most), without terminal codes
   local size from=$1; size=$(stat -c %s rc.log 2>/dev/null || echo 0)
   [ $((size - from)) -gt 6000 ] && from=$((size - 6000))
-  tail -c +"$((from + 1))" rc.log 2>/dev/null | tr -d '\000' | sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g'
+  tail -c +"$((from + 1))" rc.log 2>/dev/null | hpcw_strip_codes
 }
 last_line() { printf '%s' "$1" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-200; }
+note_registration() { # $1: cleaned tail -> SESSION_NAME / ENV_URL / ENV_ID from the "Connected" block; 0 when a link is known
+  local reg name url id; reg=$(printf '%s\n' "$1" | hpcw_parse_registration)
+  name=${reg%%|*}; url=${reg#*|}; url=${url%%|*}; id=${reg##*|}
+  [ -n "$name" ] && SESSION_NAME="$name"
+  [ -n "$url" ] && { ENV_URL="$url"; ENV_ID="$id"; SESSION_URL="$url"; }
+  [ -n "$ENV_URL" ]
+}
 PROMPT_RE='\(y/n\)|\[y/n\]|\[Y/n\]|\[y/N\]|yes/no'
-URL_RE='https://claude\.(com|ai)/[^[:space:]"'"'"'<>]*'
 
-# ---- 5. signals and the stop file --------------------------------------------------------------
+# ---- 6. signals and the stop file --------------------------------------------------------------
 on_term() { # --signal=B:TERM@120: the wall time or a preemption is 120 s away; scancel after a stop request also lands here
   trap - TERM INT
   rc_stop
-  if [ -e stop ]; then rm -f stop; touch stop.done; write_status stopped "stopped by request"; say "stopped (signal after stop request)"
-  else write_status preempted "job $JOB ending (wall time or preemption); start the worker again within 4 h to resume: hpcworker worker start --name $RUN"; say "preempted: left cleanly"; fi
+  if [ -e stop ]; then end_chain; rm -f stop; touch stop.done; write_status stopped "stopped by request; the chain ended"; say "stopped (signal after stop request)"
+  elif [ -n "$NEXT_JOB" ]; then write_status preempted "job $JOB ending (wall time or preemption); the next job in the chain, $NEXT_JOB, takes over and resumes the session"; say "ending: successor $NEXT_JOB takes over"
+  else write_status preempted "job $JOB ending (wall time or preemption) with no successor queued; start the worker again within 4 h to resume: hpcworker worker start --name $RUN"; say "preempted: left cleanly"; fi
   exit 0
 }
 trap on_term TERM INT
 
-# ---- 6. main loop: start, watch, answer from the marker, record, heartbeat -------------------------
+# ---- 7. main loop: start, watch, answer from the recorded consent, record, heartbeat ---------------
 [ -s rc.log ] && mv -f rc.log rc.prev.log
 : > rc.log
 BACKOFF=10; NEXT_START=0; LAST_BEAT=0; ONLINE_NOTED=0
 if [ "$LOGGED_IN" != true ]; then write_status need_login "Claude Code on the grid is not signed in; run: hpcworker claude login"; fi
 while :; do
-  if [ -e stop ]; then rc_stop; write_status stopped "stopped by request"; rm -f stop; touch stop.done; say "stopped"; exit 0; fi
+  if [ -e stop ]; then rc_stop; end_chain; rm -f stop; touch stop.done; write_status stopped "stopped by request; the chain ended"; say "stopped"; exit 0; fi
   if rc_alive; then
     RC_ALIVE=true
     tail_txt=$(clean_tail "$RC_OFF")
     # the one-time consent question (and the per-directory trust question): answered only from the
-    # student's own recorded answer, once per prompt; otherwise wait, alive, for hpcworker claude consent
+    # student's own recorded answer, once per prompt; otherwise wait, alive, for hpcworker claude login
     if printf '%s' "$tail_txt" | grep -q -E "$PROMPT_RE" && [ $(( $(now_s) - LAST_ANSWER )) -gt 5 ]; then
       if consent_given; then
         rc_send y; LAST_ANSWER=$(now_s); RC_OFF=$(stat -c %s rc.log 2>/dev/null || echo 0)
-        say "answered Claude Code's question from the student's recorded consent"
+        say "answered Claude Code's question from the student's recorded consent ($(consent_source))"
         write_status starting "answered the one-time question from your recorded consent; waiting for the session"
       else
-        [ "$STATE" = need_consent ] || { write_status need_consent "Claude Code asks once whether to enable Remote Control; answer it yourself with: hpcworker claude consent (this job waits)"; say "waiting for consent"; }
+        [ "$STATE" = need_consent ] || { write_status need_consent "Claude Code asks once whether to enable Remote Control; answer it yourself with: hpcworker claude login (this job waits)"; say "waiting for consent"; }
       fi
     else
-      url=$(printf '%s' "$tail_txt" | grep -o -E "$URL_RE" | grep '/code' | tail -1 || true)
-      [ -n "$url" ] && SESSION_URL="$url"
+      note_registration "$tail_txt" || true
       if printf '%s' "$tail_txt" | grep -q -i -E 'full-scope|must be logged in|not logged in|log in again|Please run /login|Invalid API key'; then
         [ "$STATE" = need_login ] || { write_status need_login "Claude Code says the sign-in on the grid is missing or expired; run: hpcworker claude login"; say "need_login"; }
       elif printf '%s' "$tail_txt" | grep -q -i "Couldn't verify Remote Control eligibility"; then
         [ "$STATE" = error ] || write_status error "Claude Code could not reach its feature-flag service from $NODE (Remote Control needs it); ask your center about outbound HTTPS from compute nodes"
       elif printf '%s' "$tail_txt" | grep -q -i 'Workspace not trusted'; then
-        [ "$STATE" = error ] || write_status error "Claude Code refused the workspace as untrusted: run hpcworker claude consent once (it records your answers)"
-      elif [ -n "$SESSION_URL" ] || printf '%s' "$tail_txt" | grep -q -i -E 'remote control.*(ready|listening|waiting|connected|running|online|started)|session (name|id)|open claude\.ai|claude\.ai/code'; then
-        if [ $ONLINE_NOTED = 0 ]; then ONLINE_NOTED=1; BACKOFF=10; write_connection; say "online: session $SESSION_NAME ${SESSION_URL:+$SESSION_URL}"; fi
-        [ "$STATE" = online ] || write_status online "Open claude.ai/code, or tap Code in the Claude app, and find $SESSION_NAME. $(last_line "$tail_txt")"
+        [ "$STATE" = error ] || write_status error "Claude Code refused the workspace as untrusted: run hpcworker claude login once more (it records the trust answer)"
+      elif [ -n "$ENV_URL" ] || printf '%s' "$tail_txt" | grep -q -E 'Connected ·|Capacity: [0-9]+/[0-9]+|claude\.ai/code'; then
+        if [ $ONLINE_NOTED = 0 ]; then ONLINE_NOTED=1; BACKOFF=10; write_connection; say "online: session $SESSION_NAME ${ENV_URL:+$ENV_URL}"; fi
+        [ "$STATE" = online ] && [ -n "$ENV_URL" ] || { write_status online "Open in Claude: ${ENV_URL:-claude.ai/code} and find $SESSION_NAME (or tap Code in the Claude app). $(last_line "$tail_txt")"; [ -n "$ENV_URL" ] && write_connection; }
       elif [ $(( $(now_s) - RC_STARTED )) -gt 60 ] && [ "$STATE" = starting ]; then
         write_status running "claude remote-control is running; no registration line recognised yet. Last output: $(last_line "$tail_txt")"
       fi
@@ -236,15 +295,15 @@ while :; do
   else
     RC_ALIVE=false
     if [ "$RC_PID" != 0 ]; then
-      # it exited: back off and start again (a new start later resumes with --continue while it can)
+      # it exited: back off and start again (a fresh registration joins the same environment; --continue was tried once)
       RC_PID=0; RESTARTS=$((RESTARTS + 1)); NEXT_START=$(( $(now_s) + BACKOFF )); BACKOFF=$(( BACKOFF * 2 > 300 ? 300 : BACKOFF * 2 ))
       [ "$STATE" = need_login ] || write_status starting "Remote Control stopped; starting again in $(( NEXT_START - $(now_s) )) s. Last output: $(last_line "$(clean_tail "$RC_OFF")")"
       say "remote-control exited; restart #$RESTARTS in ${BACKOFF}s"
     fi
     if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$AUTH_EVERY_S" ]; then check_auth; [ "$LOGGED_IN" = true ] && write_status starting "signed in; starting Remote Control"; fi
     if [ "$STATE" != need_login ] && [ "$LOGGED_IN" = true ] && [ "$(now_s)" -ge "$NEXT_START" ]; then
-      RESUMED=false; ONLINE_NOTED=0; SESSION_URL=""
-      if resume_wanted; then RESUMED=true; start_rc --continue; write_status starting "starting Remote Control (resuming the previous session)"; else start_rc; write_status starting "starting Remote Control"; fi
+      RESUMED=false; ONLINE_NOTED=0; ENV_URL=""; ENV_ID=""; SESSION_URL=""
+      if resume_wanted; then RESUMED=true; RESUME_TRIED=1; start_rc --continue; write_status starting "starting Remote Control (resuming the previous session)"; else start_rc; write_status starting "starting Remote Control"; fi
     fi
   fi
   if [ $(( $(now_s) - LAST_AUTH )) -ge "$AUTH_EVERY_S" ] && [ "$STATE" != need_login ]; then check_auth; fi

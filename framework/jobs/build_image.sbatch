@@ -39,7 +39,7 @@ OUT_DIR=$(dirname "$IMAGE_OUT"); mkdir -p "$OUT_DIR" || { echo "STOP: cannot cre
 # node-local temp with a cleanup trap: the pull, the layers and the build scratch never touch shared storage
 HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP
 mkdir -p "$HPCW_NODE_TMP/tmp" "$HPCW_NODE_TMP/cache" || { echo "STOP: no node-local temp at $HPCW_NODE_TMP"; exit 2; }
-trap 'rm -rf "$HPCW_NODE_TMP"' EXIT
+trap 'hpcw_rm_own_tmp "$HPCW_NODE_TMP"' EXIT   # the guarded helper: only a per-job directory is ever removed
 export TMPDIR="$HPCW_NODE_TMP/tmp" APPTAINER_TMPDIR="$HPCW_NODE_TMP/tmp" SINGULARITY_TMPDIR="$HPCW_NODE_TMP/tmp" APPTAINER_CACHEDIR="$HPCW_NODE_TMP/cache" SINGULARITY_CACHEDIR="$HPCW_NODE_TMP/cache"
 say "temp and cache on $(hostname -s):$HPCW_NODE_TMP ($(df -Pk "$HPCW_NODE_TMP" | awk 'NR==2{printf "%.1f GB free", $4/1048576}'))"
 if [ -s "$IMAGE_OUT" ]; then say "image exists: $IMAGE_OUT (remove it to rebuild)"; exit 0; fi

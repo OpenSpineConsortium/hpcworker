@@ -48,6 +48,18 @@ class Validate(unittest.TestCase):
         self.assertEqual(prof["claude_config_dir"], "$HOME/.ashley/claude")
         self.assertIn("$HOME/.ashley/claude/.ashley-remote-consent", prof["consent_markers"])
 
+    def test_consent_flags_read_two_booleans_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, ".claude.json"), "w") as fh:
+                json.dump({"remoteDialogSeen": True, "projects": {"/ws": {"hasTrustDialogAccepted": True}, "/other": {}}}, fh)
+            self.assertEqual(P.consent_flags(td, "/ws"), (True, True))
+            self.assertEqual(P.consent_flags(td, "/other"), (True, False))
+            self.assertEqual(P.consent_flags(td), (True, False))
+            with open(os.path.join(td, ".claude.json"), "w") as fh:
+                fh.write("{not json")
+            self.assertEqual(P.consent_flags(td, "/ws"), (False, False))
+            self.assertEqual(P.consent_flags(os.path.join(td, "missing"), "/ws"), (False, False))
+
     def test_missing_required(self):
         prof = P.load(WAYNE)
         del prof["shared_state_dir"]
@@ -65,7 +77,7 @@ class Validate(unittest.TestCase):
 
     def test_unknown_field_rejected(self):
         prof = P.load(WAYNE)
-        prof["provenance_of_image"] = "x"
+        prof["origin_of_image"] = "x"
         self.assertTrue(any("unknown field" in e for e in P.validate(prof)))
 
     def test_tmpdir_trap(self):
@@ -119,10 +131,24 @@ class Mapping(unittest.TestCase):
         self.assertEqual(m["CLAUDE_CONFIG_DIR"], "/wsu/home/go/go24/go2432/.ashley/claude")
         self.assertIn("/wsu/home/go/go24/go2432/.ashley/claude/.ashley-remote-consent", m["CONSENT_MARKERS"].split(":"))
         self.assertIn("/wsu/home/go/go24/go2432/.hpcworker/consent", m["CONSENT_MARKERS"].split(":"))
+        self.assertEqual(m["SCHEDULER"], "slurm")
+        self.assertEqual(m["CHAIN"], "1")
         self.assertEqual(m["BINDS"], "-B /wsu/home/go/go24/go2432 -B /rs/rs_grp_oschome/go2432 -B /rs/rs_grp_oschome/shared/ashley")
         self.assertIn("#SBATCH --signal=B:TERM@120", m["HEADER"])
         self.assertIn("#SBATCH --requeue", m["HEADER"])
         self.assertIn("#SBATCH --dependency=singleton", m["HEADER"])
+
+    def test_marker_follows_hpcw_home(self):
+        # the job honours the marker `hpcworker claude consent` writes, wherever HPCW_HOME points
+        m = P.mapping(self.prof, {"RUN": "worker", "HPCW_HOME": "/rs/group/me/.hpcw"})
+        self.assertIn("/rs/group/me/.hpcw/consent", m["CONSENT_MARKERS"].split(":"))
+        self.assertNotIn("/wsu/home/go/go24/go2432/.hpcworker/consent", m["CONSENT_MARKERS"].split(":"))
+        self.assertEqual(m["HPCW_HOME"], "/rs/group/me/.hpcw")
+
+    def test_chain_flag(self):
+        self.assertEqual(P.mapping(self.prof, {"RUN": "worker", "CHAIN": "0"})["CHAIN"], "0")
+        with self.assertRaises(ValueError):
+            P.mapping(self.prof, {"RUN": "worker", "CHAIN": "yes"})
 
     def test_interactive_partition_no_requeue(self):
         m = P.mapping(self.prof, {"RUN": "worker", "PARTITION": "secp", "QOS": "secondary", "HOURS": "1"})

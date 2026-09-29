@@ -17,6 +17,7 @@ a scheduler):
     profile.py from-discovery <discover.json> [site]   # a seed profile on stdout
     profile.py render <template> <profile> KEY=VALUE...  # rendered text on stdout
     profile.py mapping <profile> KEY=VALUE...      # the render mapping as JSON
+    profile.py consent <claude_config_dir> [workspace]   # remote_dialog_seen=.. workspace_trusted=.. (two booleans, nothing else)
     profile.py schema
 """
 import json
@@ -58,8 +59,8 @@ SCHEMA = [
     ("cache_dir", str, False, "", "runtime cache; empty = under node_tmp"),
     ("fakeroot_rung", "int_or_none", False, None, "predicted --fakeroot rung 1-4, or null"),
     ("egress", "dict", True, None, "{class: direct|http-proxy-auto|http-proxy-module|none, proxy_env: {}, proxy_module: '', ca_bundle: '', measured: {}}"),
-    ("claude_config_dir", str, True, None, "CLAUDE_CONFIG_DIR of the student's own Claude Code login; never read by the framework"),
-    ("consent_markers", "list", False, [], "files whose presence records the student's Remote Control consent"),
+    ("claude_config_dir", str, True, None, "CLAUDE_CONFIG_DIR of the student's own Claude Code login; the framework reads two booleans from its .claude.json (remoteDialogSeen, the workspace's hasTrustDialogAccepted) and nothing else"),
+    ("consent_markers", "list", False, [], "fallback marker files whose presence records the student's Remote Control consent when Claude Code has not recorded it itself"),
     ("ood_base_url", str, False, "", "Open OnDemand portal URL"),
     ("ood_shell_host", str, False, "", "host the portal's Shell app opens"),
     ("ood_rnode_enabled", "bool_or_none", False, None, "probed: is the /rnode/ reverse proxy on"),
@@ -380,11 +381,19 @@ def mapping(prof, overrides=None):
     requeue = o.get("REQUEUE", "1" if qos and qos == prof.get("qos_batch") and prof.get("qos_batch") == "requeue" else "0")
     binds = [expand(b) for b in prof.get("binds", [])]
     bind_args = " ".join("-B %s" % shlex.quote(b) for b in binds)
+    # the tool's own marker lives under HPCW_HOME, the same directory `hpcworker claude consent`
+    # writes to, so an overridden HPCW_HOME still has its consent honoured by the job
+    hpcw_home = expand(o.get("HPCW_HOME") or "$HOME/.hpcworker")
     markers = [expand(x) for x in prof.get("consent_markers", [])]
-    markers.append(posixpath.join(expand("$HOME"), ".hpcworker", "consent"))
+    markers.append(posixpath.join(hpcw_home, "consent"))
+    chain = str(o.get("CHAIN", "1"))
+    if chain not in ("0", "1"):
+        raise ValueError("CHAIN must be 0 or 1 (got %r)" % chain)
     m = {
         "VERSION": str(SCHEMA_VERSION),
         "SITE": prof["site"],
+        "SCHEDULER": prof["scheduler"],
+        "CHAIN": chain,
         "RUN": run,
         "JOB_NAME": "hpcw_%s" % run,
         "RUN_DIR": run_dir,
@@ -418,7 +427,7 @@ def mapping(prof, overrides=None):
         "HEARTBEAT_S": str(o.get("HEARTBEAT_S", 30)),
         "AUTH_EVERY_S": str(o.get("AUTH_EVERY_S", 300)),
         "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 4 * 3600)),
-        "HPCW_HOME": expand(o.get("HPCW_HOME") or "$HOME/.hpcworker"),
+        "HPCW_HOME": hpcw_home,
     }
     m["HEADER"] = header_lines(prof, m)
     for k, v in m.items():
@@ -507,6 +516,25 @@ def from_discovery(d, site="mysite"):
 
 # ----------------------------------------------------------------------------
 
+def consent_flags(config_dir, workspace=""):
+    """The two booleans Claude Code itself records in <config dir>/.claude.json:
+    remoteDialogSeen (the student answered "Enable Remote Control?") and
+    projects[workspace].hasTrustDialogAccepted. Nothing else in that file is
+    looked at or returned; an unreadable or unparseable file reads as
+    (False, False)."""
+    seen = trusted = False
+    try:
+        with open(os.path.join(expand(config_dir), ".claude.json")) as fh:
+            j = json.load(fh)
+        if isinstance(j, dict):
+            seen = j.get("remoteDialogSeen") is True
+            proj = (j.get("projects") or {}).get(workspace) if workspace else None
+            trusted = isinstance(proj, dict) and proj.get("hasTrustDialogAccepted") is True
+    except (OSError, ValueError):
+        pass
+    return seen, trusted
+
+
 def _kv_args(args):
     out = {}
     for a in args:
@@ -533,6 +561,10 @@ def main(argv):
         prof = from_discovery(d, argv[3] if len(argv) > 3 else "mysite")
         json.dump(prof, sys.stdout, indent=1, sort_keys=True)
         sys.stdout.write("\n")
+        return 0
+    if cmd == "consent":
+        seen, trusted = consent_flags(argv[2], argv[3] if len(argv) > 3 else "")
+        print("remote_dialog_seen=%s workspace_trusted=%s" % (str(seen).lower(), str(trusted).lower()))
         return 0
     if cmd == "render":
         with open(argv[2]) as fh:

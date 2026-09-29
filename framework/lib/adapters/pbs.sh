@@ -2,7 +2,7 @@
 # hpcworker PBS Pro / OpenPBS adapter. WRITTEN FROM THE DOCUMENTED COMMANDS AND UNIT-TESTED
 # AGAINST FIXTURE OUTPUTS ONLY: no PBS cluster was available to this build. Commands come from
 # the OpenPBS qsub(1B) and qstat man pages (qsub prints the bare job id; `qstat -f -F json`
-# returns a Jobs object; `-x` includes finished jobs).
+# returns a Jobs object; `-x` includes finished jobs; `-W depend=afterany:<id>` is the chain).
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -51,6 +51,11 @@ adapter_submit() { # SCRIPT [qsub options...] -> id
   printf '%s\n' "$out" | pbs_parse_submit || { printf '%s\n' "$out" >&2; return 1; }
 }
 
+adapter_submit_after() { # SCRIPT PARENT_ID [qsub options...] -> id of the successor (documented form, not run on a real PBS site)
+  local script="$1" parent="$2"; shift 2
+  adapter_submit "$script" -W "depend=afterany:$parent" "$@"
+}
+
 adapter_status() { # ID -> STATE|NODE|RAW ; active jobs first, then the finished-job history (-x)
   local id="$1" out
   out=$(qstat -f -F json "$id" 2>/dev/null) && printf '%s\n' "$out" | pbs_parse_qstat_json 2>/dev/null && return 0
@@ -58,7 +63,7 @@ adapter_status() { # ID -> STATE|NODE|RAW ; active jobs first, then the finished
   printf '%s\n' "$out" | pbs_parse_qstat_json
 }
 
-adapter_cancel() { qdel "$1" 2>/dev/null || true; }
+adapter_cancel() { [ $# -gt 0 ] && qdel "$@" 2>/dev/null; return 0; }
 
 adapter_attach() { # PBS has no attach primitive; ssh to the node is what sites permit for your own job
   local node; node=$(adapter_status "$1" | cut -d'|' -f2)

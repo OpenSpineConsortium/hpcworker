@@ -2,8 +2,8 @@
 # hpcworker IBM Spectrum LSF adapter. WRITTEN FROM THE DOCUMENTED COMMANDS AND UNIT-TESTED
 # AGAINST FIXTURE OUTPUTS ONLY: no LSF cluster was available to this build. Commands come from
 # the LSF 10.1 bsub/bjobs/bkill pages: bsub reads the script on stdin so that #BSUB lines count,
-# prints "Job <N> is submitted to queue <q>.", and `bjobs -o` gives delimited text (its -json
-# form works only with -o and is not needed).
+# prints "Job <N> is submitted to queue <q>.", `bjobs -o` gives delimited text (its -json form
+# works only with -o and is not needed), and `-w "ended(<id>)"` is the chain dependency.
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -30,6 +30,11 @@ adapter_submit() { # SCRIPT [bsub options...] -> id
   printf '%s\n' "$out" | lsf_parse_submit || { printf '%s\n' "$out" >&2; return 1; }
 }
 
+adapter_submit_after() { # SCRIPT PARENT_ID [bsub options...] -> id of the successor (documented form, not run on a real LSF site)
+  local script="$1" parent="$2"; shift 2
+  adapter_submit "$script" -w "ended($parent)" "$@"
+}
+
 adapter_status() { # ID -> STATE|NODE|RAW ; running jobs first, then the recent history (-a)
   local id="$1" out
   out=$(bjobs -noheader -o 'jobid stat exec_host' "$id" 2>/dev/null) && [ -n "$out" ] && ! printf '%s' "$out" | grep -q 'not found' && { printf '%s\n' "$out" | lsf_parse_bjobs; return 0; }
@@ -37,7 +42,7 @@ adapter_status() { # ID -> STATE|NODE|RAW ; running jobs first, then the recent 
   printf '%s\n' "$out" | lsf_parse_bjobs
 }
 
-adapter_cancel() { bkill "$1" >/dev/null 2>&1 || true; }
+adapter_cancel() { [ $# -gt 0 ] && bkill "$@" >/dev/null 2>&1; return 0; }
 
 adapter_attach() { # LSF has no attach primitive; ssh to the node is what sites permit for your own job
   local node; node=$(adapter_status "$1" | cut -d'|' -f2)

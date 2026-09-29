@@ -5,16 +5,21 @@
 # The adapter interface (eight calls, from the design report) is implemented per scheduler
 # in slurm.sh, pbs.sh and lsf.sh, which source this file:
 #   adapter_detect_scheduler        -> family on stdout (slurm|pbs|lsf|sge|htcondor|unknown)
-#   adapter_detect_runtime          -> JSON on stdout; never execs a container
+#   adapter_detect_runtime [full]   -> JSON on stdout; never execs a container
 #   adapter_submit SCRIPT [OPT...]  -> job id on stdout
 #   adapter_status ID               -> STATE|NODE|RAW  (STATE in PENDING RUNNING DONE FAILED UNKNOWN)
-#   adapter_cancel ID
+#   adapter_cancel ID...            -> one scheduler call for every id given
 #   adapter_attach ID               -> a shell inside the job (best effort; sites disable it)
 #   adapter_node_tmp                -> the node-local directory for this job (inside the job)
 #   adapter_runtime_exec IMAGE CMD..-> run CMD inside IMAGE (inside a job only)
-# plus two conveniences the CLI needs:
+# plus the conveniences the CLI and the worker job need:
 #   adapter_interactive PART QOS TIME NAME MEM -- CMD...   a short allocation with a terminal
 #   adapter_run_short   PART QOS TIME NAME MEM -- CMD...   the same without a terminal
+#   adapter_status_many ID[,ID...]  -> one line per id: ID|STATE|NODE|RAW, in ONE scheduler call where the scheduler allows it
+#   adapter_submit_after SCRIPT PARENT_ID [OPT...] -> id of a job the scheduler starts when PARENT_ID has ended (the always-on chain)
+
+# every path pattern here carries $USER; a shell without it (Git Bash on a Windows checkout) gets the login name
+: "${USER:=$(id -un 2>/dev/null || echo unknown)}"
 
 hpcw_detect_scheduler() {
   # sbatch first: Slurm sites ship a qsub wrapper (Wayne State has /usr/bin/qsub), so the
@@ -29,29 +34,46 @@ hpcw_detect_scheduler() {
   echo unknown; return 1
 }
 
-hpcw_json_str() { # escape one string for JSON (control characters dropped)
-  printf '"%s"' "$(printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | tr '\n' ' ')"
+hpcw_json_esc() { # VAR : escape the value of VAR in place for use inside a JSON string; no fork unless a control character needs removing
+  # the local has a name no caller uses: printf -v assigns to the nearest variable of that name up the call stack
+  local _hpcw_e="${!1}"
+  case "$_hpcw_e" in *[[:cntrl:]]*) _hpcw_e=$(printf '%s' "$_hpcw_e" | tr -d '\000-\010\013\014\016-\037' | tr '\n' ' ');; esac
+  _hpcw_e=${_hpcw_e//\\/\\\\}; _hpcw_e=${_hpcw_e//\"/\\\"}; _hpcw_e=${_hpcw_e//$'\t'/\\t}; _hpcw_e=${_hpcw_e//$'\r'/}
+  printf -v "$1" '%s' "$_hpcw_e"
+}
+hpcw_json_str() { # escape one string for JSON and print it quoted (the in-place form above is for loops that must not fork)
+  local _hpcw_s="$1"; hpcw_json_esc _hpcw_s; printf '"%s"' "$_hpcw_s"
 }
 
-hpcw_detect_runtime() {
+hpcw_detect_runtime() { # [full]
   # Phase-1 discovery on the login node: which runtimes exist, by name and by module, whether
-  # Pyxis is compiled into srun, and whether user namespaces are allowed. Under a second; no exec.
-  local first=1 c p
+  # Pyxis is compiled into srun, and whether user namespaces are allowed. No container exec.
+  # The module list comes from the modulefile directories on $MODULEPATH (a glob, 4 ms measured
+  # on warrior); `module -t avail`, which costs 0.76 s of CPU there, runs only with "full".
+  local full="${1:-}" first=1 c p
   printf '{"candidates":['
-  for c in apptainer singularity podman enroot; do
-    p=$(command -v "$c" 2>/dev/null) || continue
+  local ul
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue; c=${p##*/}
     [ $first = 1 ] || printf ','; first=0
-    printf '{"name":"%s","path":%s,"user_local":%s}' "$c" "$(hpcw_json_str "$p")" "$([ "${p#"$HOME"/.local/}" != "$p" ] && echo true || echo false)"
-  done
+    ul=false; [ "${p#"$HOME"/.local/}" != "$p" ] && ul=true
+    hpcw_json_esc p; printf '{"name":"%s","path":"%s","user_local":%s}' "$c" "$p" "$ul"
+  done < <(command -v apptainer singularity podman enroot 2>/dev/null)
   printf '],"modules":['
   first=1
-  # `module` is a shell function from /etc/profile.d; source just that file rather than a whole
-  # login shell (a login shell here cost 1.5 s of CPU; the profile.d file alone a tenth of that)
-  local mods; mods=$(timeout 8 bash -c 'for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/Modules/init/bash; do [ -r "$f" ] && { source "$f"; break; }; done 2>/dev/null; command -v module >/dev/null 2>&1 || exit 0; module -t avail 2>&1' 2>/dev/null | grep -i -E '^(apptainer|singularity|podman|enroot|pyxis)' | grep -v '/$' | sed 's/(default)//' | sort -u)
-  for c in $mods; do [ $first = 1 ] || printf ','; first=0; printf '%s' "$(hpcw_json_str "$c")"; done
-  local pyx=false; command -v srun >/dev/null 2>&1 && srun --help 2>/dev/null | grep -q 'container-image' && pyx=true
+  local mods=""
+  if [ "$full" = full ]; then
+    # `module` is a shell function from /etc/profile.d; source just that file rather than a whole login shell
+    mods=$(timeout 8 bash -c 'for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/Modules/init/bash; do [ -r "$f" ] && { source "$f"; break; }; done 2>/dev/null; command -v module >/dev/null 2>&1 || exit 0; module -t avail 2>&1' 2>/dev/null | grep -i -E '^(apptainer|singularity|podman|enroot|pyxis)' | grep -v '/$' | sed 's/(default)//' | sort -u)
+  else
+    local d f name mp="${MODULEPATH:-}"; for d in ${mp//:/ }; do for f in "$d"/apptainer/* "$d"/singularity/* "$d"/podman/* "$d"/enroot/* "$d"/pyxis/*; do
+      [ -e "$f" ] || continue; name="${f#"$d"/}"; case "$name" in *~|.*|*/.*) continue;; esac; mods="$mods${mods:+$'\n'}$name"; done; done
+    [ -n "$mods" ] && mods=$(printf '%s\n' "$mods" | sort -u)
+  fi
+  for c in $mods; do [ $first = 1 ] || printf ','; first=0; hpcw_json_esc c; printf '"%s"' "$c"; done
+  local pyx=false; [ "$full" = full ] && command -v srun >/dev/null 2>&1 && srun --help 2>/dev/null | grep -q 'container-image' && pyx=true
   local ns; ns=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo -1)
-  printf '],"pyxis":%s,"user_namespaces":%s,"subuid":%s}' "$pyx" "$ns" "$( [ -r /etc/subuid ] && grep -q "^$USER:" /etc/subuid 2>/dev/null && echo true || echo false)"
+  printf '],"pyxis":%s,"user_namespaces":%s,"subuid":%s,"modules_from":"%s"}' "$pyx" "$ns" "$( [ -r /etc/subuid ] && grep -q "^$USER:" /etc/subuid 2>/dev/null && echo true || echo false)" "$([ "$full" = full ] && echo module-avail || echo modulepath)"
 }
 
 hpcw_job_id() { echo "${SLURM_JOB_ID:-${PBS_JOBID:-${LSB_JOBID:-${JOB_ID:-${HPCW_JOB_ID:-}}}}}"; }
@@ -76,8 +98,67 @@ hpcw_node_tmp() {
   if [ -n "$pat" ]; then hpcw_expand_job_vars "$pat"; echo; return 0; fi
   if [ -n "$var" ] && [ -n "${!var:-}" ]; then echo "${!var}/${USER}/hpcworker_$jid"; return 0; fi
   if [ "${HPCW_TMPDIR_IS_NODE_LOCAL:-0}" = 1 ] && [ -n "${TMPDIR:-}" ]; then echo "$TMPDIR/hpcworker_$jid"; return 0; fi
-  if [ -d "/scratch/$USER" ] && [ -w "/scratch/$USER" ]; then echo "/scratch/$USER/job_$jid/hpcworker"; return 0; fi
+  if [ -d "/scratch/$USER" ] && [ -w "/scratch/$USER" ]; then echo "/scratch/$USER/hpcworker_$jid"; return 0; fi
   echo "/tmp/$USER/hpcworker_$jid"
+}
+
+hpcw_rm_own_tmp() { # PATH... : remove ONLY directories the framework made for one job (node-local temp, /dev/shm IPC).
+  # The one place the framework deletes anything. A path is removed only when its last component is
+  # hpcworker_<id>, hpcw_<id> or hpcw_probe_<id>, so a mis-rendered pattern can never point this at a
+  # home directory, a config directory, a state directory or the root.
+  local p; for p in "$@"; do
+    [ -n "$p" ] || continue
+    case "$p" in /|"$HOME"|"$HOME"/|/tmp|/dev/shm|"${HOME}/.ashley"*|*/.claude*|*/.hpcworker*) echo "REFUSING to remove $p (not a per-job directory)" >&2; continue;; esac
+    case "${p%/}" in */hpcworker_[A-Za-z0-9_.-]*|*/hpcw_[A-Za-z0-9_.-]*) rm -rf -- "${p%/}";; *) echo "REFUSING to remove $p (not a per-job directory)" >&2;; esac
+  done
+}
+
+hpcw_agent_marker() { # 0 when an agent, not a person, is at the keyboard: CLAUDECODE, ASHLEY_REQUEST_ID and kin, or no terminal
+  [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || [ ! -t 0 ]
+}
+
+hpcw_strip_codes() { # stdin -> stdout: a terminal transcript without escape sequences, NULs or carriage returns
+  # LC_ALL=C: under en_US.UTF-8, sed 4.2.2 (CentOS 7) matches none of the CSI sequences, because the
+  # byte range in the bracket expression follows the locale's collation (measured on warrior, 2026-09-29)
+  tr -d '\000' | LC_ALL=C sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g'
+}
+
+hpcw_parse_registration() { # stdin: Claude Code's terminal text, codes stripped -> NAME|URL|ENVIRONMENT_ID (empty when not printed yet)
+  # `claude remote-control` (2.1.283) prints, after the QR code:
+  #     ·✔︎· Connected · phone · HEAD
+  #         Capacity: 1/32 · New sessions will be created in the current directory
+  #         asx10-hazy-meadow
+  #     Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01XzAN32jsbL8W1PAFSvitBt
+  # The session name is the line after "Capacity:"; the link is the environment URL. The block may be
+  # redrawn, so the last occurrence of each wins.
+  awk '
+    { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line) }
+    /Capacity:/ { want = 1; next }
+    want == 1 && line == "" { next }
+    want == 1 { if (line ~ /^[a-z0-9]+(-[a-z0-9]+)+$/) name = line; want = 0 }
+    { if (match(line, /https:\/\/claude\.ai\/code\?environment=[A-Za-z0-9_-]+/)) url = substr(line, RSTART, RLENGTH) }
+    END { id = url; sub(/.*environment=/, "", id); printf "%s|%s|%s\n", name, url, id }'
+}
+
+hpcw_consent_seen() { # CLAUDE_CONFIG_DIR -> 0 when Claude Code itself recorded the student's answer to "Enable Remote Control?"
+  # Claude Code writes "remoteDialogSeen": true into <config dir>/.claude.json when the student answers.
+  # That one boolean is the consent signal; nothing else in that file is read (grep -q prints nothing).
+  [ -n "${1:-}" ] && grep -q -E '"remoteDialogSeen": *true' "$1/.claude.json" 2>/dev/null
+}
+
+hpcw_workspace_trusted() { # CLAUDE_CONFIG_DIR WORKSPACE -> 0 when projects[WORKSPACE].hasTrustDialogAccepted is true (python3 reads the two keys)
+  local py; for py in "${HPCW_PYTHON:-}" python3 /usr/bin/python3 /usr/libexec/platform-python; do [ -n "$py" ] && command -v "$py" >/dev/null 2>&1 && break; py=""; done
+  [ -n "$py" ] || return 1
+  "$py" - "$1/.claude.json" "$2" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        j = json.load(fh)
+    ok = ((j.get("projects") or {}).get(sys.argv[2]) or {}).get("hasTrustDialogAccepted") is True
+except (OSError, ValueError, AttributeError):
+    ok = False
+sys.exit(0 if ok else 1)
+PYEOF
 }
 
 hpcw_load_runtime() {
@@ -151,6 +232,8 @@ hpcw_normalise_state() { # FAMILY RAWSTATE [EXIT] -> PENDING|RUNNING|DONE|FAILED
 
 # the names the CLI calls, shared by every adapter
 adapter_detect_scheduler() { hpcw_detect_scheduler; }
-adapter_detect_runtime() { hpcw_detect_runtime; }
+adapter_detect_runtime() { hpcw_detect_runtime "$@"; }
 adapter_node_tmp() { hpcw_node_tmp; }
 adapter_runtime_exec() { hpcw_runtime_exec "$@"; }
+# a scheduler without a one-call form answers several ids one by one (PBS, LSF); Slurm overrides this
+adapter_status_many() { local id; for id in ${1//,/ }; do printf '%s|%s\n' "$id" "$(adapter_status "$id" 2>/dev/null || echo 'UNKNOWN||')"; done; }
