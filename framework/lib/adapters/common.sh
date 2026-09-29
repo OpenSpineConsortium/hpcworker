@@ -161,6 +161,34 @@ sys.exit(0 if ok else 1)
 PYEOF
 }
 
+hpcw_needs() { # STATE CONSENT(true|false) -> login|consent|nothing : the one thing the student must do now, for the panel's one line
+  # login only once the job has said so (the first checks retry for a credential still being written);
+  # consent as soon as it is missing while the job is on its way, so the panel can write the marker
+  # before Claude Code asks
+  case "$1" in
+    need_login) echo login;;
+    need_consent) echo consent;;
+    starting|running) [ "$2" = true ] && echo nothing || echo consent;;
+    *) echo nothing;;
+  esac
+}
+
+hpcw_hint() { # STATE NEEDS [NEXT_JOB] -> one sentence in plain words
+  case "$2" in
+    login) echo "Sign in to Claude on the cluster; your worker is waiting for it.";;
+    consent) echo "Allow Remote Control once; your worker is waiting for that answer.";;
+    *) case "$1" in
+      online) echo "Your worker is online: open it in Claude.";;
+      starting) echo "Your worker is starting; this takes about a minute.";;
+      running) echo "Claude Code is running; waiting for its session link.";;
+      stopped) echo "Your worker is stopped; start it again when you need it.";;
+      preempted) if [ -n "${3:-}" ]; then echo "This job ended; the next one takes over shortly."; else echo "This job ended; start the worker again to continue."; fi;;
+      error) echo "Something went wrong; the message says what.";;
+      *) echo "Waiting for the worker.";;
+    esac;;
+  esac
+}
+
 hpcw_load_runtime() {
   # Make $RUNTIME_BIN executable: the configured path, else the module, else PATH. Login nodes
   # may hide the module (TACC); that is why the probe job, not discovery, is the arbiter.

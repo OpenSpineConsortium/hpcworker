@@ -10,14 +10,18 @@
 # `claude remote-control` inside the container under a pseudo-terminal (tmux, or `script` with a
 # held-open pipe), parse the session name and the environment link out of rc.log into
 # connection.json, heartbeat status.json every @HEARTBEAT_S@ s, and leave cleanly on SIGTERM
-# (wall time or preemption: the successor takes over) or the stop file (stopped, chain ended).
+# (wall time or preemption: the successor takes over) or the stop file (stopped, chain ended; a
+# TERM landing during that stop leaves the state stopped).
 #
 # Consent: Claude Code records the student's answer to "Enable Remote Control?" itself, as
 # "remoteDialogSeen": true in <CLAUDE_CONFIG_DIR>/.claude.json. That boolean (and the workspace's
-# hasTrustDialogAccepted) is all this job reads from that file; a marker file the student wrote is
-# the fallback. The file is written only to add hasCompletedOnboarding/theme/hasTrustDialogAccepted
-# for the workspace, only when a session is about to start, never removing a key, never touching an
-# unparseable file.
+# hasTrustDialogAccepted) is all this job reads from that file; a marker file is the fallback
+# (~/.hpcworker/consent, any content: the panel writes one when the student allows Remote Control
+# there, `hpcworker claude consent` writes one too), and when Claude Code asks the question in the
+# pty this job answers y once from either record. The file is written only to add
+# hasCompletedOnboarding/theme/hasTrustDialogAccepted for the workspace, only when a session is
+# about to start, never removing a key, never touching an unparseable file. status.json says in
+# "needs" (login | consent | nothing) and "hint" what the student must do now, for the panel's one line.
 #
 # What it never does: read, copy or print the student's Claude credential (Claude Code alone uses
 # CLAUDE_CONFIG_DIR; the framework only asks `claude auth status`), put a token on a command line,
@@ -37,7 +41,7 @@ IPC_DIR='@IPC_DIR@'
 HPCW_NODE_TMP_PATTERN='@NODE_TMP@'; HPCW_NODE_TMP_VAR='@NODE_TMP_VAR@'; HPCW_TMPDIR_IS_NODE_LOCAL=@TMPDIR_IS_NODE_LOCAL@
 XDG_FIX=@XDG_FIX@
 PERMISSION_MODE='@PERMISSION_MODE@'; CAPACITY='@CAPACITY@'
-HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@
+HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@; LOGIN_RECHECK_S=@LOGIN_RECHECK_S@
 export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VAR HPCW_TMPDIR_IS_NODE_LOCAL
 ORIG_TMPDIR="${TMPDIR:-}"   # what a successor should inherit: not this node's per-job temp
 
@@ -73,8 +77,10 @@ consent_given() { [ "$(consent_source)" != none ]; }
 write_status() { # STATE MESSAGE : atomic status.json, the one file clients read (never the scheduler)
   STATE="$1"; MESSAGE="$2"
   local src; src=$(consent_source); local consent=false; [ "$src" != none ] && consent=true
-  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
-    "$HPCW_VERSION" "$(json_str "$SITE")" "$(json_str "$RUN")" "$(json_str "$JOB")" "$(json_str "$NODE")" "$$" "$(json_str "$STATE")" "$(json_str "$MESSAGE")" \
+  # the one thing the student must do now, and a sentence for it: what the panel shows on its one line
+  local needs hint; needs=$(hpcw_needs "$STATE" "$consent"); hint=$(hpcw_hint "$STATE" "$needs" "$NEXT_JOB")
+  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"needs":%s,"hint":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
+    "$HPCW_VERSION" "$(json_str "$SITE")" "$(json_str "$RUN")" "$(json_str "$JOB")" "$(json_str "$NODE")" "$$" "$(json_str "$STATE")" "$(json_str "$MESSAGE")" "$(json_str "$needs")" "$(json_str "$hint")" \
     "$(json_str "$STARTED_AT")" "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" \
     "$AUTH_JSON" "$consent" "$(json_str "$src")" "$WS_TRUSTED" "$RC_ALIVE" "$RESUMED" "$USING_TMUX" "$RESTARTS" "$([ "$CHAIN" = 1 ] && echo true || echo false)" "$(json_str "$NEXT_JOB")" "$(json_str "$CHAIN_NOTE")" \
     "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$RUN_DIR/job.token")" > status.json.part && mv -f status.json.part status.json
@@ -85,7 +91,7 @@ write_connection() {
     "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$PERMISSION_MODE")" "$(json_str "$CAPACITY")" "$RESUMED" "$(json_str "$NEXT_JOB")" > connection.json.part && mv -f connection.json.part connection.json
 }
 # a stop asked for while the previous link was ending: this link ends the chain and leaves at once
-if [ -e stop ]; then rm -f stop; touch stop.done; write_status stopped "stopped by request; the chain ended"; say "stop file present at start: chain ended"; exit 0; fi
+if [ -e stop ]; then rm -f stop; write_status stopped "stopped by request; the chain ended"; say "stop file present at start: chain ended"; touch stop.done; exit 0; fi
 
 # ---- 1. node-local temp, IPC under /dev/shm, XDG fix ------------------------------------------
 HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP
@@ -139,6 +145,9 @@ check_auth() { # Claude Code's own answer about its stored login; loggedIn/email
   LAST_AUTH=$(now_s); LOGGED_IN="$li"
 }
 check_auth
+# started seconds after a sign-in finished (the panel does that): Claude Code may still be writing
+# its credential, so ask three more times, 10 s apart, before saying need_login
+for _try in 1 2 3; do [ "$LOGGED_IN" = true ] && break; say "not signed in yet (try $_try of 3); asking again in 10 s"; sleep 10; check_auth; done
 say "claude auth status: loggedIn=$LOGGED_IN; consent: $(consent_source)"
 HELP=$(in_image 90 "$CLAUDE_BIN" remote-control --help 2>&1 || true)
 # when --help did not answer at all, assume the documented flags rather than starting bare
@@ -194,9 +203,17 @@ TMUX_SOCK="$IPC/tmux"; FIFO="$IPC/stdin"
 command -v tmux >/dev/null 2>&1 && USING_TMUX=true
 RC_OFF=0; LAST_ANSWER=0; RC_STARTED=0
 write_launcher() { # [extra args]: the command line claude gets, as a file; a wide terminal so the link is never wrapped
-  local a; { echo '#!/bin/bash'; echo "# written by hpcworker job $JOB on $NODE; runs under a pseudo-terminal (tmux or script)"
+  # A resume (--continue) refuses --capacity in Claude Code 2.1.283: "--session-id and --continue
+  # cannot be used with --spawn, --capacity, or --create-session-in-dir" (job 40501175, 2026-09-29),
+  # so the flag is left out then; what capacity a resumed session runs with is not measured
+  local a resume=0 skip=0; for a in "$@"; do [ "$a" = --continue ] && resume=1; done
+  { echo '#!/bin/bash'; echo "# written by hpcworker job $JOB on $NODE; runs under a pseudo-terminal (tmux or script)"
     printf 'exec %q bash -c %q _ %q %q' "$RUN_DIR/in_image.sh" 'stty cols 220 rows 50 2>/dev/null; cd "$1" && exec "$2" remote-control "${@:3}"' "$WORKSPACE" "$CLAUDE_BIN"
-    for a in ${RC_ARGS[@]+"${RC_ARGS[@]}"} "$@"; do printf ' %q' "$a"; done; echo; } > launch.sh.part
+    for a in ${RC_ARGS[@]+"${RC_ARGS[@]}"} "$@"; do
+      if [ $skip = 1 ]; then skip=0; continue; fi
+      if [ $resume = 1 ] && [ "$a" = --capacity ]; then skip=1; continue; fi
+      printf ' %q' "$a"
+    done; echo; } > launch.sh.part
   chmod 700 launch.sh.part && mv -f launch.sh.part launch.sh
 }
 start_rc() { # [extra args]
@@ -244,14 +261,33 @@ note_registration() { # $1: cleaned tail -> SESSION_NAME / ENV_URL / ENV_ID from
   [ -n "$url" ] && { ENV_URL="$url"; ENV_ID="$id"; SESSION_URL="$url"; }
   [ -n "$ENV_URL" ]
 }
-PROMPT_RE='\(y/n\)|\[y/n\]|\[Y/n\]|\[y/N\]|yes/no'
+PROMPT_RE='\(y/n\)|\[y/n\]|\[Y/n\]|\[y/N\]|yes/no|Enable Remote Control'
 
 # ---- 6. signals and the stop file --------------------------------------------------------------
-on_term() { # --signal=B:TERM@120: the wall time or a preemption is 120 s away; scancel after a stop request also lands here
+# A student's stop (the stop file, from `hpcworker worker stop` or the panel) and a TERM (the wall
+# time or a preemption through --signal=B:TERM@120, or the CLI's one scancel when this job did not
+# leave by itself) can land together. The rule: a stop that has begun finishes, its last status
+# write is "stopped", and the trap stays armed the whole way; a TERM that fires inside the stop
+# path hands back to it instead of writing a state of its own. Measured the other way round on job
+# 40501099 (2026-09-29): the trap wrote "preempted" over a stop that had gone through.
+STOPPING=0
+stop_and_leave() { # REASON: end the session, cancel the successor, write stopped, mark stop.done, leave
+  [ "$STOPPING" = 1 ] && return 0   # already on this path (a signal landed inside it): the path resumes and finishes
+  STOPPING=1
+  rc_stop
+  end_chain
+  write_status stopped "stopped by request; the chain ended"
+  # stop.done after the status, so whoever sees it may trust status.json; the stop file goes with it
+  rm -f stop; touch stop.done
+  say "stopped ($1)"
+  exit 0
+}
+on_term() {
+  # a stop file, stop.done or a stop under way: a student's stop, whatever the signal's reason
+  if [ -e stop ] || [ -e stop.done ] || [ "$STOPPING" = 1 ]; then stop_and_leave "signal after a stop request"; return 0; fi
   trap - TERM INT
   rc_stop
-  if [ -e stop ]; then end_chain; rm -f stop; touch stop.done; write_status stopped "stopped by request; the chain ended"; say "stopped (signal after stop request)"
-  elif [ -n "$NEXT_JOB" ]; then write_status preempted "job $JOB ending (wall time or preemption); the next job in the chain, $NEXT_JOB, takes over and resumes the session"; say "ending: successor $NEXT_JOB takes over"
+  if [ -n "$NEXT_JOB" ]; then write_status preempted "job $JOB ending (wall time or preemption); the next job in the chain, $NEXT_JOB, takes over and resumes the session"; say "ending: successor $NEXT_JOB takes over"
   else write_status preempted "job $JOB ending (wall time or preemption) with no successor queued; start the worker again within 4 h to resume: hpcworker worker start --name $RUN"; say "preempted: left cleanly"; fi
   exit 0
 }
@@ -261,9 +297,9 @@ trap on_term TERM INT
 [ -s rc.log ] && mv -f rc.log rc.prev.log
 : > rc.log
 BACKOFF=10; NEXT_START=0; LAST_BEAT=0; ONLINE_NOTED=0
-if [ "$LOGGED_IN" != true ]; then write_status need_login "Claude Code on the grid is not signed in; run: hpcworker claude login"; fi
+if [ "$LOGGED_IN" != true ]; then write_status need_login "Claude Code on the cluster is not signed in; sign in from the panel (or run: hpcworker claude login). This job waits and asks again every minute."; fi
 while :; do
-  if [ -e stop ]; then rc_stop; end_chain; rm -f stop; touch stop.done; write_status stopped "stopped by request; the chain ended"; say "stopped"; exit 0; fi
+  if [ -e stop ]; then stop_and_leave "stop file"; fi
   if rc_alive; then
     RC_ALIVE=true
     tail_txt=$(clean_tail "$RC_OFF")
@@ -300,7 +336,8 @@ while :; do
       [ "$STATE" = need_login ] || write_status starting "Remote Control stopped; starting again in $(( NEXT_START - $(now_s) )) s. Last output: $(last_line "$(clean_tail "$RC_OFF")")"
       say "remote-control exited; restart #$RESTARTS in ${BACKOFF}s"
     fi
-    if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$AUTH_EVERY_S" ]; then check_auth; [ "$LOGGED_IN" = true ] && write_status starting "signed in; starting Remote Control"; fi
+    # while waiting for the sign-in, ask every minute (the panel's sign-in ends with a worker start or a wait for this)
+    if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$LOGIN_RECHECK_S" ]; then check_auth; [ "$LOGGED_IN" = true ] && write_status starting "signed in; starting Remote Control"; fi
     if [ "$STATE" != need_login ] && [ "$LOGGED_IN" = true ] && [ "$(now_s)" -ge "$NEXT_START" ]; then
       RESUMED=false; ONLINE_NOTED=0; ENV_URL=""; ENV_ID=""; SESSION_URL=""
       if resume_wanted; then RESUMED=true; RESUME_TRIED=1; start_rc --continue; write_status starting "starting Remote Control (resuming the previous session)"; else start_rc; write_status starting "starting Remote Control"; fi

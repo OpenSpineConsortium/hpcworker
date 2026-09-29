@@ -29,6 +29,18 @@ import sys
 
 SCHEMA_VERSION = 1
 
+
+def framework_version():
+    """The integer in ../VERSION (the checkout's, or the installed copy's under ~/.hpcworker): what
+    the rendered job and status.json report as "version". The schema version when the file is absent."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")) as fh:
+            v = fh.read().strip()
+    except (IOError, OSError):
+        return str(SCHEMA_VERSION)
+    return v if re.match(r"^\d+$", v) else str(SCHEMA_VERSION)
+
+
 # key -> (type, required, default, description). "type" is a python type, a
 # tuple of allowed strings, or "list"/"dict"/"int_or_none"/"bool_or_none".
 SCHEMA = [
@@ -390,7 +402,7 @@ def mapping(prof, overrides=None):
     if chain not in ("0", "1"):
         raise ValueError("CHAIN must be 0 or 1 (got %r)" % chain)
     m = {
-        "VERSION": str(SCHEMA_VERSION),
+        "VERSION": framework_version(),
         "SITE": prof["site"],
         "SCHEDULER": prof["scheduler"],
         "CHAIN": chain,
@@ -426,6 +438,8 @@ def mapping(prof, overrides=None):
         "CAPACITY": str(o.get("CAPACITY", wd.get("capacity", 4))),
         "HEARTBEAT_S": str(o.get("HEARTBEAT_S", 30)),
         "AUTH_EVERY_S": str(o.get("AUTH_EVERY_S", 300)),
+        # how often a job waiting in need_login asks `claude auth status` again (the panel signs in, then starts or waits)
+        "LOGIN_RECHECK_S": str(o.get("LOGIN_RECHECK_S", 60)),
         "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 4 * 3600)),
         "HPCW_HOME": hpcw_home,
     }

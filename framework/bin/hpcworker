@@ -4,13 +4,13 @@
 # it lives at ~/.hpcworker/bin/hpcworker and runs on the login node with bash, coreutils and the
 # system python3 only. Nothing heavy runs here: the container and Claude Code run inside jobs.
 #
-#   hpcworker install [--profile NAME | --discover] [--force]   copy into ~/.hpcworker, write profile.json
+#   hpcworker install [--profile NAME | --discover] [--force]   copy into ~/.hpcworker (again: refresh or upgrade), write profile.json
 #   hpcworker profile show|path|validate|set KEY VALUE          the site profile
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
-#   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] five-minute probe job; writes probe.json
+#   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
 #   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain]
 #   hpcworker worker stop|status|list|log [--name N] [--json] [--lines N]
-#   hpcworker claude login|status [--alloc]                      your Claude sign-in, in one sitting (Claude Code's own flow)
+#   hpcworker claude login [--plain] | status [--alloc]           your Claude sign-in, in one sitting (--plain: the panel's line contract)
 #   hpcworker claude consent                                     the Remote Control answer alone, when login did not cover it
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker version
@@ -23,7 +23,7 @@
 # directories under the state directory and a job's own node-local temp; the one subcommand that
 # replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
 set -uo pipefail
-VERSION=1
+VERSION=2
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "$0")
 SRC_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
@@ -77,15 +77,18 @@ cmd_install() {
   while [ $# -gt 0 ]; do case "$1" in --profile) name="$2"; shift 2;; --discover) discover=1; shift;; --force) force=1; shift;; *) die "install: unknown option $1";; esac; done
   # --force replaces profile.json, a file of yours: only for a person at a terminal, and only when a profile is in the way
   if [ $force = 1 ] && [ -s "$PROFILE" ]; then refuse_if_agent "install --force"; fi
+  # the copy already there, if any: install runs again over it (the same version refreshes the
+  # files, a newer one upgrades them); the profile and everything under the state directory stay
+  local old=""; [ -s "$HPCW_HOME/VERSION" ] && old=$(tr -d '[:space:]' < "$HPCW_HOME/VERSION")
   mkdir -p "$HPCW_HOME"/{bin,lib/adapters,jobs,profiles,log} || die "cannot create $HPCW_HOME"
   chmod 700 "$HPCW_HOME"
   if [ "$SRC_ROOT" != "$HPCW_HOME" ]; then
-    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
+    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
       && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
     [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
   fi
   # files uploaded from a Windows checkout may carry CR line endings, which break bash and sbatch
-  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/profile.py "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
+  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/profile.py "$HPCW_HOME"/lib/*.sh "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
   chmod +x "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/jobs/*.sbatch 2>/dev/null
   LIB="$HPCW_HOME/lib"; JOBS="$HPCW_HOME/jobs"; PROFILES="$HPCW_HOME/profiles"
   if [ -n "$name" ]; then
@@ -97,7 +100,10 @@ cmd_install() {
     else prof_py from-discovery "$HPCW_HOME/discover.json" "${HPCW_SITE:-$(hostname -s | tr -cd 'a-z0-9-')}" > "$PROFILE" || die "could not seed a profile from discovery"; say "profile.json seeded from discovery: edit partition_cpu, image_store, claude_bin, then run hpcworker probe"; fi
   fi
   [ -s "$PROFILE" ] && { prof_py validate "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
-  say "installed hpcworker $VERSION at $HPCW_HOME"
+  if [ -z "$old" ]; then say "installed hpcworker $VERSION at $HPCW_HOME"
+  elif [ "$old" = "$VERSION" ]; then say "hpcworker $VERSION at $HPCW_HOME: files refreshed (same version)"
+  elif [[ "$old" =~ ^[0-9]+$ ]] && [ "$old" -gt "$VERSION" ]; then say "replaced hpcworker $old with $VERSION at $HPCW_HOME (this checkout is the older one)"
+  else say "upgraded $old -> $VERSION at $HPCW_HOME"; fi
   case ":$PATH:" in *":$HPCW_HOME/bin:"*) ;; *) say "add it to your PATH:  export PATH=\"\$HOME/.hpcworker/bin:\$PATH\"";; esac
   say "next: hpcworker diag, then hpcworker probe, then hpcworker claude login (once, it covers the Remote Control question too), then hpcworker worker start"
 }
@@ -150,7 +156,7 @@ cmd_discover() {
   return 0
 }
 
-# ---- probe: one five-minute job; results in a file, read from a file ---------------------------------
+# ---- probe: one ten-minute job; results in a file, read from a file ----------------------------------
 probe_env() { # what probe.sbatch needs, as shell assignments (no secrets; paths only)
   printf 'HPCW_HOME=%q\nRUNTIME=%q\nRUNTIME_BIN=%q\nRUNTIME_MODULE=%q\nIMAGE=%q\nIMAGE_TYPE=%q\nCLAUDE_BIN=%q\nBINDS=%q\nCLAUDE_CONFIG_DIR=%q\nCONSENT_MARKERS=%q\nHPCW_NODE_TMP_PATTERN=%q\nHPCW_NODE_TMP_VAR=%q\nHPCW_TMPDIR_IS_NODE_LOCAL=%q\nIPC_DIR=%q\nWORKSPACE=%q\n' \
     "$HPCW_HOME" "$P_runtime" "$P_runtime_bin" "$P_runtime_module" "$P_image_store_path" "$P_image_store_type" "$P_claude_bin" "$(bind_args)" "$CCD" "$(consent_markers | paste -sd: -)" \
@@ -159,18 +165,27 @@ probe_env() { # what probe.sbatch needs, as shell assignments (no secrets; paths
 bind_args() { local b out=""; for b in $P_binds; do out="$out${out:+ }-B $b"; done; printf '%s' "$out"; }
 cmd_probe() {
   load_profile
-  local show=0 wait_min=0 part="$P_partition_cpu" qos="$P_qos_cpu" time="00:05:00"
+  local show=0 wait_min=0 part="$P_partition_cpu" qos="$P_qos_cpu" time="00:10:00"
   while [ $# -gt 0 ]; do case "$1" in --show) show=1; shift;; --wait) wait_min="$2"; shift 2;; --partition) part="$2"; shift 2;; --qos) qos="$2"; shift 2;; --time) time="$2"; shift 2;; *) die "probe: unknown option $1";; esac; done
   local pd="$STATE_DIR/probe"
   if [ $show = 1 ]; then [ -s "$pd/probe.json" ] || die "no probe result yet at $pd/probe.json (submit one with: hpcworker probe)"; if [ -n "$PY" ]; then "$PY" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=1, sort_keys=True))' "$pd/probe.json"; else cat "$pd/probe.json"; fi; return 0; fi
   mkdir -p "$pd" "$WORKSPACES/worker" || die "cannot create $pd (is shared_state_dir right?)"
   chmod 700 "$pd" 2>/dev/null   # probe.json carries the plan and the e-mail of the sign-in
-  probe_env > "$pd/probe.env"
-  rm -f "$pd/probe.json"
-  local id; id=$(cd "$pd" && adapter_submit "$JOBS/probe.sbatch" -J hpcw_probe -p "$part" ${qos:+-q "$qos"} -t "$time" -D "$pd" --export=ALL,HPCW_PROBE_DIR="$pd" 2>&1) || die "the scheduler refused the probe: $id"
-  echo "$id" > "$pd/job.id"
-  say "probe job $id submitted ($part${qos:+/$qos}, $time). It writes $pd/probe.json; read it with: hpcworker probe --show"
-  say "(the file appears when the job has run; do not poll the scheduler: 'hpcworker probe --wait 15' checks the file once a minute)"
+  # a probe already queued or running in this one directory: nothing submitted (two probes ran side
+  # by side there on 2026-09-29 and neither finished); ONE squeue, on the recorded id only
+  local id="" prev line; prev=$(cat "$pd/job.id" 2>/dev/null || true)
+  if [ -n "$prev" ]; then
+    line=$(adapter_status_many "$prev" 2>/dev/null | head -1)
+    case "$(printf '%s' "$line" | cut -d'|' -f2)" in PENDING|RUNNING) id="$prev"; say "probe job $prev is still $(fmt_job_state "${line#*|}"); nothing submitted. It writes $pd/probe.json; read it with: hpcworker probe --show";; esac
+  fi
+  if [ -z "$id" ]; then
+    probe_env > "$pd/probe.env"
+    rm -f "$pd/probe.json"
+    id=$(cd "$pd" && adapter_submit "$JOBS/probe.sbatch" -J hpcw_probe -p "$part" ${qos:+-q "$qos"} -t "$time" -D "$pd" --export=ALL,HPCW_PROBE_DIR="$pd" 2>&1) || die "the scheduler refused the probe: $id"
+    echo "$id" > "$pd/job.id"
+    say "probe job $id submitted ($part${qos:+/$qos}, $time). It writes $pd/probe.json; read it with: hpcworker probe --show"
+    say "(the file appears when the job has run; do not poll the scheduler: 'hpcworker probe --wait 15' checks the file once a minute)"
+  fi
   if [ "$wait_min" -gt 0 ] 2>/dev/null; then
     local i; for ((i = 0; i < wait_min; i++)); do [ -s "$pd/probe.json" ] && break; sleep 60; done
     [ -s "$pd/probe.json" ] && cmd_probe --show || say "no probe.json after $wait_min min; the job may still be queued (hpcworker worker list shows nothing for it; check $pd/probe_$id.out later)"
@@ -179,6 +194,36 @@ cmd_probe() {
 
 # ---- worker: start/stop submit and cancel once; status/list/log read files ---------------------------
 run_dir() { echo "$STATE_DIR/$1"; }
+stop_worker_run() { # RUN_DIR NAME: the stop file, then a wait for the job's own word, then the scheduler once
+  # The job notices the stop file within a few seconds, ends its session (Remote Control
+  # deregisters), cancels its queued successor, writes "stopped" and, last, touches stop.done. This
+  # side waits up to HPCW_STOP_WAIT_S (45 s) for that file, reading the directory only; then ONE
+  # squeue over both ids, and ONE scancel for whatever the scheduler still holds. An scancel that
+  # lands while the job is leaving is harmless (its trap keeps the state stopped), but it is not
+  # sent on a guess: measured on job 40501099, an scancel sent 15 s in overwrote a stop with "preempted".
+  local rd="$1" name="$2" wait_s="${HPCW_STOP_WAIT_S:-45}" poll_s="${HPCW_STOP_POLL_S:-5}"
+  local jid nid; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd")
+  local ids="$jid${jid:+${nid:+,}}$nid" waited=0 left=false already=false
+  # a stop that went through before (stopped on record, its stop.done still there, no successor): no wait
+  [ -e "$rd/stop.done" ] && [ -z "$nid" ] && [ "$(read_field "$rd/status.json" state 2>/dev/null)" = stopped ] && already=true
+  # a worker already stopped keeps its stop.done, so a second "worker stop" is the same no-op
+  if [ $already = false ]; then rm -f "$rd/stop.done"; touch "$rd/stop"; fi
+  if [ -n "$ids" ] && [ $already = false ]; then
+    while [ ! -e "$rd/stop.done" ] && [ "$waited" -lt "$wait_s" ]; do sleep "$poll_s"; waited=$((waited + poll_s)); done
+  fi
+  [ -e "$rd/stop.done" ] && left=true
+  local alive="" line id st raw
+  if [ -n "$ids" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue; id=${line%%|*}; st=$(printf '%s' "$line" | cut -d'|' -f2); raw=$(printf '%s' "$line" | cut -d'|' -f4)
+      case "$st:$raw" in RUNNING:COMPLETING|RUNNING:CG|RUNNING:E) ;; PENDING:*|RUNNING:*) alive="$alive${alive:+ }$id";; esac   # leaving already: not cancelled again
+    done < <(adapter_status_many "$ids" 2>/dev/null)
+  fi
+  [ -n "$alive" ] && adapter_cancel $alive
+  rm -f "$rd/next.id"
+  local how; if [ $already = true ]; then how="it had stopped before"; elif [ $left = true ]; then how="the job left on its own within ${waited}s"; elif [ -z "$ids" ]; then how="no job on record"; else how="no word from job ${jid} within ${wait_s}s"; fi
+  say "worker $name: stopped ($how${alive:+; cancelled at the scheduler: $alive}; the chain ended)"
+}
 read_field() { # FILE KEY -> string value (python-free; strings and simple scalars)
   [ -s "$1" ] || return 1
   tr -d '\n' < "$1" | grep -o "\"$2\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$2\": *//" -e 's/^"//' -e 's/"$//'
@@ -229,14 +274,7 @@ EOT
       say "watch it with: hpcworker worker status --name $name   (reads $rd/status.json; no scheduler polling)";;
     stop)
       [ -d "$rd" ] || die "no worker named $name"
-      rm -f "$rd/stop.done"; touch "$rd/stop"
-      local jid nid; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd")
-      # the job notices the stop file within a few seconds, cancels its queued successor and leaves on
-      # its own (Remote Control deregisters); ONE scancel afterwards, naming both ids, covers a job that did not
-      local i; for i in 1 2 3; do [ -e "$rd/stop.done" ] && break; sleep 5; done
-      [ -n "$jid$nid" ] && adapter_cancel $jid $nid
-      rm -f "$rd/next.id"
-      say "worker $name: stopped ($([ -e "$rd/stop.done" ] && echo "the job left on its own" || echo "job ${jid:-none} cancelled")${nid:+; queued successor $nid cancelled}; the chain ended)";;
+      stop_worker_run "$rd" "$name";;
     status)
       [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
       local sj="$rd/status.json" cj="$rd/connection.json"
@@ -271,11 +309,13 @@ EOT
 # there, refuses to touch a file it cannot parse, and runs only in the login and consent sittings.
 # shellcheck disable=SC2016
 SEED='const fs=require("fs"),p=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={},had=false;try{const t=fs.readFileSync(p,"utf8");had=true;j=JSON.parse(t)}catch(e){if(had){console.log("unreadable");process.exit(0)}}if(!j||typeof j!=="object")j={};let ch=false;if(j.hasCompletedOnboarding!==true){j.hasCompletedOnboarding=true;ch=true}if(!j.theme){j.theme="dark";ch=true}j.projects=j.projects||{};const d=process.cwd();const pr=j.projects[d]||{};if(pr.hasTrustDialogAccepted!==true){pr.hasTrustDialogAccepted=true;j.projects[d]=pr;ch=true}if(ch){fs.writeFileSync(p+".part",JSON.stringify(j,null,1),{mode:0o600});fs.renameSync(p+".part",p)}console.log(ch?"seeded":"already");'
-# the one sitting: `claude auth login`, then, if Claude Code has not recorded the Remote Control answer,
-# `claude remote-control` once so the student answers y and leaves with Ctrl-C. Runs inside the image.
+# the one sitting for a person at a terminal: `claude auth login`, then, if neither Claude Code nor a
+# marker file records the Remote Control answer, `claude remote-control` once so the student answers y
+# and leaves with Ctrl-C. Runs inside the image. $5 is the colon-separated marker list.
 # shellcheck disable=SC2016
-LOGIN_SITTING='cd "$1" || exit 1; claude="$2"; cfg="$CLAUDE_CONFIG_DIR/.claude.json"
+LOGIN_SITTING='cd "$1" || exit 1; claude="$2"; cfg="$CLAUDE_CONFIG_DIR/.claude.json"; markers="${5:-}"
 seen() { grep -q -E "\"remoteDialogSeen\": *true" "$cfg" 2>/dev/null; }
+marked() { local IFS=":" m; for m in $markers; do [ -n "$m" ] && [ -e "$m" ] && return 0; done; return 1; }
 if [ "$4" = login ]; then
   "$claude" auth login; rc=$?
   [ $rc = 0 ] || { echo; echo "Claude Code'"'"'s sign-in did not complete (exit $rc). Run hpcworker claude login again."; exit $rc; }
@@ -284,6 +324,7 @@ else
 fi
 node -e "$3" >/dev/null 2>&1 || true
 if seen; then echo; echo "Your Remote Control answer is already on record with Claude Code; nothing more to do."; exit 0; fi
+if marked; then echo; echo "Your Remote Control answer is already on record (the panel or hpcworker claude consent recorded it); nothing more to do."; exit 0; fi
 echo; echo "One more question, once. Claude Code will now ask \"Enable Remote Control? (y/n)\": type y."
 echo "When you see \"Connected\" and a session line, press Ctrl+C to leave; your worker takes it from here."; echo; sleep 2
 "$claude" remote-control
@@ -302,9 +343,49 @@ in_job_exec() { # MODE [args]: inside an allocation, run claude inside the image
     login|consent)
       # the student asked for a sign-in: Claude Code's own folder may be created for it (settings, not credentials)
       mkdir -p "$CCD" && chmod 700 "$CCD" 2>/dev/null
-      hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$LOGIN_SITTING" _ "$ws" "$P_claude_bin" "$SEED" "$mode";;
+      if [ "$mode" = login ] && [ "${1:-}" = "--plain" ]; then
+        # the panel's sitting (lib/login_plain.sh): Claude Code under a pty inside the image, a line
+        # contract on stdout, the transcript under /dev/shm for this sitting only, removed with it
+        local lp="$LIB/login_plain.sh" sd="$P_ipc_dir/$USER/hpcw_login_$(hpcw_job_id)"
+        [ -s "$lp" ] || { echo "HPCW-LOGIN-FAILED: the sign-in helper is missing from the installed copy; run hpcworker install again"; return 3; }
+        mkdir -p "$sd" && chmod 700 "$sd" || { echo "HPCW-LOGIN-FAILED: this compute node has no writable $P_ipc_dir for the sitting"; return 3; }
+        trap "hpcw_rm_own_tmp '$HPCW_NODE_TMP' '$sd'" EXIT
+        hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$(cat "$lp")" _ "$ws" "$P_claude_bin" "$sd" "$SEED" 600
+        return $?
+      fi
+      hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$LOGIN_SITTING" _ "$ws" "$P_claude_bin" "$SEED" "$mode" "$(consent_markers | paste -sd: -)";;
     run) hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c 'cd "$1" && exec "$2" "${@:3}"' _ "$ws" "$P_claude_bin" "$@";;
     *) die "_exec: login|consent|run ...";;
+  esac
+}
+# The panel's sign-in: no prose, a line contract the extension reads over the portal's shell. Prints
+# "HPCW-LOGIN: ..." progress lines, "AUTH-URL: <link>" once Claude Code shows Anthropic's authorize
+# page, "SIGNED-IN <email> <plan>" and exits 0 when `claude auth status` says loggedIn, or one
+# "HPCW-LOGIN-FAILED: <sentence>" and exits 1. The code the student pastes goes through the shell to
+# Claude Code's terminal and is never echoed. A worker heartbeat younger than 15 min that already
+# says loggedIn answers without an allocation.
+plain_login() {
+  local self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
+  local best="" bt=0 d m age
+  for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; m=$(stat -c %Y "$d/status.json"); [ "$m" -gt "$bt" ] && { bt=$m; best="$d/status.json"; }; done
+  if [ -n "$best" ]; then
+    age=$(( $(date +%s) - bt ))
+    if [ "$age" -lt 900 ] && tr -d '\n' < "$best" | grep -q '"loggedIn": *true'; then
+      say "HPCW-LOGIN: already signed in (a worker confirmed it ${age}s ago)"
+      say "SIGNED-IN $(tr -d '\n' < "$best" | grep -o '"email": *"[^"]*"' | head -1 | cut -d'"' -f4) $(tr -d '\n' < "$best" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+      return 0
+    fi
+  fi
+  say "HPCW-LOGIN: requesting a compute node"
+  # a bounded wait for the node (the panel must get a sentence, never a hang); 20 min of wall time for a 10 min sitting
+  HPCW_ALLOC_WAIT_S=600 adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain
+  plain_login_outcome $?
+}
+plain_login_outcome() { # the sitting's exit: 0 signed in; 3 it already printed its own failure line; anything else is the scheduler's
+  case "$1" in
+    0) return 0;;
+    3) return 1;;
+    *) say "HPCW-LOGIN-FAILED: the cluster did not give a compute node in time, or the session ended early; try again in a minute"; return 1;;
   esac
 }
 cmd_claude() {
@@ -313,6 +394,7 @@ cmd_claude() {
   local self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
   case "$sub" in
     login)
+      if [ "${1:-}" = "--plain" ]; then plain_login; return $?; fi
       cat <<'EOT'
 Sign in to Claude on the cluster, in one sitting.
 
@@ -382,8 +464,8 @@ emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
-  local miss="" f; for f in bin/hpcworker lib/profile.py lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
-  grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
+  local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
+  grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/*.sh "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
   if [ -z "$miss" ]; then emit hpcw.scripts true false false "hpcworker $VERSION in $SRC_ROOT"; else emit hpcw.scripts false false false "missing or damaged:$miss"; fi
   if [ -n "$PY" ]; then emit hpcw.python3 true false false "$PY ($("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null))"; else emit hpcw.python3 false false false "no python3 on this node; the system package is enough"; fi
   if [ ! -s "$PROFILE" ]; then emit hpcw.profile false false false "no profile at $PROFILE (hpcworker install --profile NAME or --discover)"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
@@ -423,7 +505,7 @@ cmd_diag() {
     local age=$(( ( $(date +%s) - $(stat -c %Y "$pj") ) / 86400 ))
     if [ "$eg" = none ]; then emit hpcw.probe false false false "probe ${age}d old: compute nodes cannot reach api.anthropic.com/platform.claude.com; ask your center for an HTTP proxy"
     else emit hpcw.probe true "$([ "$age" -gt 30 ] && echo true || echo false)" false "probe ${age}d old on $(read_field "$pj" hostname): egress $eg, claude $(read_field "$pj" claude_version), loggedIn=$li, tmux=$(tr -d '\n' < "$pj" | grep -o '"tmux": *{[^}]*}' | grep -o '"present": *\(true\|false\)' | grep -o 'true\|false'), sbatch on node=$(read_field "$pj" sbatch_on_node)"; fi
-  else emit hpcw.probe false true false "no probe yet: hpcworker probe (five minutes on a compute node)"; fi
+  else emit hpcw.probe false true false "no probe yet: hpcworker probe (up to ten minutes on a compute node)"; fi
   local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
     local st age nid; st=$(read_field "$d/status.json" state); age=$(( $(date +%s) - $(stat -c %Y "$d/status.json") )); nid=$(next_job_of "$d")
     case "$st" in
