@@ -23,8 +23,11 @@
 #SBATCH --output=build_image_%j.out
 set -uo pipefail
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
+# the code: HPCW_CODE when given, else the lab's shared copy this account uses (~/.hpcworker/shared names it), else ~/.hpcworker
+if [ -z "${HPCW_CODE:-}" ] && [ -s "$HPCW_HOME/shared" ]; then IFS= read -r HPCW_CODE < "$HPCW_HOME/shared"; fi
+HPCW_CODE="${HPCW_CODE:-$HPCW_HOME}"
 # shellcheck disable=SC1090
-source "$HPCW_HOME/lib/adapters/common.sh" || { echo "REFUSING: $HPCW_HOME/lib/adapters/common.sh missing (run hpcworker install)"; exit 1; }
+source "$HPCW_CODE/lib/adapters/common.sh" || { echo "REFUSING: $HPCW_CODE/lib/adapters/common.sh missing (run hpcworker install)"; exit 1; }
 JOB=$(hpcw_job_id)
 if [ -z "$JOB" ]; then echo "REFUSING: this builds a container and must run as a scheduler job (sbatch), not on $(hostname -s)"; exit 1; fi
 IMAGE_OUT="${IMAGE_OUT:?set IMAGE_OUT=<dir>/claude-node22.sif}"

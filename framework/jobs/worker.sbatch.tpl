@@ -23,6 +23,10 @@
 # about to start, never removing a key, never touching an unparseable file. status.json says in
 # "needs" (login | consent | nothing) and "hint" what the student must do now, for the panel's one line.
 #
+# The code: lib/ comes from HPCW_CODE, the directory the command that rendered this job ran from
+# (the lab's shared copy, by its numbered directory, or ~/.hpcworker); HPCW_HOME is the student's
+# own folder (profile, consent marker). A chain keeps the code it started with until the next start.
+#
 # What it never does: read, copy or print the student's Claude credential (Claude Code alone uses
 # CLAUDE_CONFIG_DIR; the framework only asks `claude auth status`), put a token on a command line,
 # keep anything under a swept /tmp that must survive, or delete anything outside this run directory
@@ -31,7 +35,7 @@
 set -uo pipefail
 HPCW_VERSION=@VERSION@
 SITE='@SITE@'; RUN='@RUN@'; RUN_DIR='@RUN_DIR@'; STATE_DIR='@STATE_DIR@'; WORKSPACE='@WORKSPACE@'
-HPCW_HOME='@HPCW_HOME@'; SCHEDULER='@SCHEDULER@'; CHAIN=@CHAIN@
+HPCW_HOME='@HPCW_HOME@'; HPCW_CODE='@HPCW_CODE@'; SCHEDULER='@SCHEDULER@'; CHAIN=@CHAIN@
 RUNTIME='@RUNTIME@'; RUNTIME_BIN='@RUNTIME_BIN@'; RUNTIME_MODULE='@RUNTIME_MODULE@'
 IMAGE='@IMAGE@'; IMAGE_TYPE='@IMAGE_TYPE@'; CLAUDE_BIN='@CLAUDE_BIN@'
 BINDS='@BINDS@'
@@ -47,10 +51,10 @@ ORIG_TMPDIR="${TMPDIR:-}"   # what a successor should inherit: not this node's p
 
 say() { echo "$(date -u +%FT%TZ) $*"; }
 # shellcheck disable=SC1090
-source "$HPCW_HOME/lib/adapters/common.sh" || { echo "REFUSING: $HPCW_HOME/lib/adapters/common.sh missing (run hpcworker install)"; exit 1; }
+source "$HPCW_CODE/lib/adapters/common.sh" || { echo "REFUSING: $HPCW_CODE/lib/adapters/common.sh missing (run hpcworker install, then start the worker again)"; exit 1; }
 HAVE_ADAPTER=0
 # shellcheck disable=SC1090
-if [ -s "$HPCW_HOME/lib/adapters/$SCHEDULER.sh" ] && source "$HPCW_HOME/lib/adapters/$SCHEDULER.sh"; then HAVE_ADAPTER=1; fi
+if [ -s "$HPCW_CODE/lib/adapters/$SCHEDULER.sh" ] && source "$HPCW_CODE/lib/adapters/$SCHEDULER.sh"; then HAVE_ADAPTER=1; fi
 JOB=$(hpcw_job_id)
 [ -n "$JOB" ] || { echo "REFUSING: this is a batch job body and runs only inside a scheduler job, not on $(hostname -s)"; exit 1; }
 NODE=$(hostname -s)
@@ -128,7 +132,7 @@ CLEAN_ENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_UR
 # `script` and tmux can all run it without quoting travelling through them
 { echo '#!/bin/bash'; echo "# written by hpcworker job $JOB on $NODE: one command inside the worker image, with Claude Code's clean environment"
   echo "export RUNTIME=$(printf %q "$RUNTIME") RUNTIME_BIN=$(printf %q "$RUNTIME_BIN") RUNTIME_MODULE=$(printf %q "$RUNTIME_MODULE") HPCW_BINDS=$(printf %q "$BINDS") HPCW_NODE_TMP=$(printf %q "$HPCW_NODE_TMP") HPCW_JOB_ID=$(printf %q "$JOB")"
-  echo "source $(printf %q "$HPCW_HOME/lib/adapters/common.sh")"
+  echo "source $(printf %q "$HPCW_CODE/lib/adapters/common.sh")"
   printf 'hpcw_runtime_exec %q' "$IMAGE"; for a in "${CLEAN_ENV[@]}"; do printf ' %q' "$a"; done; echo ' "$@"'; } > in_image.sh.part
 chmod 700 in_image.sh.part && mv -f in_image.sh.part in_image.sh
 in_image() { local t="$1"; shift; timeout "$t" "$RUN_DIR/in_image.sh" "$@"; }
@@ -158,7 +162,7 @@ say "remote-control flags accepted: $(printf '%s' "$HELP" | grep -o -- '--[a-z-]
 # ---- 4. the always-on chain: one successor per link, queued now, started when this job ends ----
 arm_chain() {
   [ "$CHAIN" = 1 ] || { CHAIN_NOTE="chain off for this worker"; return 0; }
-  [ $HAVE_ADAPTER = 1 ] || { CHAIN_NOTE="no $SCHEDULER adapter in $HPCW_HOME/lib/adapters; this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
+  [ $HAVE_ADAPTER = 1 ] || { CHAIN_NOTE="no $SCHEDULER adapter in $HPCW_CODE/lib/adapters; this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
   [ -e stop ] && return 0
   [ -s job.sbatch ] || { CHAIN_NOTE="no job.sbatch in $RUN_DIR to re-submit; this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
   local nid np

@@ -1,12 +1,16 @@
 #!/bin/bash
 # hpcworker: your own Claude Code, as a batch job on your university's cluster, reachable from
 # claude.ai/code and the Claude app through Claude Code's Remote Control. This is the one command;
-# it lives at ~/.hpcworker/bin/hpcworker and runs on the login node with bash, coreutils and the
-# system python3 only. Nothing heavy runs here: the container and Claude Code run inside jobs.
+# it runs on the login node with bash, coreutils and the system python3 only. Nothing heavy runs
+# here: the container and Claude Code run inside jobs. An account has it one of two ways: the lab's
+# shared copy (then ~/.hpcworker/bin/hpcworker is a small launcher for it) or a copy of its own.
 #
-#   hpcworker install [--profile NAME | --discover] [--force]   copy into ~/.hpcworker (again: refresh or upgrade), write profile.json
-#   hpcworker profile show|path|validate|set KEY VALUE          the site profile
-#   hpcworker install [--profile NAME] [--discover] [--force] [--no-shell-path]   (--no-shell-path: do not touch ~/.bashrc)
+#   hpcworker install --shared [DIR] [--profile NAME] [--force] [--no-shell-path]
+#                     use the lab's shared copy at DIR (default: the profile's shared_install); nothing is copied
+#   hpcworker install [--own] [--profile NAME | --discover] [--force] [--no-shell-path]
+#                     a copy of your own in ~/.hpcworker (again: refresh or upgrade); --own leaves a shared copy
+#                     (--no-shell-path: do not touch ~/.bashrc; profile.json is kept unless --force)
+#   hpcworker profile show|path|validate|set KEY VALUE|schema   the site profile
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
 #   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain]
@@ -14,7 +18,7 @@
 #   hpcworker claude login [--plain] | status [--alloc]           your Claude sign-in, in one sitting (--plain: the panel's line contract)
 #   hpcworker claude consent                                     the Remote Control answer alone, when login did not cover it
 #   hpcworker diag [--json]                                      one line per check
-#   hpcworker version
+#   hpcworker version                                            the number; "(shared copy at DIR)" on the lab's copy
 #
 # Rules this command keeps: it never reads, copies or prints a Claude credential (Claude Code keeps
 # its own; the framework reads `claude auth status`, and two booleans Claude Code writes into its
@@ -24,13 +28,34 @@
 # directories under the state directory and a job's own node-local temp; the one subcommand that
 # replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
 set -uo pipefail
-VERSION=4
+VERSION=5
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
-SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "$0")
-SRC_ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
-# run from the installed copy or from a checkout: lib, jobs and profiles come from where this file lives
+# Where the code lives: the directory above this file's bin/. A link to the file itself is followed
+# (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
+# State /rs/rs_grp_oschome is itself a link to the volume's physical path, which must not end up in
+# jobs and messages (readlink -f did that). A shared copy's `current` link is then followed ONE
+# level, to its numbered directory: a job names the version it started on, so a later publish never
+# changes the code under a running chain, and the older numbered directories are kept for it.
+hpcw_follow_file() { local f="$1" t n=0; while [ -L "$f" ] && [ $n -lt 40 ]; do t=$(readlink "$f") || break; case "$t" in /*) f="$t";; *) f="$(dirname "$f")/$t";; esac; n=$((n + 1)); done; printf '%s' "$f"; }
+# DIR -> absolute and logical; under a Windows checkout's Git Bash (the tests) the drive spelling, which its native python can open
+abs_dir() { (cd "$1" 2>/dev/null || exit 1; case "${OSTYPE:-}" in msys*) pwd -W;; *) pwd;; esac); }
+hpcw_code_root() { # DIR -> DIR, or the directory its final link names (one level), still logical
+  local d="${1%/}" t; [ -L "$d" ] || { printf '%s' "$d"; return 0; }
+  t=$(readlink "$d") || { printf '%s' "$d"; return 0; }
+  case "$t" in /*) ;; *) t="$(dirname "$d")/$t";; esac
+  abs_dir "$t" || printf '%s' "$d"
+}
+SELF=$(hpcw_follow_file "${BASH_SOURCE[0]}")
+SRC_ROOT=$(hpcw_code_root "$(abs_dir "$(dirname "$SELF")/..")")
+# lib, jobs and profiles come from where this file lives: a checkout, the copy in ~/.hpcworker, or the lab's shared copy
 LIB="$SRC_ROOT/lib"; JOBS="$SRC_ROOT/jobs"; PROFILES="$SRC_ROOT/profiles"
 PROFILE="${HPCW_PROFILE:-$HPCW_HOME/profile.json}"
+# An account on the lab's shared copy: ~/.hpcworker/shared (the marker) names the shared directory,
+# ~/.hpcworker/bin/hpcworker is a launcher for it, and the profile, the log and the consent marker
+# stay in ~/.hpcworker (run directories under shared_state_dir, as always). A full copy of the
+# command in ~/.hpcworker itself (an upload from the extension) wins over a marker left behind.
+SHARED_DIR=""; [ -s "$HPCW_HOME/shared" ] && { IFS= read -r SHARED_DIR < "$HPCW_HOME/shared" || true; }
+LAUNCHER_TAG='# hpcworker launcher for a shared copy (managed: "hpcworker install" rewrites this file)'
 PY="${HPCW_PYTHON:-}"; [ -n "$PY" ] || for p in python3 /usr/bin/python3 /usr/libexec/platform-python; do command -v "$p" >/dev/null 2>&1 && { PY=$(command -v "$p"); break; }; done
 die() { echo "hpcworker: $*" >&2; exit 1; }
 say() { echo "$*"; }
@@ -40,6 +65,10 @@ prof_py() { need_py; "$PY" "$LIB/profile.py" "$@"; }
 source "$LIB/adapters/common.sh" || die "$LIB/adapters/common.sh is missing"
 json_str() { hpcw_json_str "$1"; }
 in_job() { [ -n "${SLURM_JOB_ID:-${PBS_JOBID:-${LSB_JOBID:-}}}" ]; }
+same_dir() { local a b; a=$(cd "$1" 2>/dev/null && pwd -P) && b=$(cd "$2" 2>/dev/null && pwd -P) && [ "$a" = "$b" ]; }   # two directories that exist and are one
+# this run uses the lab's shared copy: a marker, and the code is not a full copy inside this home
+shared_mode() { [ -n "$SHARED_DIR" ] && ! same_dir "$SRC_ROOT" "$HPCW_HOME"; }
+read_version() { local v=""; [ -r "$1" ] && v=$(tr -d '[:space:]' 2>/dev/null < "$1"); [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"; }
 load_profile() {
   [ -s "$PROFILE" ] || die "no profile at $PROFILE: run 'hpcworker install --profile wayne' (or 'hpcworker install --discover')"
   local env; env=$(prof_py shellenv "$PROFILE") || die "profile $PROFILE unreadable"
@@ -98,39 +127,173 @@ shell_path_block() {
   case ":$PATH:" in *":$HOME/.hpcworker/bin:"*) ;; *) say "PATH: ~/.hpcworker/bin is added by a managed block in ~/.bashrc; new terminals have it, this one needs: export PATH=\"\$HOME/.hpcworker/bin:\$PATH\"";; esac
 }
 
-cmd_install() {
-  local name="" discover=0 force=0 shellpath=1
-  while [ $# -gt 0 ]; do case "$1" in --profile) name="$2"; shift 2;; --discover) discover=1; shift;; --force) force=1; shift;; --no-shell-path) shellpath=0; shift;; *) die "install: unknown option $1";; esac; done
-  # --force replaces profile.json, a file of yours: only for a person at a terminal, and only when a profile is in the way
-  if [ $force = 1 ] && [ -s "$PROFILE" ]; then refuse_if_agent "install --force"; fi
+# ---- the lab's shared copy -----------------------------------------------------------------------
+# A lab keeps one copy of the framework on its shared storage (a numbered directory per version and
+# a `current` link, published by tools/deploy_shared.sh), and each account uses it through a small
+# launcher in ~/.hpcworker/bin: none of the code is copied into the home, and a new version reaches
+# every account when the lab publishes it. The account's profile, log and consent marker stay in
+# ~/.hpcworker; its run directories stay under shared_state_dir.
+is_launcher() { [ -f "$1" ] && [ ! -L "$1" ] && head -n 3 "$1" 2>/dev/null | grep -qxF "$LAUNCHER_TAG"; }
+shared_problem() { # DIR -> one sentence when DIR is not a shared copy this account can use; nothing when it is
+  local d="$1" pd ph
+  case "$d" in /*) ;; [A-Za-z]:/*) case "${OSTYPE:-}" in msys*) ;; *) echo "it is not an absolute path"; return 0;; esac;; *) echo "it is not an absolute path"; return 0;; esac
+  case "$d" in *$'\n'*) echo "its name has a line break"; return 0;; esac
+  { [ -d "$d" ] && [ -x "$d" ] && [ -r "$d" ]; } || { echo "this account cannot open it (it does not exist, or this account is not in the group that may read it)"; return 0; }
+  [ -n "$(read_version "$d/VERSION")" ] || { echo "it has no readable VERSION file"; return 0; }
+  local f; for f in bin/hpcworker lib/profile.py lib/adapters/common.sh jobs/worker.sbatch.tpl; do [ -r "$d/$f" ] || { echo "$f is missing there or cannot be read"; return 0; }; done
+  pd=$(cd "$d" && pwd -P); ph=$(cd "$HPCW_HOME" 2>/dev/null && pwd -P)
+  if [ -n "$ph" ]; then case "$pd/" in "$ph"/*) echo "it is inside $HPCW_HOME, the folder the launcher goes into"; return 0;; esac; fi
+  return 0
+}
+shared_default() { # NAME -> the shared copy the site profile names (this copy's profiles/NAME.json, then profile.json), else the one in use
+  local v=""
+  [ -n "$1" ] && [ -s "$PROFILES/$1.json" ] && v=$(prof_py get "$PROFILES/$1.json" shared_install 2>/dev/null)
+  [ -z "$v" ] && [ -s "$PROFILE" ] && v=$(prof_py get "$PROFILE" shared_install 2>/dev/null)
+  printf '%s' "${v:-$SHARED_DIR}"
+}
+own_copy_parts() { # the pieces of a copy of the code inside this home (the launcher is not one)
+  local p; for p in bin/hpcworker lib jobs profiles VERSION README.md; do
+    [ -e "$HPCW_HOME/$p" ] || [ -L "$HPCW_HOME/$p" ] || continue
+    [ "$p" = bin/hpcworker ] && is_launcher "$HPCW_HOME/$p" && continue
+    printf '%s\n' "$p"
+  done
+}
+live_run() { # the first run of this account's that may still read code from this home: a queued
+  # successor, a heartbeat under three minutes old, a job submitted that has not reported, a probe
+  # under way. Files only, no scheduler call. A running job sources lib/ again on every call into
+  # the container, so its code must not move while it runs.
+  [ -s "$PROFILE" ] || return 0
+  local sd d n st now; sd=$(prof_py get "$PROFILE" shared_state_dir 2>/dev/null); { [ -n "$sd" ] && [ -d "$sd" ]; } || return 0
+  now=$(date +%s)
+  for d in "$sd"/*/; do
+    [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = workspaces ] && continue
+    if [ "$n" = probe ]; then
+      [ -s "$d/job.id" ] && [ ! -s "$d/probe.json" ] && [ $(( now - $(stat -c %Y "$d/job.id") )) -lt 900 ] && { echo "probe (job $(cat "$d/job.id"))"; return 0; }
+      continue
+    fi
+    [ -s "$d/next.id" ] && { echo "$n (job $(next_job_of "$d") is queued to take over)"; return 0; }
+    if [ -s "$d/status.json" ]; then
+      st=$(read_field "$d/status.json" state)
+      [ "$st" != stopped ] && [ $(( now - $(stat -c %Y "$d/status.json") )) -lt 180 ] && { echo "$n (job $(read_field "$d/status.json" job), $st)"; return 0; }
+    fi
+    [ -s "$d/job.id" ] && [ ! -e "$d/stop" ] && [ ! -e "$d/stop.done" ] && { [ ! -e "$d/status.json" ] || [ "$d/job.id" -nt "$d/status.json" ]; } \
+      && { echo "$n (job $(cat "$d/job.id") was submitted and has not reported yet)"; return 0; }
+  done
+  return 0
+}
+ASIDE=""
+move_aside() { # PART...: moved into ~/.hpcworker/replaced/<time>/ (one folder per install run); nothing is ever deleted
+  local p n=0 base
+  if [ -z "$ASIDE" ]; then base="$HPCW_HOME/replaced/$(date +%Y%m%d-%H%M%S)"; ASIDE="$base"; while [ -e "$ASIDE" ]; do n=$((n + 1)); ASIDE="$base-$n"; done; fi
+  for p in "$@"; do mkdir -p "$(dirname "$ASIDE/$p")" && mv -f "$HPCW_HOME/$p" "$ASIDE/$p" || return 1; done
+}
+write_launcher() { # DIR: ~/.hpcworker/bin/hpcworker as a small regular file that runs the shared copy.
+  # Never a link: a copy or an upload onto a link would write into the shared tree itself.
+  local dir="$1" f="$HPCW_HOME/bin/hpcworker" home
+  # shellcheck disable=SC2016
+  if same_dir "$HPCW_HOME" "$HOME/.hpcworker"; then home='"$HOME/.hpcworker"'; else home=$(printf '%q' "$HPCW_HOME"); fi
+  # shellcheck disable=SC2016
+  { printf '%s\n' '#!/bin/bash' "$LAUNCHER_TAG" "# This account uses the lab's shared copy of hpcworker; its profile, log and consent marker stay in this folder."
+    printf 'HPCW_SHARED_ROOT=%q\n' "$dir"
+    printf '[ -n "${HPCW_HOME:-}" ] || HPCW_HOME=%s\nexport HPCW_HOME\n' "$home"
+    printf '%s\n' '[ -r "$HPCW_SHARED_ROOT/bin/hpcworker" ] || { echo "hpcworker: the shared copy at $HPCW_SHARED_ROOT cannot be read from this account (ask your lab lead to give this account access to it)" >&2; exit 3; }' \
+      'exec "${BASH:-bash}" "$HPCW_SHARED_ROOT/bin/hpcworker" "$@"'
+  } > "$f.part" && chmod 755 "$f.part" && mv -f "$f.part" "$f"
+}
+install_profile() { # NAME DISCOVER FORCE: profile.json from a site profile or from discovery; one already there is kept unless --force
+  local name="$1" discover="$2" force="$3"
+  if [ -n "$name" ]; then
+    [ -s "$PROFILES/$name.json" ] || die "no profile named '$name' (have: $(ls "$PROFILES" | sed 's/\.json$//' | tr '\n' ' '))"
+    # u+w: a shared copy's files are read-only, and a copy of one keeps its mode
+    if [ -s "$PROFILE" ] && [ "$force" = 0 ]; then say "profile.json exists; kept (use --force to replace it with '$name')"; else cp -f "$PROFILES/$name.json" "$PROFILE" && chmod u+w "$PROFILE"; say "profile.json written from '$name'"; fi
+  elif [ "$discover" = 1 ]; then
+    cmd_discover --full > "$HPCW_HOME/discover.json" || die "discovery failed"
+    if [ -s "$PROFILE" ] && [ "$force" = 0 ]; then say "profile.json exists; kept (use --force to replace it with a discovered seed)"
+    else prof_py from-discovery "$HPCW_HOME/discover.json" "${HPCW_SITE:-$(hostname -s | tr -cd 'a-z0-9-')}" > "$PROFILE" || die "could not seed a profile from discovery"; say "profile.json seeded from discovery: edit partition_cpu, image_store, claude_bin, then run hpcworker probe"; fi
+  fi
+  [ -s "$PROFILE" ] && { prof_py validate "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
+  return 0
+}
+install_shared() { # DIR NAME DISCOVER FORCE: the launcher, the marker and the profile; no code is copied
+  local dir="$1" name="$2" discover="$3" force="$4"
+  [ -n "$dir" ] || dir=$(shared_default "$name")
+  [ -n "$dir" ] || die "install --shared: no shared copy is named here; give its folder (hpcworker install --shared DIR) or use a site profile that names one (shared_install)"
+  local why; why=$(shared_problem "$dir")
+  # exit 3 means "this shared copy cannot be used from this account": the extension then falls back to a copy of the account's own
+  if [ -n "$why" ]; then echo "hpcworker: the shared copy at $dir cannot be used from this account: $why. Nothing was changed." >&2; exit 3; fi
+  local code sv parts busy own_old prev="$SHARED_DIR"
+  code=$(hpcw_code_root "$dir"); sv=$(read_version "$dir/VERSION")
+  [ -z "$name" ] || [ -s "$code/profiles/$name.json" ] || die "the shared copy at $dir has no profile named '$name' (have: $(ls "$code/profiles" 2>/dev/null | sed 's/\.json$//' | tr '\n' ' ')). Nothing was changed."
+  parts=$(own_copy_parts); own_old=$(read_version "$HPCW_HOME/VERSION")
+  if [ -n "$parts" ]; then
+    busy=$(live_run)
+    [ -z "$busy" ] || die "your worker $busy still runs from the copy in $HPCW_HOME. Stop it first (hpcworker worker stop), then run this again. Nothing was changed."
+  fi
+  mkdir -p "$HPCW_HOME/bin" "$HPCW_HOME/log" || die "cannot create $HPCW_HOME"
+  chmod 700 "$HPCW_HOME"
+  # a copy of the account's own is moved aside whole, never deleted; the profile, state and consent stay where they are
+  # shellcheck disable=SC2086
+  [ -z "$parts" ] || move_aside $parts || die "could not move the copy in $HPCW_HOME aside (see $ASIDE)"
+  write_launcher "$dir" || die "could not write the launcher $HPCW_HOME/bin/hpcworker"
+  { printf '%s\n' "$dir" > "$HPCW_HOME/shared.part" && mv -f "$HPCW_HOME/shared.part" "$HPCW_HOME/shared"; } || die "could not write $HPCW_HOME/shared"
+  SHARED_DIR="$dir"; SRC_ROOT="$code"; LIB="$code/lib"; JOBS="$code/jobs"; PROFILES="$code/profiles"
+  install_profile "$name" "$discover" "$force"
+  if [ -n "$parts" ]; then say "switched to the shared copy of hpcworker $sv at $dir; your own copy${own_old:+ (version $own_old)} was moved to $ASIDE (nothing deleted)"
+  elif [ -z "$prev" ]; then say "installed: this account uses the shared copy of hpcworker $sv at $dir (nothing copied into $HPCW_HOME)"
+  elif [ "$prev" != "$dir" ]; then say "this account now uses the shared copy of hpcworker $sv at $dir (it used $prev)"
+  else say "hpcworker $sv: shared copy at $dir; launcher and marker refreshed (nothing copied)"; fi
+}
+install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as before shared copies existed
+  local name="$1" discover="$2" force="$3" hint=""
   # the copy already there, if any: install runs again over it (the same version refreshes the
   # files, a newer one upgrades them); the profile and everything under the state directory stay
-  local old=""; [ -s "$HPCW_HOME/VERSION" ] && old=$(tr -d '[:space:]' < "$HPCW_HOME/VERSION")
+  local old; old=$(read_version "$HPCW_HOME/VERSION")
+  [ -n "$name" ] && [ -z "$SHARED_DIR" ] && [ -s "$PROFILES/$name.json" ] && hint=$(prof_py get "$PROFILES/$name.json" shared_install 2>/dev/null)
   mkdir -p "$HPCW_HOME"/{bin,lib/adapters,jobs,profiles,log} || die "cannot create $HPCW_HOME"
   chmod 700 "$HPCW_HOME"
-  if [ "$SRC_ROOT" != "$HPCW_HOME" ]; then
+  # a link where the command goes is moved aside first: a copy onto it would write through it
+  [ -L "$HPCW_HOME/bin/hpcworker" ] && { move_aside bin/hpcworker || die "could not move the link $HPCW_HOME/bin/hpcworker aside"; }
+  if ! same_dir "$SRC_ROOT" "$HPCW_HOME"; then
     cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
       && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
     [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
+    # copied from a shared copy (read-only there), the files would stay read-only and the next install or upload could not replace them
+    chmod -R u+w "$HPCW_HOME"/bin "$HPCW_HOME"/lib "$HPCW_HOME"/jobs "$HPCW_HOME"/profiles "$HPCW_HOME"/VERSION 2>/dev/null
+    [ -f "$HPCW_HOME/README.md" ] && chmod u+w "$HPCW_HOME/README.md"
   fi
   # files uploaded from a Windows checkout may carry CR line endings, which break bash and sbatch
   local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/profile.py "$HPCW_HOME"/lib/*.sh "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
   chmod +x "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/jobs/*.sbatch 2>/dev/null
-  LIB="$HPCW_HOME/lib"; JOBS="$HPCW_HOME/jobs"; PROFILES="$HPCW_HOME/profiles"
-  if [ -n "$name" ]; then
-    [ -s "$PROFILES/$name.json" ] || die "no profile named '$name' (have: $(ls "$PROFILES" | sed 's/\.json$//' | tr '\n' ' '))"
-    if [ -s "$PROFILE" ] && [ $force = 0 ]; then say "profile.json exists; kept (use --force to replace it with '$name')"; else cp "$PROFILES/$name.json" "$PROFILE"; say "profile.json written from '$name'"; fi
-  elif [ $discover = 1 ]; then
-    cmd_discover --full > "$HPCW_HOME/discover.json" || die "discovery failed"
-    if [ -s "$PROFILE" ] && [ $force = 0 ]; then say "profile.json exists; kept (use --force to replace it with a discovered seed)"
-    else prof_py from-discovery "$HPCW_HOME/discover.json" "${HPCW_SITE:-$(hostname -s | tr -cd 'a-z0-9-')}" > "$PROFILE" || die "could not seed a profile from discovery"; say "profile.json seeded from discovery: edit partition_cpu, image_store, claude_bin, then run hpcworker probe"; fi
-  fi
-  [ -s "$PROFILE" ] && { prof_py validate "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
+  # this home has its own copy now: a shared copy's marker is moved aside with the rest, so nothing takes it for the copy in use
+  local left="$SHARED_DIR"
+  if [ -e "$HPCW_HOME/shared" ]; then move_aside shared || die "could not move $HPCW_HOME/shared aside"; SHARED_DIR=""; fi
+  SRC_ROOT="$HPCW_HOME"; LIB="$HPCW_HOME/lib"; JOBS="$HPCW_HOME/jobs"; PROFILES="$HPCW_HOME/profiles"
+  install_profile "$name" "$discover" "$force"
   if [ -z "$old" ]; then say "installed hpcworker $VERSION at $HPCW_HOME"
   elif [ "$old" = "$VERSION" ]; then say "hpcworker $VERSION at $HPCW_HOME: files refreshed (same version)"
-  elif [[ "$old" =~ ^[0-9]+$ ]] && [ "$old" -gt "$VERSION" ]; then say "replaced hpcworker $old with $VERSION at $HPCW_HOME (this checkout is the older one)"
+  elif [ "$old" -gt "$VERSION" ]; then say "replaced hpcworker $old with $VERSION at $HPCW_HOME (this checkout is the older one)"
   else say "upgraded $old -> $VERSION at $HPCW_HOME"; fi
-  if [ $shellpath = 1 ] && [ "$(cd "$HPCW_HOME" 2>/dev/null && pwd -P)" = "$(cd "$HOME/.hpcworker" 2>/dev/null && pwd -P)" ]; then shell_path_block
+  [ -n "$left" ] && say "this account now uses its own copy; the shared copy at $left is no longer used (its marker is in $ASIDE)"
+  # only a shared copy this account can open is worth naming (an account outside the lab's group cannot)
+  [ -n "$hint" ] && [ -z "$(shared_problem "$hint")" ] && say "note: this site has a shared copy at $hint; 'hpcworker install --shared' uses it instead of a copy of your own"
+  return 0
+}
+
+cmd_install() {
+  local name="" discover=0 force=0 shellpath=1 shared=0 own=0 sdir=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --profile) name="$2"; shift 2;; --discover) discover=1; shift;; --force) force=1; shift;; --no-shell-path) shellpath=0; shift;;
+    --shared) shared=1; if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then sdir="$2"; shift 2; else shift; fi;;
+    --own) own=1; shift;;
+    *) die "install: unknown option $1";; esac; done
+  [ $shared = 1 ] && [ $own = 1 ] && die "install: --shared and --own do not go together"
+  # --force replaces profile.json, a file of yours: only for a person at a terminal, and only when a profile is in the way
+  if [ $force = 1 ] && [ -s "$PROFILE" ]; then refuse_if_agent "install --force"; fi
+  # an account on a shared copy stays on it when install runs again (through the launcher, or from a
+  # checkout); only --own, or a full copy of the command inside this home (an upload), leaves it
+  if [ $shared = 0 ] && [ $own = 0 ] && shared_mode; then shared=1; sdir="$SHARED_DIR"; fi
+  if [ $shared = 1 ]; then install_shared "$sdir" "$name" "$discover" "$force"; else install_own "$name" "$discover" "$force"; fi
+  if [ $shellpath = 1 ] && same_dir "$HPCW_HOME" "$HOME/.hpcworker"; then shell_path_block
   else case ":$PATH:" in *":$HPCW_HOME/bin:"*) ;; *) say "add it to your PATH:  export PATH=\"$HPCW_HOME/bin:\$PATH\"";; esac; fi
   say "next: hpcworker diag, then hpcworker probe, then hpcworker claude login (once, it covers the Remote Control question too), then hpcworker worker start"
 }
@@ -184,9 +347,9 @@ cmd_discover() {
 }
 
 # ---- probe: one ten-minute job; results in a file, read from a file ----------------------------------
-probe_env() { # what probe.sbatch needs, as shell assignments (no secrets; paths only)
-  printf 'HPCW_HOME=%q\nRUNTIME=%q\nRUNTIME_BIN=%q\nRUNTIME_MODULE=%q\nIMAGE=%q\nIMAGE_TYPE=%q\nCLAUDE_BIN=%q\nBINDS=%q\nCLAUDE_CONFIG_DIR=%q\nCONSENT_MARKERS=%q\nHPCW_NODE_TMP_PATTERN=%q\nHPCW_NODE_TMP_VAR=%q\nHPCW_TMPDIR_IS_NODE_LOCAL=%q\nIPC_DIR=%q\nWORKSPACE=%q\n' \
-    "$HPCW_HOME" "$P_runtime" "$P_runtime_bin" "$P_runtime_module" "$P_image_store_path" "$P_image_store_type" "$P_claude_bin" "$(bind_args)" "$CCD" "$(consent_markers | paste -sd: -)" \
+probe_env() { # what probe.sbatch needs, as shell assignments (no secrets; paths only); HPCW_CODE is where lib/ is (a shared copy's numbered directory, or ~/.hpcworker)
+  printf 'HPCW_HOME=%q\nHPCW_CODE=%q\nRUNTIME=%q\nRUNTIME_BIN=%q\nRUNTIME_MODULE=%q\nIMAGE=%q\nIMAGE_TYPE=%q\nCLAUDE_BIN=%q\nBINDS=%q\nCLAUDE_CONFIG_DIR=%q\nCONSENT_MARKERS=%q\nHPCW_NODE_TMP_PATTERN=%q\nHPCW_NODE_TMP_VAR=%q\nHPCW_TMPDIR_IS_NODE_LOCAL=%q\nIPC_DIR=%q\nWORKSPACE=%q\n' \
+    "$HPCW_HOME" "$SRC_ROOT" "$P_runtime" "$P_runtime_bin" "$P_runtime_module" "$P_image_store_path" "$P_image_store_type" "$P_claude_bin" "$(bind_args)" "$CCD" "$(consent_markers | paste -sd: -)" \
     "$P_node_tmp" "$P_node_tmp_var" "$([ "$P_tmpdir_is_node_local" = true ] && echo 1 || echo 0)" "$P_ipc_dir" "$WORKSPACES/worker"
 }
 bind_args() { local b out=""; for b in $P_binds; do out="$out${out:+ }-B $b"; done; printf '%s' "$out"; }
@@ -290,7 +453,9 @@ EOT
         touch "$rd/.notice-shown"
       fi
       consent_given || say "note: Claude Code has not recorded your Remote Control answer yet (hpcworker claude login does that in one sitting); the job will start and wait for it"
-      local kv=(RUN="$name" HOURS="$hours" CPUS="$cpus" MEM="$mem" PERMISSION_MODE="$pm" CAPACITY="$cap" HPCW_HOME="$HPCW_HOME" CHAIN="$chain")
+      # HPCW_CODE: the job sources lib/ from where this command's code is; on a shared copy that is the
+      # numbered directory, so a chain keeps the version it started on until the next worker start
+      local kv=(RUN="$name" HOURS="$hours" CPUS="$cpus" MEM="$mem" PERMISSION_MODE="$pm" CAPACITY="$cap" HPCW_HOME="$HPCW_HOME" HPCW_CODE="$SRC_ROOT" CHAIN="$chain")
       [ -n "$part" ] && kv+=(PARTITION="$part"); [ -n "$qos" ] && kv+=(QOS="$qos"); [ -n "$requeue" ] && kv+=(REQUEUE="$requeue")
       prof_py render "$JOBS/worker.sbatch.tpl" "$PROFILE" "${kv[@]}" > "$rd/job.sbatch.part" || die "could not render the job (see the message above)"
       mv -f "$rd/job.sbatch.part" "$rd/job.sbatch"
@@ -493,7 +658,10 @@ cmd_diag() {
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
   local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
   grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/*.sh "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
-  if [ -z "$miss" ]; then emit hpcw.scripts true false false "hpcworker $VERSION in $SRC_ROOT"; else emit hpcw.scripts false false false "missing or damaged:$miss"; fi
+  if [ -n "$miss" ]; then emit hpcw.scripts false false false "missing or damaged:$miss"
+  elif shared_mode && ! is_launcher "$HPCW_HOME/bin/hpcworker"; then emit hpcw.scripts true true false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); $HPCW_HOME/bin/hpcworker is not its launcher: hpcworker install"
+  elif shared_mode; then emit hpcw.scripts true false false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); profile and log in $HPCW_HOME"
+  else emit hpcw.scripts true false false "hpcworker $VERSION in $SRC_ROOT"; fi
   if [ -n "$PY" ]; then emit hpcw.python3 true false false "$PY ($("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null))"; else emit hpcw.python3 false false false "no python3 on this node; the system package is enough"; fi
   if [ ! -s "$PROFILE" ]; then emit hpcw.profile false false false "no profile at $PROFILE (hpcworker install --profile NAME or --discover)"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
   local v; if v=$(prof_py validate "$PROFILE" 2>&1); then emit hpcw.profile true false false "$v"; else emit hpcw.profile false false false "$(echo "$v" | tr '\n' ' ')"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
@@ -559,8 +727,8 @@ case "${1:-help}" in
   claude) shift; cmd_claude "$@";;
   diag) shift; cmd_diag "$@";;
   _exec) shift; in_job_exec "$@";;
-  version) echo "$VERSION";;
-  help|-h|--help) sed -n '2,17p' "$SELF";;
+  version) if shared_mode; then printf '%s (shared copy at %s)\n' "$(read_version "$SHARED_DIR/VERSION" || echo "$VERSION")" "$SHARED_DIR"; else echo "$VERSION"; fi;;
+  help|-h|--help) awk 'NR > 1 && /^# Rules/ { exit } NR > 1' "$SELF";;
   *) die "unknown command '$1' (hpcworker help)";;
 esac
 fi

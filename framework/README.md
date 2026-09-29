@@ -1,7 +1,7 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 2.
+or the Claude app on your phone. Version 5.
 
 The cluster-side half of Ashley Bridge. Bash plus the system `python3`, nothing installed, nothing
 running on the login node except the one `sbatch`, `squeue` or `scancel` an action needs. Claude Code
@@ -9,13 +9,59 @@ runs inside a container on a compute node and registers itself with Anthropic ov
 (Claude Code's Remote Control); the browser extension in `../extension/` only starts, watches and
 stops that job through your Open OnDemand portal.
 
-## Install, in one line
+## Install: the lab's shared copy, or a copy of your own
 
-`hpcworker install` also puts `~/.hpcworker/bin` on PATH for terminals through one managed block in
-`~/.bashrc` (rewritten in place on every install, never duplicated; `--no-shell-path` leaves the file
-alone, and a custom `HPCW_HOME` only prints the one-line hint). The extension never depends on it: it
-calls the command by its full path. A terminal opened before the install needs
-`export PATH="$HOME/.hpcworker/bin:$PATH"` once.
+An account has the command one of two ways. Everything after the install (`probe`, `claude login`,
+`worker start|stop|status`, `diag`) is the same `~/.hpcworker/bin/hpcworker` either way.
+
+**The lab's shared copy** (Wayne State, and any site whose profile names `shared_install`). The lab
+keeps one copy of this framework on its shared storage, published by `tools/deploy_shared.sh`, and
+every account uses it; nothing of the code is copied into the home:
+
+```
+bash /rs/rs_grp_oschome/shared/ashley/hpcworker/current/bin/hpcworker install --shared /rs/rs_grp_oschome/shared/ashley/hpcworker/current --profile wayne
+```
+
+That is the whole install, and it is the command the extension runs through the portal's shell. It
+writes four things into `~/.hpcworker` and nothing else: `bin/hpcworker`, a short launcher
+that runs the shared copy (a regular file, never a link, so a copy or an upload onto it cannot reach
+the shared tree); `shared`, one line naming the shared directory (the marker); `profile.json`, copied
+from the shared copy's `profiles/<site>.json` and kept if one is there; and `log/`. The consent marker
+(`~/.hpcworker/consent`) stays there too, and the run directories stay under `shared_state_dir`. `DIR`
+may be left out when the profile names it (`hpcworker install --shared --profile wayne`).
+`hpcworker version` then says `5 (shared copy at DIR)`, and `hpcworker diag` names the shared
+directory and the numbered directory it resolves to.
+
+- Run `install` again (through the launcher, or from a checkout) and it stays on the shared copy: it
+  rewrites the launcher, the marker and the `~/.bashrc` block, keeps the profile, and says
+  `launcher and marker refreshed (nothing copied)`, the same words every time.
+- Over a copy of your own (the older way), `install --shared` moves `bin/hpcworker`, `lib/`, `jobs/`,
+  `profiles/`, `VERSION` and `README.md` into `~/.hpcworker/replaced/<time>/`, never deleting them,
+  and leaves the profile, the consent marker and the state directory alone. It refuses, changing
+  nothing, while a worker of yours may still run from that copy (a queued successor, a heartbeat under
+  three minutes old, a job submitted that has not reported, a probe under way): a running job reads
+  `lib/` again on every call into its container. Stop the worker first.
+- A shared directory this account cannot use is refused with exit code 3 and one sentence, changing
+  nothing: `hpcworker: the shared copy at DIR cannot be used from this account: <why>. Nothing was
+  changed.` (it does not exist or this account may not open it, it has no `VERSION`, it lacks
+  `bin/hpcworker`, `lib/` or the job template, or it is not an absolute path). When the account cannot
+  read the directory at all, bash itself refuses before hpcworker runs (`Permission denied`, exit 126;
+  `No such file or directory`, exit 127). The extension falls back to a copy of the student's own on
+  any of the three. If the shared copy later becomes unreadable, the launcher says so and exits 3.
+- **At Wayne State the student's account must be in the group `oschome`.** The volume
+  `/rs/rs_grp_oschome` is `drwxrws---` with no access for others, so an account outside the group
+  cannot reach the shared copy, the image, `claude` or its own `shared_state_dir` under it; a copy of
+  its own does not change that. The group has two members today (2026-09-29): the maintainer and the
+  group's owner. Adding a student is for C&IT or the group owner.
+
+A worker job names the numbered directory the shared copy resolves to (`current` is followed one link
+when the command starts, never further: `/rs/rs_grp_oschome` is itself a link to the volume's physical
+path, which stays out of jobs and messages). A running worker and the successors it queues keep that
+version while `current` moves on; `worker start` picks up the new one. So a published version is
+never removed while a worker may still name it.
+
+**A copy of your own** (a site with no shared copy, or `--own`): the command copies itself into
+`~/.hpcworker`.
 
 ```
 git clone <this repository> && bash ashley-bridge/framework/bin/hpcworker install --profile wayne
@@ -23,10 +69,47 @@ git clone <this repository> && bash ashley-bridge/framework/bin/hpcworker instal
 
 At a university without a profile: `hpcworker install --discover` seeds one from the login node,
 `hpcworker probe` corrects it from a compute node, and you edit the rest (`hpcworker profile set`).
+Run `install` again whenever you pull a newer checkout: over the same version it refreshes the files
+and says so, over an older one it replaces them and says `upgraded 4 -> 5`; `profile.json` and
+everything under the state directory stay as they are either way. A copy of your own in
+`~/.hpcworker` (the extension uploads one when the shared copy cannot be used) takes over from a
+shared copy: `install` run from it moves the marker into `~/.hpcworker/replaced/<time>/`, and
+`install --own` does the same from anywhere.
 
-Run `install` again whenever you pull a newer checkout: over the same version it refreshes the
-files and says so, over an older one it replaces them and says `upgraded 1 -> 2`; `profile.json`
-and everything under the state directory stay as they are either way.
+Either way, `hpcworker install` also puts `~/.hpcworker/bin` on PATH for terminals through one
+managed block in `~/.bashrc` (rewritten in place on every install, never duplicated; `--no-shell-path`
+leaves the file alone, and a custom `HPCW_HOME` only prints the one-line hint). The extension never
+depends on it: it calls the command by its full path. A terminal opened before the install needs
+`export PATH="$HOME/.hpcworker/bin:$PATH"` once.
+
+### Publishing the shared copy (the lab's maintainer)
+
+```
+tools/deploy_shared.sh --dry-run     # what would change, nothing written
+tools/deploy_shared.sh               # publish framework/ as v<VERSION> and point current at it
+```
+
+From the repository on the maintainer's machine, over `ssh wsu-grid` (BatchMode; `--host`, `--root`,
+`--group`, `--site` for another cluster; `--here` on the cluster itself). It publishes exactly
+`bin/`, `lib/`, `jobs/`, `profiles/`, `VERSION` and `README.md` (no tests), checked first: `VERSION`
+must match the `VERSION=` line of `bin/hpcworker`, every file must have LF endings, every script must
+pass `bash -n`. On the cluster it is file work on the login node and nothing else (tar, chmod,
+setfacl, one link; no scheduler call, no container, no temp file under `/tmp`):
+
+```
+ROOT/v5/          one directory per framework version, read-only for everyone
+ROOT/current      a relative link to v5, switched in one rename (ln -s, then mv -T)
+ROOT/deploy.log   one line per publish
+```
+
+`ROOT` is the directory above `current` in the site profile's `shared_install`
+(`/rs/rs_grp_oschome/shared/ashley/hpcworker` at Wayne State). The group is the one that owns the
+directory above `ROOT` (`oschome`): read and traverse, no write; others nothing. The volume carries
+POSIX ACLs with a group-writable default, so the script sets the group and mask entries (and the
+directories' defaults) to read as well, and prints `getfacl` to show it. Running it again with the
+same files changes nothing and says so; a changed `README.md` alone is updated in place; any other
+difference under the same version is refused (publish it as the next integer version, or `--replace`,
+which keeps the old directory as `v<N>.replaced-<time>`). Older versions are never removed by it.
 
 ## The path, in your words
 
@@ -195,7 +278,17 @@ jobs/probe.sbatch        the ten-minute probe (five minutes of budgets inside th
 jobs/worker.sbatch.tpl   the worker job, rendered per start from the profile
 jobs/build_image.sbatch  a SIF with Claude Code pinned, for sites without an image (not run at Wayne State)
 tests/run.sh             bash -n for every script, then the unittest suite
+../tools/deploy_shared.sh  publishes bin/ lib/ jobs/ profiles/ VERSION README.md as the lab's shared copy
 ```
+
+`~/.hpcworker` on a shared copy: `bin/hpcworker` (the launcher), `shared` (the marker), `profile.json`,
+`log/`, and when there is one, `consent`, `discover.json` and `replaced/<time>/` (a copy of the
+account's own, or a marker, moved aside by an install). On a copy of its own: the files above under
+`bin/`, `lib/`, `jobs/`, `profiles/`, plus `VERSION`, `README.md`, `profile.json` and `log/`. A worker
+job carries both: `HPCW_HOME` (the account's folder: profile, consent marker) and `HPCW_CODE` (where
+`lib/` is: the shared copy's numbered directory, or `~/.hpcworker`); so does the probe's `probe.env`.
+Site profiles and job templates are also where a later workflow engine's cluster templates would go
+(one file per site, one template per kind of job); nothing of that is built.
 
 Run directory (`<shared_state_dir>/<name>/`): `job.sbatch`, `job.id`, `next.id` (successor id and
 the id that queued it), `chain.log`, `node`, `status.json` (state `starting`, `need_login`,
@@ -239,7 +332,9 @@ Continue coding in the Claude mobile app or https://claude.ai/code?environment=e
 
 Only `profiles/wayne.json`: partitions `secp/secondary` (starts at once) and `reqp/requeue`, GPU
 partitions `gmsap` and `gvohp`, `module load apptainer/1.2.2` at `/wsu/el7/gnu7/apptainer/1.2.2/bin`,
-the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/ashley`, the CephFS state
+the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/ashley`, the lab's shared
+copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/ashley/hpcworker/current`, which
+every account must be in the group `oschome` to read, like everything else on that volume), the CephFS state
 directory `/rs/rs_grp_oschome/$USER/hpcworker`, node temp at `/tmp/$USER/hpcworker_$SLURM_JOB_ID`
 (never `$TMPDIR`), `claude_config_dir` `$HOME/.ashley/claude` (the sign-in the Ashley product already
 made; the framework starts Claude Code there, reads `claude auth status` and the two consent
@@ -352,6 +447,35 @@ frames; the first WSL run caught the sitting crediting a burst of codes to the l
 is why rejections are now matched to codes in order. Still not measured: the real `claude auth login` screen under the sitting (the menu-before-
 the-link answer is an assumption, see above), and a TERM landing inside a live job's stop path on the
 grid (the unit tests cover it; the live stop finished before any signal).
+
+2026-09-29 (version 5, the lab's shared copy; user go2432): `tools/deploy_shared.sh` from a Windows
+checkout over `ssh wsu-grid` published `/rs/rs_grp_oschome/shared/ashley/hpcworker/v5` (13 files)
+and `current -> v5`; run again it said `v5 is already published with these files` and changed
+nothing. The new tree inherited the volume's group-writable default ACL; after the script the
+directories read `group::r-x`, `mask::r-x`, the files `r--` (`r-x` for `bin/hpcworker` and the
+`.sbatch` files), `other::---` throughout, nothing group-writable, `v5` read-only for its owner too.
+(The first run set the entries with setfacl's `rX`, which marked every file executable for the group
+because the inherited group entry still carried an execute bit; the script now sets them per kind of
+file.) Then the maintainer's account, with the command a student's install runs:
+`bash .../current/bin/hpcworker install --shared .../current --profile wayne` said `switched to the
+shared copy of hpcworker 5 ...; your own copy (version 4) was moved to
+~/.hpcworker/replaced/20260929-173150 (nothing deleted)`; `profile.json` kept byte for byte (same
+md5), one `~/.bashrc` block. Over ssh, `bash -lc 'hpcworker version'` says `5 (shared copy at
+/rs/rs_grp_oschome/shared/ashley/hpcworker/current)`, `hpcworker worker status --name worker` reads
+the stopped worker's state as before, the command resolves its code to
+`/rs/rs_grp_oschome/shared/ashley/hpcworker/v5` (not the volume's physical path), and a worker job
+rendered to stdout (not submitted) carries that directory as `HPCW_CODE` and `~/.hpcworker` as
+`HPCW_HOME`. v5 was then published once more with `--replace` for two small changes to `bin/hpcworker`:
+`same_dir` now also requires both directories to exist, and the note an install of an account's own
+copy prints about the site's shared copy now appears only when the account can open that copy. The
+first copy is kept beside it as `v5.replaced-<time>`, which no job names, since no worker started
+between the two.
+No job was submitted or cancelled and nothing of ours is under warrior's `/tmp`. The 120
+unit tests pass on a Windows checkout (eight skipped: the six pty scenarios, the `current` link and
+the unreadable directory, which need Linux) and under WSL (none skipped). Not measured: a worker or
+probe job running from the shared copy (the next `worker start` is the first), what an account
+outside `oschome` sees (no such account was at hand), and whether the portal's Files app reads
+through the `current` link.
 
 Not verified on the grid by the framework itself, because the student's grid sign-in was gone before
 the first worker started (`claude auth status` inside the image says `loggedIn: false`): the

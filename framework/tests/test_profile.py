@@ -47,6 +47,21 @@ class Validate(unittest.TestCase):
         self.assertEqual(prof["home_filesystem"], "panfs")
         self.assertEqual(prof["claude_config_dir"], "$HOME/.ashley/claude")
         self.assertIn("$HOME/.ashley/claude/.ashley-remote-consent", prof["consent_markers"])
+        self.assertEqual(prof["shared_install"], "/rs/rs_grp_oschome/shared/ashley/hpcworker/current")
+
+    def test_shared_install_is_optional_and_absolute(self):
+        prof = P.load(WAYNE)
+        del prof["shared_install"]
+        self.assertEqual(P.validate(prof), [])
+        self.assertEqual(P.defaults()["shared_install"], "")
+        for bad in ("hpcworker/current", "$HOME/hpcworker", "/rs/with space/current", "/rs/it's"):
+            prof = P.load(WAYNE)
+            prof["shared_install"] = bad
+            self.assertTrue(any("shared_install" in e for e in P.validate(prof)), bad)
+        prof = P.load(WAYNE)
+        prof["shared_install"] = ""
+        self.assertEqual(P.validate(prof), [])
+        self.assertIn("P_shared_install=/rs/rs_grp_oschome/shared/ashley/hpcworker/current", P.shellenv(P.load(WAYNE)))
 
     def test_consent_flags_read_two_booleans_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -166,6 +181,16 @@ class Mapping(unittest.TestCase):
         self.assertIn("#SBATCH --signal=B:TERM@120", m["HEADER"])
         self.assertIn("#SBATCH --requeue", m["HEADER"])
         self.assertIn("#SBATCH --dependency=singleton", m["HEADER"])
+
+    def test_code_root_is_separate_from_the_home(self):
+        # the job sources lib/ from HPCW_CODE: what `worker start` passes (a shared copy's numbered
+        # directory), else the tree profile.py itself is in; HPCW_HOME stays the student's own folder
+        m = P.mapping(self.prof, {"RUN": "worker"})
+        self.assertEqual(m["HPCW_CODE"], ROOT.replace(os.sep, "/"))
+        self.assertEqual(m["HPCW_HOME"], "/wsu/home/go/go24/go2432/.hpcworker")
+        m = P.mapping(self.prof, {"RUN": "worker", "HPCW_CODE": "/rs/rs_grp_oschome/shared/ashley/hpcworker/v5"})
+        self.assertEqual(m["HPCW_CODE"], "/rs/rs_grp_oschome/shared/ashley/hpcworker/v5")
+        self.assertIn("/wsu/home/go/go24/go2432/.hpcworker/consent", m["CONSENT_MARKERS"].split(":"))
 
     def test_marker_follows_hpcw_home(self):
         # the job honours the marker `hpcworker claude consent` writes, wherever HPCW_HOME points

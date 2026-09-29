@@ -54,6 +54,44 @@ def bash(script, stdin_text=None, env=None, cwd=None):
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
+CODE_PARTS = ("bin", "lib", "jobs", "profiles")
+
+
+def copy_framework(dest, version_file=True):
+    """The framework's code (what a shared copy and an upload carry) copied into DEST."""
+    import shutil
+    os.makedirs(dest, exist_ok=True)
+    for part in CODE_PARTS:
+        target = os.path.join(dest, part)
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        shutil.copytree(os.path.join(ROOT, part), target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy(os.path.join(ROOT, "README.md"), dest)
+    if version_file:
+        shutil.copy(os.path.join(ROOT, "VERSION"), dest)
+
+
+def can_symlink(td):
+    try:
+        os.symlink("x", os.path.join(td, ".linktest"))
+    except (OSError, NotImplementedError, AttributeError):
+        return False  # Windows without the privilege
+    os.unlink(os.path.join(td, ".linktest"))
+    return True
+
+
+def make_shared(td, link=False):
+    """A lab's shared copy under TD the way tools/deploy_shared.sh lays it out: shared/v<N>, and with
+    LINK a `current` link to it. Returns (the directory to name, the numbered directory)."""
+    vdir = os.path.join(td, "shared", "v" + CURRENT_VERSION)
+    copy_framework(vdir)
+    if not link:
+        return vdir, vdir
+    cur = os.path.join(td, "shared", "current")
+    os.symlink("v" + CURRENT_VERSION, cur)
+    return cur, vdir
+
+
 def with_common(func_call):
     return "source '%s/lib/adapters/common.sh' && %s" % (posix(ROOT), func_call)
 
@@ -414,6 +452,25 @@ class InstallAndGuard(unittest.TestCase):
             rc, out2, _ = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
             self.assertEqual((rc, out2), (0, out))
 
+    def test_install_again_from_its_own_copy_leaves_a_shared_marker(self):
+        # the extension's fallback: a full copy uploaded over the launcher, then `install` run from it;
+        # the account now has its own copy, and the marker is moved aside (never deleted)
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            home = os.path.join(td, "hpcw")
+            env = {"HPCW_HOME": posix(home)}
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared '%s' --profile wayne" % (posix(shared), posix(shared)), env=env)
+            self.assertEqual(rc, 0, err)
+            copy_framework(home)  # what the upload writes: bin/, lib/, jobs/, profiles/, VERSION over the launcher
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(home), env=env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("this account now uses its own copy; the shared copy at %s is no longer used" % posix(shared), out)
+            self.assertFalse(os.path.exists(os.path.join(home, "shared")))
+            moved = [os.path.join(home, "replaced", d, "shared") for d in os.listdir(os.path.join(home, "replaced"))]
+            self.assertTrue(any(os.path.exists(m) for m in moved), moved)
+            rc, out, _ = bash("bash '%s/bin/hpcworker' version" % posix(home), env=env)
+            self.assertEqual((rc, out), (0, CURRENT_VERSION))
+
     def test_discover_is_json_and_cheap_by_default(self):
         with tempfile.TemporaryDirectory() as td:
             rc, out, err = bash("bash '%s/bin/hpcworker' discover" % posix(ROOT), env={"HPCW_HOME": posix(td)})
@@ -424,6 +481,276 @@ class InstallAndGuard(unittest.TestCase):
                 self.assertIn(k, d)
             self.assertEqual(d["runtime"]["modules_from"], "modulepath")
             self.assertIsInstance(d["partitions"], list)
+
+
+class SharedInstall(unittest.TestCase):
+    """install --shared: the lab's copy on shared storage, a launcher and a marker in the home, no code copied."""
+
+    def install_shared(self, shared, home, extra="--profile wayne", fake_home=None, via=None):
+        env = {"HPCW_HOME": posix(home)}
+        if fake_home:
+            env["HOME"] = posix(fake_home)
+        cmd = "bash '%s/bin/hpcworker' install --shared '%s' %s" % (posix(via or shared), posix(shared), extra)
+        return bash(cmd, env=env)
+
+    def test_launcher_marker_and_profile_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            fake_home = os.path.join(td, "home")
+            os.makedirs(fake_home)
+            home = os.path.join(fake_home, ".hpcworker")
+            rc, out, err = self.install_shared(shared, home, fake_home=fake_home)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("installed: this account uses the shared copy of hpcworker %s at %s (nothing copied into" % (CURRENT_VERSION, posix(shared)), out)
+            self.assertIn("profile.json written from 'wayne'", out)
+            # the home holds the launcher, the marker, the profile and the log folder: none of the code
+            self.assertEqual(sorted(os.listdir(home)), ["bin", "log", "profile.json", "shared"])
+            self.assertEqual(os.listdir(os.path.join(home, "bin")), ["hpcworker"])
+            launcher = os.path.join(home, "bin", "hpcworker")
+            self.assertFalse(os.path.islink(launcher), "the launcher is a file: a copy onto a link would reach the shared tree")
+            with open(launcher, "rb") as fh:
+                text = fh.read().decode("utf-8")
+            self.assertNotIn("\r", text)
+            lines = text.splitlines()
+            self.assertEqual(lines[0], "#!/bin/bash")
+            self.assertEqual(lines[1], '# hpcworker launcher for a shared copy (managed: "hpcworker install" rewrites this file)')
+            self.assertIn("HPCW_SHARED_ROOT=%s" % posix(shared), lines)
+            self.assertIn('[ -n "${HPCW_HOME:-}" ] || HPCW_HOME="$HOME/.hpcworker"', lines)
+            self.assertEqual(lines[-1], 'exec "${BASH:-bash}" "$HPCW_SHARED_ROOT/bin/hpcworker" "$@"')
+            with open(os.path.join(home, "shared")) as fh:
+                self.assertEqual(fh.read(), posix(shared) + "\n")
+            with open(os.path.join(home, "profile.json")) as fh, open(os.path.join(shared, "profiles", "wayne.json")) as src:
+                self.assertEqual(fh.read(), src.read())
+            # the launcher runs the shared copy, which says so
+            rc, out, err = bash("bash '%s' version" % posix(launcher), env={"HPCW_HOME": posix(home)})
+            self.assertEqual((rc, out), (0, "%s (shared copy at %s)" % (CURRENT_VERSION, posix(shared))), err)
+            rc, out, _ = bash("bash '%s' help" % posix(launcher), env={"HPCW_HOME": posix(home)})
+            self.assertEqual(rc, 0)
+            self.assertIn("install --shared", out)
+            # and a terminal finds it through the managed block, like a copy of one's own
+            with open(os.path.join(fake_home, ".bashrc")) as fh:
+                self.assertIn('export PATH="$HOME/.hpcworker/bin:$PATH"', fh.read())
+            rc, out, _ = bash("HOME='%s'; export HOME; unset HPCW_HOME; . \"$HOME/.bashrc\"; hpcworker version" % msys(fake_home), env={"HOME": msys(fake_home)})
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.startswith(CURRENT_VERSION + " (shared copy at "), out)
+
+    def test_install_again_refreshes_and_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            home = os.path.join(td, "hpcw")
+            env = {"HPCW_HOME": posix(home)}
+            rc, _, err = self.install_shared(shared, home)
+            self.assertEqual(rc, 0, err)
+
+            def snapshot():
+                out = {}
+                for name in ("bin/hpcworker", "shared", "profile.json"):
+                    with open(os.path.join(home, name), "rb") as fh:
+                        out[name] = fh.read()
+                return out
+
+            first = snapshot()
+            # through the launcher, with and without naming the copy again: a refresh, the same words every time
+            outs = []
+            for cmd in ("bash '%s/bin/hpcworker' install --profile wayne" % posix(home),
+                        "bash '%s/bin/hpcworker' install --profile wayne" % posix(home),
+                        "bash '%s/bin/hpcworker' install --shared '%s' --profile wayne" % (posix(home), posix(shared))):
+                rc, out, err = bash(cmd, env=env)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("hpcworker %s: shared copy at %s; launcher and marker refreshed (nothing copied)" % (CURRENT_VERSION, posix(shared)), out)
+                self.assertIn("profile.json exists; kept", out)
+                outs.append(out)
+                self.assertEqual(snapshot(), first)
+            self.assertEqual(outs[0], outs[1])
+            self.assertEqual(outs[1], outs[2])
+            self.assertEqual(sorted(os.listdir(home)), ["bin", "log", "profile.json", "shared"])
+            # run from a checkout, install keeps a shared account on its shared copy
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("launcher and marker refreshed", out)
+            self.assertFalse(os.path.exists(os.path.join(home, "lib")))
+
+    def test_conversion_moves_the_own_copy_aside_and_keeps_the_rest(self):
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            home = os.path.join(td, "hpcw")
+            env = {"HPCW_HOME": posix(home)}
+            rc, _, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
+            self.assertEqual(rc, 0, err)
+            prof = os.path.join(home, "profile.json")
+            with open(prof) as fh:
+                edited = fh.read().replace('"display_name": "Wayne State University HPC grid"', '"display_name": "edited by me"')
+            with open(prof, "w") as fh:
+                fh.write(edited)
+            with open(os.path.join(home, "consent"), "w") as fh:
+                fh.write("yes\n")
+            rc, out, err = self.install_shared(shared, home)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("switched to the shared copy of hpcworker %s at %s; your own copy (version %s) was moved to " % (CURRENT_VERSION, posix(shared), CURRENT_VERSION), out)
+            self.assertIn("(nothing deleted)", out)
+            self.assertIn("profile.json exists; kept", out)
+            for gone in ("lib", "jobs", "profiles", "VERSION", "README.md"):
+                self.assertFalse(os.path.exists(os.path.join(home, gone)), gone)
+            aside = os.path.join(home, "replaced")
+            (stamp,) = os.listdir(aside)
+            for kept in ("bin/hpcworker", "lib/profile.py", "lib/adapters/common.sh", "jobs/worker.sbatch.tpl", "profiles/wayne.json", "VERSION", "README.md"):
+                self.assertTrue(os.path.exists(os.path.join(aside, stamp, kept)), kept)
+            with open(prof) as fh:
+                self.assertEqual(fh.read(), edited, "the profile is the student's: kept byte for byte")
+            with open(os.path.join(home, "consent")) as fh:
+                self.assertEqual(fh.read(), "yes\n")
+            rc, out, _ = bash("bash '%s/bin/hpcworker' version" % posix(home), env=env)
+            self.assertEqual((rc, out), (0, "%s (shared copy at %s)" % (CURRENT_VERSION, posix(shared))))
+
+    def test_conversion_waits_while_a_worker_runs_from_the_own_copy(self):
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            fake_home = os.path.join(td, "home")
+            os.makedirs(fake_home)
+            home = os.path.join(td, "hpcw")
+            env = {"HPCW_HOME": posix(home), "HOME": posix(fake_home)}
+            rc, _, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
+            self.assertEqual(rc, 0, err)
+            prof = os.path.join(home, "profile.json")
+            with open(prof) as fh:
+                p = json.load(fh)
+            p["shared_state_dir"] = "$HOME/state"
+            with open(prof, "w") as fh:
+                json.dump(p, fh)
+            rd = os.path.join(fake_home, "state", "worker")
+            os.makedirs(rd)
+
+            def attempt():
+                return self.install_shared(shared, home, fake_home=fake_home)
+
+            def still_own_copy():
+                self.assertTrue(os.path.isdir(os.path.join(home, "lib")))
+                self.assertFalse(os.path.exists(os.path.join(home, "shared")))
+
+            # a queued successor
+            with open(os.path.join(rd, "next.id"), "w") as fh:
+                fh.write("40500020 40500019\n")
+            rc, out, err = attempt()
+            self.assertEqual(rc, 1, (out, err))
+            self.assertIn("your worker worker (job 40500020 is queued to take over) still runs from the copy in", err)
+            self.assertIn("Nothing was changed", err)
+            still_own_copy()
+            os.remove(os.path.join(rd, "next.id"))
+            # a fresh heartbeat
+            with open(os.path.join(rd, "status.json"), "w") as fh:
+                fh.write('{"state": "online", "job": "40500019"}\n')
+            rc, out, err = attempt()
+            self.assertEqual(rc, 1, (out, err))
+            self.assertIn("(job 40500019, online)", err)
+            still_own_copy()
+            # stopped on record: the conversion goes ahead
+            with open(os.path.join(rd, "status.json"), "w") as fh:
+                fh.write('{"state": "stopped", "job": "40500019"}\n')
+            rc, out, err = attempt()
+            self.assertEqual(rc, 0, err)
+            self.assertIn("switched to the shared copy", out)
+
+    def test_refusals_change_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = os.path.join(td, "hpcw")
+            env = {"HPCW_HOME": posix(home)}
+            # a folder that is not there (what a student outside the lab's group also gets): exit 3, nothing written
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared '%s/nope' --profile wayne" % (posix(ROOT), posix(td)), env=env)
+            self.assertEqual(rc, 3, (out, err))
+            self.assertIn("the shared copy at %s/nope cannot be used from this account: this account cannot open it" % posix(td), err)
+            self.assertIn("Nothing was changed.", err)
+            self.assertFalse(os.path.exists(home))
+            # a copy without its VERSION file
+            nov = os.path.join(td, "noversion")
+            copy_framework(nov, version_file=False)
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared '%s' --profile wayne" % (posix(ROOT), posix(nov)), env=env)
+            self.assertEqual(rc, 3, (out, err))
+            self.assertIn("it has no readable VERSION file. Nothing was changed.", err)
+            self.assertFalse(os.path.exists(home))
+            # not an absolute path
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared shared/current" % posix(ROOT), env=env)
+            self.assertEqual(rc, 3, (out, err))
+            self.assertIn("it is not an absolute path", err)
+            # no folder named anywhere
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared" % posix(ROOT), env=env)
+            self.assertEqual(rc, 1, (out, err))
+            self.assertIn("no shared copy is named here", err)
+            self.assertFalse(os.path.exists(home))
+            # a profile the shared copy does not have
+            shared, _ = make_shared(td)
+            rc, out, err = self.install_shared(shared, home, extra="--profile nosuchsite")
+            self.assertEqual(rc, 1, (out, err))
+            self.assertIn("has no profile named 'nosuchsite'", err)
+            self.assertFalse(os.path.exists(home))
+            # --shared and --own together
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared '%s' --own" % (posix(ROOT), posix(shared)), env=env)
+            self.assertEqual(rc, 1)
+            self.assertIn("do not go together", err)
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "POSIX permissions (not on a Windows checkout, not as root)")
+    def test_unreadable_root_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            home = os.path.join(td, "hpcw")
+            os.chmod(shared, 0)
+            try:
+                rc, out, err = bash("bash '%s/bin/hpcworker' install --shared '%s' --profile wayne" % (posix(ROOT), posix(shared)), env={"HPCW_HOME": posix(home)})
+            finally:
+                os.chmod(shared, 0o755)
+            self.assertEqual(rc, 3, (out, err))
+            self.assertIn("this account cannot open it", err)
+            self.assertFalse(os.path.exists(home))
+
+    def test_launcher_says_so_when_the_shared_copy_goes_away(self):
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            home = os.path.join(td, "hpcw")
+            rc, _, err = self.install_shared(shared, home)
+            self.assertEqual(rc, 0, err)
+            os.rename(shared, shared + ".moved")
+            rc, out, err = bash("bash '%s/bin/hpcworker' version" % posix(home), env={"HPCW_HOME": posix(home)})
+            self.assertEqual(rc, 3, (out, err))
+            self.assertIn("the shared copy at %s cannot be read from this account" % posix(shared), err)
+
+    def test_profile_names_the_shared_copy(self):
+        # --shared with no folder: the one the site profile names (here a copy of wayne.json pointing at the test's copy)
+        with tempfile.TemporaryDirectory() as td:
+            shared, vdir = make_shared(td)
+            site = os.path.join(vdir, "profiles", "wayne.json")
+            with open(site) as fh:
+                p = json.load(fh)
+            self.assertEqual(p["shared_install"], "/rs/rs_grp_oschome/shared/ashley/hpcworker/current")
+            p["shared_install"] = posix(shared)
+            with open(os.path.join(vdir, "profiles", "testsite.json"), "w") as fh:
+                json.dump(p, fh)
+            home = os.path.join(td, "hpcw")
+            rc, out, err = bash("bash '%s/bin/hpcworker' install --shared --profile testsite" % posix(vdir), env={"HPCW_HOME": posix(home)})
+            self.assertEqual(rc, 0, (out, err))
+            with open(os.path.join(home, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), posix(shared))
+
+    def test_current_link_is_followed_one_level(self):
+        # the code root is the numbered directory the link names, spelled through the same parents:
+        # a job started on it keeps it, and a volume link above (/rs/... at Wayne State) is not rewritten
+        with tempfile.TemporaryDirectory() as td:
+            if not can_symlink(td):
+                self.skipTest("this system cannot make symbolic links")
+            shared, vdir = make_shared(td, link=True)
+            home = os.path.join(td, "hpcw")
+            rc, out, err = self.install_shared(shared, home)
+            self.assertEqual(rc, 0, err)
+            with open(os.path.join(home, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), posix(shared), "the marker names the link, not the numbered directory")
+            rc, out, err = bash("export HPCW_HOME='%s'; source '%s/bin/hpcworker' && echo \"$SRC_ROOT\"" % (posix(home), posix(shared)))
+            self.assertEqual((rc, out), (0, posix(vdir)), err)
+            rc, out, _ = bash("bash '%s/bin/hpcworker' version" % posix(home), env={"HPCW_HOME": posix(home)})
+            self.assertEqual(out, "%s (shared copy at %s)" % (CURRENT_VERSION, posix(shared)))
+            # probe.env and the worker job name the numbered directory for the code, the home for the rest
+            body = "load_profile; probe_env | grep -E '^HPCW_(HOME|CODE)='"
+            rc, out, err = bash("export HPCW_HOME='%s'; source '%s/bin/hpcworker' && %s" % (posix(home), posix(shared), body))
+            self.assertEqual(rc, 0, err)
+            self.assertIn("HPCW_CODE=%s" % posix(vdir), out)
+            self.assertIn("HPCW_HOME=%s" % posix(home), out)
 
 
 if __name__ == "__main__":

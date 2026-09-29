@@ -46,6 +46,13 @@ def framework_version():
     return v if re.match(r"^\d+$", v) else str(SCHEMA_VERSION)
 
 
+def code_root():
+    """The framework tree this file belongs to (the directory above lib/), as a path spelled with
+    forward slashes. abspath, not realpath: a shared copy is reached through links that must stay
+    as spelled (/rs/rs_grp_oschome is itself a link at Wayne State)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__))).replace(os.sep, "/")
+
+
 # key -> (type, required, default, description). "type" is a python type, a
 # tuple of allowed strings, or "list"/"dict"/"int_or_none"/"bool_or_none".
 SCHEMA = [
@@ -67,6 +74,7 @@ SCHEMA = [
     ("tmpdir_is_node_local", bool, False, False, "whether $TMPDIR may be trusted as node-local (false on Wayne State: it is CephFS)"),
     ("ipc_dir", str, True, "/dev/shm", "where sockets and pipes go (never a swept /tmp)"),
     ("shared_state_dir", str, True, None, "shared storage for run directories; $HOME and $USER expand"),
+    ("shared_install", str, False, "", "the lab's shared copy of the framework (an absolute directory with bin/, lib/, jobs/, profiles/, VERSION; usually a `current` link to a numbered directory); `hpcworker install --shared` uses it and copies no code into the home; empty = none"),
     ("runtime", ("apptainer", "singularity", "podman", "pyxis"), True, None, "container runtime"),
     ("runtime_module", str, False, "", "module to load for the runtime, if any"),
     ("runtime_bin", str, False, "", "absolute path of the runtime binary, when known"),
@@ -204,6 +212,9 @@ def validate(prof):
         v = prof.get(key)
         if isinstance(v, str) and not (v.startswith("/") or v.startswith("$HOME") or v.startswith("${HOME}")):
             errs.append("%s must be absolute or start with $HOME" % key)
+    si = prof.get("shared_install")
+    if isinstance(si, str) and si and (not si.startswith("/") or re.search(r"[\s'\"]", si)):
+        errs.append("shared_install must be an absolute directory without spaces or quotes (or empty)")
     # bind specs travel through a job file as one space-separated string
     for b in prof.get("binds", []) or []:
         if not isinstance(b, str) or re.search(r"\s", b) or not b:
@@ -420,6 +431,9 @@ def mapping(prof, overrides=None):
     # the tool's own marker lives under HPCW_HOME, the same directory `hpcworker claude consent`
     # writes to, so an overridden HPCW_HOME still has its consent honoured by the job
     hpcw_home = expand(o.get("HPCW_HOME") or "$HOME/.hpcworker")
+    # where the job sources lib/ from: what `hpcworker worker start` passes (the directory its own
+    # code is in: a shared copy's numbered directory, or ~/.hpcworker), else the tree this file is in
+    hpcw_code = expand(o.get("HPCW_CODE") or code_root())
     markers = [expand(x) for x in prof.get("consent_markers", [])]
     markers.append(posixpath.join(hpcw_home, "consent"))
     chain = str(o.get("CHAIN", "1"))
@@ -466,6 +480,7 @@ def mapping(prof, overrides=None):
         "LOGIN_RECHECK_S": str(o.get("LOGIN_RECHECK_S", 60)),
         "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 7 * 24 * 3600)),
         "HPCW_HOME": hpcw_home,
+        "HPCW_CODE": hpcw_code,
     }
     m["HEADER"] = header_lines(prof, m)
     for k, v in m.items():

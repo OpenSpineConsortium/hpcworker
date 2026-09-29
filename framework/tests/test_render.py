@@ -83,6 +83,19 @@ class Render(RenderBase):
         self.assertIn("hpcw_rm_own_tmp", text)
         self.assertNotIn("rm -rf", text)
 
+    def test_code_comes_from_hpcw_code_not_the_home(self):
+        # on a shared copy ~/.hpcworker has no lib/: every source line of the job goes through HPCW_CODE
+        text = self.rendered(HPCW_CODE="/rs/rs_grp_oschome/shared/ashley/hpcworker/v5")
+        self.assertIn("HPCW_HOME='/wsu/home/go/go24/go2432/.hpcworker'; HPCW_CODE='/rs/rs_grp_oschome/shared/ashley/hpcworker/v5';", text)
+        self.assertIn('source "$HPCW_CODE/lib/adapters/common.sh"', text)
+        self.assertIn('source "$HPCW_CODE/lib/adapters/$SCHEDULER.sh"', text)
+        self.assertIn('echo "source $(printf %q "$HPCW_CODE/lib/adapters/common.sh")"', text)
+        self.assertNotIn("$HPCW_HOME/lib", text)
+        with open(os.path.join(ROOT, "jobs", "probe.sbatch"), encoding="utf-8") as fh:
+            probe = fh.read()
+        self.assertNotIn("$HPCW_HOME/lib", probe)
+        self.assertIn('HPCW_CODE="${HPCW_CODE:-$HPCW_HOME}"', probe)
+
     def test_chain_off_renders(self):
         text = self.rendered(CHAIN="0")
         self.assertIn("CHAIN=0", text)

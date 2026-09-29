@@ -28,8 +28,10 @@ cd "$PROBE_DIR" || { echo "REFUSING: cannot enter $PROBE_DIR"; exit 1; }
 # shellcheck disable=SC1091
 source ./probe.env
 : "${HPCW_HOME:?probe.env must set HPCW_HOME}"
+# the code's directory (a shared copy's numbered directory); a probe.env written before framework 5 has only HPCW_HOME
+HPCW_CODE="${HPCW_CODE:-$HPCW_HOME}"
 # shellcheck disable=SC1090
-source "$HPCW_HOME/lib/adapters/common.sh"
+source "$HPCW_CODE/lib/adapters/common.sh"
 JOB=$(hpcw_job_id)
 [ -n "$JOB" ] || { echo "REFUSING: the probe runs a container and must run inside a job, not on $(hostname -s)"; exit 1; }
 say() { echo "$(date -u +%FT%TZ) $*"; }
@@ -76,7 +78,7 @@ if hpcw_load_runtime; then
   # worker does it, so `timeout` runs it and nothing is quoted twice)
   { echo '#!/bin/bash'; echo "# written by hpcworker probe job $JOB on $NODE"
     echo "export RUNTIME=$(printf %q "$RUNTIME") RUNTIME_BIN=$(printf %q "$RUNTIME_BIN") RUNTIME_MODULE=$(printf %q "$RUNTIME_MODULE") HPCW_BINDS=$(printf %q "$BINDS") HPCW_NODE_TMP=$(printf %q "$HPCW_NODE_TMP") HPCW_JOB_ID=$(printf %q "$JOB")"
-    echo "source $(printf %q "$HPCW_HOME/lib/adapters/common.sh")"
+    echo "source $(printf %q "$HPCW_CODE/lib/adapters/common.sh")"
     printf 'hpcw_runtime_exec %q' "$IMAGE"; for a in "${CLEAN[@]}"; do printf ' %q' "$a"; done; echo ' "$@"'; } > in_image.sh.part
   chmod 700 in_image.sh.part && mv -f in_image.sh.part in_image.sh
   # The budgets, in seconds, and their sum: the first exec pays for the runtime's start-up, the rest
