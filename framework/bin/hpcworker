@@ -28,7 +28,7 @@
 # directories under the state directory and a job's own node-local temp; the one subcommand that
 # replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
 set -uo pipefail
-VERSION=5
+VERSION=6
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -84,7 +84,7 @@ load_profile() {
 # "heavy" = a container or Claude Code itself: only inside a job, never on the login node
 refuse_heavy() { in_job || die "$1 would run a container or Claude Code on this node ($(hostname -s)); that is not allowed on a login node, so hpcworker does it inside a job for you: $2"; }
 # a destructive action needs a person at a terminal: never an agent (Claude Code, Ashley), never a pipeline
-refuse_if_agent() { hpcw_agent_marker && die "$1 would replace or remove something of yours; it runs only for a person at a terminal, not under Claude Code, Ashley or a pipeline. Nothing was changed."; return 0; }
+refuse_if_agent() { hpcw_agent_marker && die "$1 would replace or remove something of yours; it runs only for a person at a terminal, not under Claude Code, another agent or a pipeline. Nothing was changed."; return 0; }
 consent_markers() { printf '%s\n' "$HPCW_HOME/consent"; local m; for m in ${P_consent_markers:-}; do printf '%s\n' "$m"; done; }
 consent_source() { # claude_config | marker | none : Claude Code's own record first, the fallback marker files second
   if hpcw_consent_seen "${CCD:-}"; then echo claude_config; return 0; fi

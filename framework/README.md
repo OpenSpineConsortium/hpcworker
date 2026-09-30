@@ -1,13 +1,13 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 5.
+or the Claude app on your phone. Version 6.
 
-The cluster-side half of Ashley Bridge. Bash plus the system `python3`, nothing installed, nothing
-running on the login node except the one `sbatch`, `squeue` or `scancel` an action needs. Claude Code
-runs inside a container on a compute node and registers itself with Anthropic over outbound HTTPS
-(Claude Code's Remote Control); the browser extension in `../extension/` only starts, watches and
-stops that job through your Open OnDemand portal.
+The cluster-side half of Beethoven, the browser extension. Bash plus the system `python3`, nothing
+installed, nothing running on the login node except the one `sbatch`, `squeue` or `scancel` an
+action needs. Claude Code runs inside a container on a compute node and registers itself with
+Anthropic over outbound HTTPS (Claude Code's Remote Control); the browser extension in
+`../extension/` only starts, watches and stops that job through your Open OnDemand portal.
 
 ## Install: the lab's shared copy, or a copy of your own
 
@@ -336,14 +336,14 @@ the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/ashley`, 
 copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/ashley/hpcworker/current`, which
 every account must be in the group `oschome` to read, like everything else on that volume), the CephFS state
 directory `/rs/rs_grp_oschome/$USER/hpcworker`, node temp at `/tmp/$USER/hpcworker_$SLURM_JOB_ID`
-(never `$TMPDIR`), `claude_config_dir` `$HOME/.ashley/claude` (the sign-in the Ashley product already
-made; the framework starts Claude Code there, reads `claude auth status` and the two consent
-booleans), the Ashley consent marker honoured beside hpcworker's own, the portal
+(never `$TMPDIR`), `claude_config_dir` `$HOME/.ashley/claude` (the sign-in the lab's VS Code tool
+already made; the framework starts Claude Code there, reads `claude auth status` and the two consent
+booleans), that tool's consent marker honoured beside hpcworker's own, the portal
 `https://ondemand.grid.wayne.edu` behind the VPN, the 20-process login-node cap, and the Panasas home
 (new images at this site should be SIF).
 
 The Slurm client is not bound into the container by this version, so the worker's Claude cannot
-submit jobs of its own yet; Ashley's measured bind set is the template for that.
+submit jobs of its own yet; the bind set measured for the lab's VS Code tool is the template for that.
 
 ## Tests
 
@@ -366,9 +366,9 @@ statsig.anthropic.com); two worker jobs (`hpcw_worker`, 1 h, `secp/secondary`): 
 --signal=TERM` produced state `preempted` and a clean exit, and `hpcworker worker stop` produced
 state `stopped` with the job leaving on its own within 5 s.
 
-2026-09-28/29 (the maintainer's own run, Ashley's phone host, job 40496445 on asx15): Remote Control
-registered from an `sbatch` job under a pseudo-terminal with the consent already on record, and
-printed the block shown above. Open question 1 is answered yes.
+2026-09-28/29 (the maintainer's own run, the phone host of the lab's VS Code tool, job 40496445 on
+asx15): Remote Control registered from an `sbatch` job under a pseudo-terminal with the consent
+already on record, and printed the block shown above. Open question 1 is answered yes.
 
 2026-09-29 (this revision, user go2432, student not signed in on the grid): `install --profile wayne`
 kept the existing profile; the 73 unit tests pass on the login node's python 3.6.8 (0.9 s) and on a
