@@ -21,6 +21,7 @@ a scheduler):
     profile.py set <profile> <dotted.key> <json-or-string>
     profile.py from-discovery <discover.json> [site]   # a seed profile on stdout
     profile.py render <template> <profile> KEY=VALUE...  # rendered text on stdout
+    profile.py guide <template> <profile> RUN=<name>     # the workspace guide (CLAUDE.md) on stdout
     profile.py mapping <profile> KEY=VALUE...      # the render mapping as JSON
     profile.py consent <claude_config_dir> [workspace]   # remote_dialog_seen=.. workspace_trusted=.. (two booleans, nothing else)
     profile.py schema
@@ -491,6 +492,127 @@ def mapping(prof, overrides=None):
     return m
 
 
+# ----------------------------------------------------------------------------
+# the workspace guide: jobs/workspace-guide.md.tpl, the CLAUDE.md a new worker workspace gets
+# ----------------------------------------------------------------------------
+
+SCHEDULER_NAMES = {"slurm": "Slurm", "pbs": "PBS", "lsf": "LSF", "sge": "Grid Engine", "htcondor": "HTCondor"}
+# the submit command, and a whole submit line run from anywhere (%s is the workspace)
+SUBMIT_LINES = {
+    "slurm": ("sbatch", "sbatch -D %s job.sh"),
+    "pbs": ("qsub", "cd %s && qsub job.sh"),
+    "lsf": ("bsub", "cd %s && bsub < job.sh"),
+    "sge": ("qsub", "qsub -wd %s job.sh"),
+    "htcondor": ("condor_submit", "cd %s && condor_submit job.sub"),
+}
+
+
+def _under(path, folder):
+    """PATH is FOLDER or lies inside it (a string test on normalised forward-slash paths)."""
+    if not path or not folder:
+        return False
+    path, folder = posixpath.normpath(path), posixpath.normpath(folder)
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
+def _bind_inside(bind):
+    """A bind as the container sees it: "src:dst[:opts]" -> dst; a plain path -> itself (a Windows
+    drive spelling in the tests, C:/..., is a plain path)."""
+    m = re.match(r"^(/[^:]*):(/[^:]*)(:[a-z,]*)?$", bind)
+    return m.group(2) if m else bind
+
+
+def guide_data_lines(prof):
+    """One Markdown list line per bind, saying what the folder is, from facts the profile already
+    carries: the home, the folder holding shared_state_dir (where the workspaces are), the folder
+    holding the lab's shared copy, image or claude_bin, or else a folder the profile shares."""
+    home = expand("$HOME")
+    state_dir = expand(prof["shared_state_dir"])
+    lab = [expand(x) for x in (prof.get("shared_install") or "", (prof.get("image_store") or {}).get("path") or "", prof.get("claude_bin") or "") if x]
+    lines = []
+    for b in prof.get("binds", []) or []:
+        p = _bind_inside(expand(b))
+        if p == home and _under(state_dir, p):
+            what = "the person's home folder, where this workspace is"
+        elif p == home:
+            what = "the person's home folder; keep it for small files"
+        elif _under(state_dir, p):
+            what = "the person's folder on the lab's storage, where this workspace is; large inputs and results go here"
+        elif any(_under(x, p) for x in lab):
+            what = "the lab's shared folder for workers (the container and hpcworker itself); read it, never change it"
+        else:
+            what = "a folder the site profile shares with workers"
+        lines.append("- `%s`: %s." % (p, what))
+    return lines or ["- only this workspace: the site profile shares no other folder with workers."]
+
+
+def guide_scheduling_lines(prof):
+    """Markdown list lines: which partitions (queues) and QoS to use, the account, the longest wall
+    time, and for Slurm the two rules that cost this lab time (-D for --output, afterany)."""
+    sch = prof["scheduler"]
+    word = "partition" if sch == "slurm" else "queue"
+
+    def where(part, qos):
+        return "%s `%s`%s" % (word, part, ", QoS `%s`" % qos if qos else "")
+
+    cpu, qcpu = prof["partition_cpu"], prof.get("qos_cpu") or ""
+    lines = ["- Short and test jobs: %s." % where(cpu, qcpu)]
+    batch, qbatch = prof.get("partition_cpu_batch") or "", prof.get("qos_batch") or ""
+    if batch and (batch, qbatch) != (cpu, qcpu):
+        more = "; a job there can be stopped and started again, so save progress as it goes" if qbatch == "requeue" else ""
+        lines.append("- Long jobs: %s%s." % (where(batch, qbatch), more))
+    gpus = [g for g in prof.get("partitions_gpu") or [] if g]
+    if len(gpus) == 1:
+        lines.append("- GPU jobs: %s `%s`." % (word, gpus[0]))
+    elif gpus:
+        lines.append("- GPU jobs: %ss %s, in that order of preference." % (word, " or ".join("`%s`" % g for g in gpus)))
+    acct = prof.get("account") or ""
+    if acct:
+        opt = {"slurm": "--account=%s", "pbs": "-A %s", "lsf": "-P %s"}.get(sch)
+        lines.append("- Every job names the account `%s`%s." % (acct, " (`%s`)" % (opt % acct) if opt else ""))
+    if prof.get("max_walltime"):
+        lines.append("- The longest time a job may ask for: `%s`." % prof["max_walltime"])
+    if sch == "slurm":
+        lines.append("- `#SBATCH --output` is read relative to the folder a job is submitted from; name that folder with `-D`.")
+        lines.append("- Chain jobs with `--dependency=afterany:<id>` and read each output yourself; with `afterok`, one failed job leaves the rest waiting for ever.")
+    return lines
+
+
+def guide_mapping(prof, overrides=None):
+    """The @KEY@ -> value table for jobs/workspace-guide.md.tpl. Plain words for a person and for
+    Claude Code; the multi-line values (SCHEDULING, DATA) are whole Markdown list lines. Nothing here
+    is a credential: paths, partition names and sentences only."""
+    o = dict(overrides or {})
+    run = o.get("RUN", "worker")
+    if not re.match(r"^[A-Za-z0-9_-]{1,32}$", run):
+        raise ValueError("run name must be letters, digits, _ or - (got %r)" % run)
+    sch = prof["scheduler"]
+    workspace = posixpath.join(expand(prof["shared_state_dir"]), "workspaces", run)
+    submit, line = SUBMIT_LINES.get(sch, ("the scheduler's submit command", "submit job.sh from %s"))
+    name = prof.get("display_name") or "%s cluster" % prof["site"]
+    if not name.lower().startswith("the "):
+        name = "the " + name
+    portal = prof.get("ood_base_url") or ""
+    host = prof.get("submit_host") or ""
+    return {
+        "VERSION": framework_version(),
+        "SITE": prof["site"],
+        "RUN": run,
+        "CLUSTER": name,
+        "SCHEDULER_NAME": SCHEDULER_NAMES.get(sch, sch),
+        "WORKSPACE": workspace,
+        "SUBMIT": submit,
+        "SUBMIT_EXAMPLE": line % workspace,
+        "TERMINAL": " (for example the shell in the portal, %s)" % portal if portal else "",
+        "LOGIN_NODE": " (`%s`)" % host if host else "",
+        "POLL_S": str((prof.get("login_node_rules") or {}).get("poll_floor_seconds", 60)),
+        "SCHEDULING": "\n".join(guide_scheduling_lines(prof)),
+        "IPC": expand(posixpath.join(prof["ipc_dir"], "$USER")),
+        "DATA": "\n".join(guide_data_lines(prof)),
+        "CLAUDE_CONFIG_DIR": expand(prof["claude_config_dir"]),
+    }
+
+
 def render(template_text, m):
     def sub(match):
         key = match.group(1)
@@ -630,6 +752,19 @@ def main(argv):
         if unknown_fields(prof):
             sys.stderr.write("profile: %s\n" % unknown_note(prof))
         sys.stdout.write(render(tpl, mapping(prof, _kv_args(argv[4:]))))
+        return 0
+    if cmd == "guide":
+        # the template is ASCII; read and written as UTF-8 all the same, whatever locale a plain ssh left
+        with open(argv[2], encoding="utf-8") as fh:
+            tpl = fh.read()
+        prof = load(argv[3])
+        errs = validate(prof)
+        if errs:
+            sys.stderr.write("profile invalid:\n  " + "\n  ".join(errs) + "\n")
+            return 1
+        text = render(tpl, guide_mapping(prof, _kv_args(argv[4:])))
+        sys.stdout.flush()
+        sys.stdout.buffer.write(text.encode("utf-8"))
         return 0
     path = argv[2] if len(argv) > 2 else None
     if not path:

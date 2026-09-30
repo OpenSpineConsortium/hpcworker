@@ -1,7 +1,7 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 7.
+or the Claude app on your phone. Version 8.
 
 The cluster-side half of Beethoven, the browser extension. Bash plus the system `python3`, nothing
 installed, nothing running on the login node except the one `sbatch`, `squeue` or `scancel` an
@@ -23,8 +23,8 @@ bash /rs/rs_grp_oschome/shared/beethoven/hpcworker/current/bin/hpcworker install
 ```
 
 (Until 2026-09-30 the lab folder was `/rs/rs_grp_oschome/shared/ashley`; that name is now a link to
-`shared/beethoven`, and Beethoven 4.0.0 to 7.0.0 still run this command with it. Version 7 keeps the
-spelling already on record, so the old command changes nothing; see "The rename" below.)
+`shared/beethoven`, and Beethoven 4.0.0 to 7.0.0 still run this command with it. Versions 7 and 8 keep
+the spelling already on record, so the old command changes nothing; see "The rename" below.)
 
 That is the whole install, and it is the command the extension runs through the portal's shell. It
 writes four things into `~/.hpcworker` and nothing else: `bin/hpcworker`, a short launcher
@@ -33,7 +33,7 @@ the shared tree); `shared`, one line naming the shared directory (the marker); `
 from the shared copy's `profiles/<site>.json` and kept if one is there; and `log/`. The consent marker
 (`~/.hpcworker/consent`) stays there too, and the run directories stay under `shared_state_dir`. `DIR`
 may be left out when the profile names it (`hpcworker install --shared --profile wayne`).
-`hpcworker version` then says `7 (shared copy at DIR)`, and `hpcworker diag` names the shared
+`hpcworker version` then says `8 (shared copy at DIR)`, and `hpcworker diag` names the shared
 directory and the numbered directory it resolves to.
 
 - Run `install` again (through the launcher, or from a checkout) and it stays on the shared copy: it
@@ -113,8 +113,8 @@ pass `bash -n`. On the cluster it is file work on the login node and nothing els
 setfacl, one link; no scheduler call, no container, no temp file under `/tmp`):
 
 ```
-ROOT/v7/          one directory per framework version, read-only for everyone
-ROOT/current      a relative link to v7, switched in one rename (ln -s, then mv -T)
+ROOT/v8/          one directory per framework version, read-only for everyone
+ROOT/current      a relative link to v8, switched in one rename (ln -s, then mv -T)
 ROOT/deploy.log   one line per publish
 ```
 
@@ -141,6 +141,8 @@ which keeps the old directory as `v<N>.replaced-<time>`). Older versions are nev
 4. `hpcworker worker start`. A job starts, and stays started: before it ends, each job queues the next
    one, which picks the session up again. `hpcworker worker status` shows the state and the link to
    open in Claude (claude.ai/code, or Code in the Claude app, where the session is listed by name).
+   The first start also puts a `CLAUDE.md` in the worker's folder: what Claude Code there needs to
+   know about the cluster (see "The workspace guide"); it is yours to edit and is never replaced.
 5. `hpcworker worker stop` when you are done. That ends the chain: the running job leaves on its
    own and cancels the queued one; the command waits up to 45 s for the job's word and asks the
    scheduler only then.
@@ -280,6 +282,33 @@ own, so `stopped` is the last status written and `preempted` is never written ov
 opposite was measured on job 40501099 (2026-09-29), where a cancel 15 s into the stop turned the
 recorded state into `preempted`; the unit tests now send real TERMs into the rendered stop path.
 
+## The workspace guide (version 8)
+
+Claude Code reads a `CLAUDE.md` in the folder it works in at the start of every session. `worker
+start` writes one into the worker's workspace (`<shared_state_dir>/workspaces/<name>/CLAUDE.md`)
+from `jobs/workspace-guide.md.tpl`, filled from the site profile (`lib/profile.py guide`): what the
+machine is (a compute node under the site's scheduler, the worker started by hpcworker), how to run
+work (light work in the worker, heavy or long work as its own job, never on the login node, the
+partitions and QoS, the account, node-local `/tmp`, sockets under `ipc_dir`), which folders the
+container sees and what each is (told apart from the profile's own facts: the home, the folder that
+holds `shared_state_dir`, the lab's shared folder), how results go back (a path; a file sent in the
+session when Claude Code has a tool for it; Google Drive, Docs or Sheets only through a connector the
+person turned on themselves), and what never goes in (PHI, FERPA records, IRB data without approval,
+export-controlled material, credentials). Under 60 lines, plain ASCII.
+
+It is written only when the workspace has no `CLAUDE.md`, so a workspace made before version 8 gets
+one at its next start, and a file already there is never replaced: edit it freely, or leave it empty
+to go without one. The write refuses an existing name (bash's noclobber), so two starts at the same
+moment cannot write over each other. `hpcworker worker guide [--name N]` prints the current text and
+writes nothing; to take a newer text, move yours aside and start the worker again.
+
+One thing the guide does not settle: whether the container can reach the scheduler. This framework
+binds no Slurm client into the container (the VS Code edition's worker job binds the host's client,
+its libraries, the munge socket and `/etc/slurm` read-only; nothing of that is here), so the guide
+tells Claude Code to check `command -v sbatch` first and, when it is missing, to write the job script
+into the workspace for the person to submit from a terminal. With the Wayne State profile as it is, a
+worker there should find no `sbatch`; that has not been checked in a running worker.
+
 ## Files
 
 ```
@@ -293,6 +322,7 @@ lib/adapters/lsf.sh      IBM Spectrum LSF (documented commands; fixture-tested o
 profiles/wayne.json      Wayne State University
 jobs/probe.sbatch        the ten-minute probe (five minutes of budgets inside the container) -> <state_dir>/probe/probe.json
 jobs/worker.sbatch.tpl   the worker job, rendered per start from the profile
+jobs/workspace-guide.md.tpl  the CLAUDE.md a new worker workspace gets, filled from the profile (see below)
 jobs/build_image.sbatch  a SIF with Claude Code pinned, for sites without an image (not run at Wayne State)
 tests/run.sh             bash -n for every script, then the unittest suite
 ../tools/deploy_shared.sh  publishes bin/ lib/ jobs/ profiles/ VERSION README.md as the lab's shared copy

@@ -15,6 +15,7 @@
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
 #   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain]
 #   hpcworker worker stop|status|list|log [--name N] [--json] [--lines N]
+#   hpcworker worker guide [--name N]                             print the CLAUDE.md a new workspace gets (writes nothing)
 #   hpcworker claude login [--plain] | status [--alloc]           your Claude sign-in, in one sitting (--plain: the panel's line contract)
 #   hpcworker claude consent                                     the Remote Control answer alone, when login did not cover it
 #   hpcworker diag [--json]                                      one line per check
@@ -26,9 +27,10 @@
 # a command line or into a job file; the login node gets one sbatch/squeue/scancel per action and
 # never a loop; state is read from files the job writes; nothing is ever deleted outside the run
 # directories under the state directory and a job's own node-local temp; the one subcommand that
-# replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
+# replaces a file of yours (install --force) runs only for a person at a terminal; the workspace guide
+# (CLAUDE.md) is written only where there is none, never over a file of yours. Versions are integers.
 set -uo pipefail
-VERSION=7
+VERSION=8
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -401,6 +403,23 @@ cmd_probe() {
 
 # ---- worker: start/stop submit and cancel once; status/list/log read files ---------------------------
 run_dir() { echo "$STATE_DIR/$1"; }
+# The workspace guide: CLAUDE.md in the worker's folder, which Claude Code reads at the start of each
+# session there. jobs/workspace-guide.md.tpl filled from the profile (lib/profile.py guide): what the
+# machine is, how to run work, where data lives, how results go back, what never goes in. Written
+# only when the folder has no CLAUDE.md: a file already there, edited or left empty on purpose, is
+# never replaced, and the write itself refuses an existing name (noclobber opens it with O_EXCL), so
+# two starts at the same moment cannot write over each other either.
+GUIDE_TPL="$JOBS/workspace-guide.md.tpl"
+write_workspace_guide() { # WORKSPACE RUN -> written | kept | skipped: <why>
+  local f="$1/CLAUDE.md" text
+  if [ -e "$f" ] || [ -L "$f" ]; then echo kept; return 0; fi
+  [ -s "$GUIDE_TPL" ] || { echo "skipped: no template at $GUIDE_TPL"; return 0; }
+  text=$(prof_py guide "$GUIDE_TPL" "$PROFILE" RUN="$2" 2>&1) || { echo "skipped: $(printf '%s' "$text" | tail -1)"; return 0; }
+  if ( set -C; printf '%s\n' "$text" > "$f" ) 2>/dev/null; then echo written
+  elif [ -e "$f" ] || [ -L "$f" ]; then echo kept
+  else echo "skipped: $1 is not writable"; fi
+  return 0
+}
 stop_worker_run() { # RUN_DIR NAME: the stop file, then a wait for the job's own word, then the scheduler once
   # The job notices the stop file within a few seconds, ends its session (Remote Control
   # deregisters), cancels its queued successor, writes "stopped" and, last, touches stop.done. This
@@ -451,6 +470,12 @@ cmd_worker() {
       [[ "$hours" =~ ^[0-9]+$ ]] || die "--hours must be an integer"
       mkdir -p "$rd" "$WORKSPACES/$name" || die "cannot create $rd (is shared_state_dir right and writable?)"
       chmod 700 "$rd" 2>/dev/null
+      # the workspace guide first, so a workspace made before version 8 gets one at its next start too
+      local guide; guide=$(write_workspace_guide "$WORKSPACES/$name" "$name")
+      case "$guide" in
+        written) say "wrote $WORKSPACES/$name/CLAUDE.md, the guide Claude Code reads there (yours to edit; hpcworker never replaces it)";;
+        skipped:*) say "note: no workspace guide written (${guide#skipped: }); the worker starts without it";;
+      esac
       # the running link and its queued successor, in ONE scheduler call: either alive means nothing to submit
       local jid nid ids line; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd"); ids="$jid${jid:+${nid:+,}}$nid"
       if [ -n "$ids" ]; then
@@ -508,7 +533,11 @@ EOT
       say "--- rc.log (Claude Code's terminal, last $lines lines, codes stripped)"
       [ -s "$rd/rc.log" ] && tail -c 20000 "$rd/rc.log" | hpcw_strip_codes | grep -v '^[[:space:]]*$' | tail -n "$lines"
       say "--- job output"; ls -t "$rd"/slurm_*.out "$rd"/pbs.out "$rd"/lsf_*.out 2>/dev/null | head -1 | xargs -r tail -n 30;;
-    *) die "worker: start|stop|status|list|log";;
+    guide)
+      # what write_workspace_guide would write for this worker, on stdout; nothing is written
+      [ -s "$GUIDE_TPL" ] || die "no workspace guide template at $GUIDE_TPL"
+      prof_py guide "$GUIDE_TPL" "$PROFILE" RUN="$name";;
+    *) die "worker: start|stop|status|list|log|guide";;
   esac
 }
 
