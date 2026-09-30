@@ -45,9 +45,15 @@ class Validate(unittest.TestCase):
         self.assertTrue(prof["vpn_required"])
         self.assertEqual(prof["login_node_rules"], {"max_processes": 20, "poll_floor_seconds": 60})
         self.assertEqual(prof["home_filesystem"], "panfs")
-        self.assertEqual(prof["claude_config_dir"], "$HOME/.ashley/claude")
-        self.assertIn("$HOME/.ashley/claude/.ashley-remote-consent", prof["consent_markers"])
-        self.assertEqual(prof["shared_install"], "/rs/rs_grp_oschome/shared/ashley/hpcworker/current")
+        # the lab folder and the sign-in folder by their names since 2026-09-30 (the old names are links to them)
+        self.assertEqual(prof["claude_config_dir"], "$HOME/.beethoven/claude")
+        self.assertIn("$HOME/.beethoven/claude/.beethoven-remote-consent", prof["consent_markers"])
+        # the marker the grid command wrote before its rename, still honoured
+        self.assertIn("$HOME/.beethoven/claude/.ashley-remote-consent", prof["consent_markers"])
+        self.assertEqual(prof["shared_install"], "/rs/rs_grp_oschome/shared/beethoven/hpcworker/current")
+        self.assertEqual(prof["image_store"]["path"], "/rs/rs_grp_oschome/shared/beethoven/containers/claude-node22")
+        self.assertEqual(prof["claude_bin"], "/rs/rs_grp_oschome/shared/beethoven/npm-claude-node22/bin/claude")
+        self.assertIn("/rs/rs_grp_oschome/shared/beethoven", prof["binds"])
 
     def test_shared_install_is_optional_and_absolute(self):
         prof = P.load(WAYNE)
@@ -61,7 +67,7 @@ class Validate(unittest.TestCase):
         prof = P.load(WAYNE)
         prof["shared_install"] = ""
         self.assertEqual(P.validate(prof), [])
-        self.assertIn("P_shared_install=/rs/rs_grp_oschome/shared/ashley/hpcworker/current", P.shellenv(P.load(WAYNE)))
+        self.assertIn("P_shared_install=/rs/rs_grp_oschome/shared/beethoven/hpcworker/current", P.shellenv(P.load(WAYNE)))
 
     def test_consent_flags_read_two_booleans_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -172,12 +178,13 @@ class Mapping(unittest.TestCase):
         self.assertEqual(m["RUN_DIR"], "/rs/rs_grp_oschome/go2432/hpcworker/worker")
         self.assertEqual(m["WORKSPACE"], "/rs/rs_grp_oschome/go2432/hpcworker/workspaces/worker")
         self.assertEqual(m["NODE_TMP"], "/tmp/go2432/hpcworker_$SLURM_JOB_ID")
-        self.assertEqual(m["CLAUDE_CONFIG_DIR"], "/wsu/home/go/go24/go2432/.ashley/claude")
-        self.assertIn("/wsu/home/go/go24/go2432/.ashley/claude/.ashley-remote-consent", m["CONSENT_MARKERS"].split(":"))
+        self.assertEqual(m["CLAUDE_CONFIG_DIR"], "/wsu/home/go/go24/go2432/.beethoven/claude")
+        self.assertIn("/wsu/home/go/go24/go2432/.beethoven/claude/.beethoven-remote-consent", m["CONSENT_MARKERS"].split(":"))
+        self.assertIn("/wsu/home/go/go24/go2432/.beethoven/claude/.ashley-remote-consent", m["CONSENT_MARKERS"].split(":"))
         self.assertIn("/wsu/home/go/go24/go2432/.hpcworker/consent", m["CONSENT_MARKERS"].split(":"))
         self.assertEqual(m["SCHEDULER"], "slurm")
         self.assertEqual(m["CHAIN"], "1")
-        self.assertEqual(m["BINDS"], "-B /wsu/home/go/go24/go2432 -B /rs/rs_grp_oschome/go2432 -B /rs/rs_grp_oschome/shared/ashley")
+        self.assertEqual(m["BINDS"], "-B /wsu/home/go/go24/go2432 -B /rs/rs_grp_oschome/go2432 -B /rs/rs_grp_oschome/shared/beethoven")
         self.assertIn("#SBATCH --signal=B:TERM@120", m["HEADER"])
         self.assertIn("#SBATCH --requeue", m["HEADER"])
         self.assertIn("#SBATCH --dependency=singleton", m["HEADER"])
@@ -188,8 +195,8 @@ class Mapping(unittest.TestCase):
         m = P.mapping(self.prof, {"RUN": "worker"})
         self.assertEqual(m["HPCW_CODE"], ROOT.replace(os.sep, "/"))
         self.assertEqual(m["HPCW_HOME"], "/wsu/home/go/go24/go2432/.hpcworker")
-        m = P.mapping(self.prof, {"RUN": "worker", "HPCW_CODE": "/rs/rs_grp_oschome/shared/ashley/hpcworker/v5"})
-        self.assertEqual(m["HPCW_CODE"], "/rs/rs_grp_oschome/shared/ashley/hpcworker/v5")
+        m = P.mapping(self.prof, {"RUN": "worker", "HPCW_CODE": "/rs/rs_grp_oschome/shared/beethoven/hpcworker/v7"})
+        self.assertEqual(m["HPCW_CODE"], "/rs/rs_grp_oschome/shared/beethoven/hpcworker/v7")
         self.assertIn("/wsu/home/go/go24/go2432/.hpcworker/consent", m["CONSENT_MARKERS"].split(":"))
 
     def test_marker_follows_hpcw_home(self):

@@ -343,7 +343,9 @@ class GuardedRemove(unittest.TestCase):
 
     def test_agent_marker(self):
         self.assertEqual(bash(with_common("hpcw_agent_marker"), env={"CLAUDECODE": "1"})[0], 0)
-        self.assertEqual(bash(with_common("hpcw_agent_marker"), env={"ASHLEY_REQUEST_ID": "r1"})[0], 0)
+        # a Beethoven for VS Code worker's request, under its names since 2026-09-30 and the older ones
+        for var in ("BEETHOVEN_REQUEST_ID", "BEETHOVEN_WORKER", "ASHLEY_REQUEST_ID", "ASHLEY_WORKER"):
+            self.assertEqual(bash(with_common("hpcw_agent_marker"), env={var: "r1"})[0], 0, var)
         # no terminal on stdin under subprocess: that alone counts as "not a person"
         self.assertEqual(bash(with_common("hpcw_agent_marker"))[0], 0)
 
@@ -394,7 +396,7 @@ class InstallAndGuard(unittest.TestCase):
             self.assertTrue(os.path.exists(prof))
             with open(prof) as fh:
                 before = fh.read()
-            for marker in ({"CLAUDECODE": "1"}, {"ASHLEY_REQUEST_ID": "x"}, {}):
+            for marker in ({"CLAUDECODE": "1"}, {"BEETHOVEN_REQUEST_ID": "x"}, {"ASHLEY_REQUEST_ID": "x"}, {}):
                 e = dict(env)
                 e.update(marker)
                 rc, out, err = bash("bash '%s/bin/hpcworker' install --profile wayne --force" % posix(ROOT), env=e)
@@ -719,7 +721,7 @@ class SharedInstall(unittest.TestCase):
             site = os.path.join(vdir, "profiles", "wayne.json")
             with open(site) as fh:
                 p = json.load(fh)
-            self.assertEqual(p["shared_install"], "/rs/rs_grp_oschome/shared/ashley/hpcworker/current")
+            self.assertEqual(p["shared_install"], "/rs/rs_grp_oschome/shared/beethoven/hpcworker/current")
             p["shared_install"] = posix(shared)
             with open(os.path.join(vdir, "profiles", "testsite.json"), "w") as fh:
                 json.dump(p, fh)
@@ -728,6 +730,78 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual(rc, 0, (out, err))
             with open(os.path.join(home, "shared")) as fh:
                 self.assertEqual(fh.read().strip(), posix(shared))
+
+    def test_renamed_folder_named_by_its_old_link_changes_nothing(self):
+        # a lab renames its shared folder and leaves the old name as a link (Wayne State, 2026-09-30:
+        # shared/ashley -> shared/beethoven); an extension built before (Beethoven 4.0.0 to 7.0.0) still runs
+        # install --shared with the old spelling. The spelling on record is kept, byte for byte.
+        with tempfile.TemporaryDirectory() as td:
+            if not can_symlink(td):
+                self.skipTest("this system cannot make symbolic links")
+            new_parent = os.path.join(td, "lab", "beethoven", "hpcworker")
+            os.makedirs(new_parent)
+            vdir = os.path.join(new_parent, "v" + CURRENT_VERSION)
+            copy_framework(vdir)
+            os.symlink("v" + CURRENT_VERSION, os.path.join(new_parent, "current"))
+            os.symlink("beethoven", os.path.join(td, "lab", "ashley"))
+            new = posix(os.path.join(new_parent, "current"))
+            old = posix(os.path.join(td, "lab", "ashley", "hpcworker", "current"))
+            home = os.path.join(td, "hpcw")
+            rc, out, err = self.install_shared(new, home)
+            self.assertEqual(rc, 0, err)
+
+            def snapshot():
+                out = {}
+                for name in ("bin/hpcworker", "shared", "profile.json"):
+                    with open(os.path.join(home, name), "rb") as fh:
+                        out[name] = fh.read()
+                return out
+
+            first = snapshot()
+            self.assertEqual(first["shared"].decode().strip(), new)
+            rc, out, err = self.install_shared(old, home, via=old)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(snapshot(), first, "the old spelling changed the launcher, the marker or the profile")
+            # the words name the folder as it was given (an older panel hides that path), and say what was kept
+            self.assertIn("hpcworker %s: shared copy at %s; launcher and marker refreshed (nothing copied) (recorded under the folder's new name)" % (CURRENT_VERSION, old), out)
+            rc, out, _ = bash("bash '%s/bin/hpcworker' version" % posix(home), env={"HPCW_HOME": posix(home)})
+            self.assertEqual(out, "%s (shared copy at %s)" % (CURRENT_VERSION, new))
+            # an account first installed under the old spelling moves to the one this copy's site profile
+            # names, when that is the same folder (here a copy of wayne.json pointing at the new spelling)
+            with open(os.path.join(vdir, "profiles", "wayne.json")) as fh:
+                p = json.load(fh)
+            p["shared_install"] = new
+            with open(os.path.join(vdir, "profiles", "lab.json"), "w") as fh:
+                json.dump(p, fh)
+            home2 = os.path.join(td, "hpcw2")
+            rc, out, err = self.install_shared(old, home2, extra="--profile lab", via=old)
+            self.assertEqual(rc, 0, err)
+            with open(os.path.join(home2, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), new)
+            # an account whose marker holds the old spelling (installed before the rename) moves to the new
+            # one when install names it, and an older command run afterwards does not move it back
+            home3 = os.path.join(td, "hpcw3")
+            rc, out, err = self.install_shared(old, home3, via=old)
+            self.assertEqual(rc, 0, err)
+            with open(os.path.join(home3, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), old, "no profile names the folder: the spelling given is kept")
+            rc, out, err = self.install_shared(new, home3, extra="--profile lab")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("this account now uses the shared copy of hpcworker %s at %s (it used %s)" % (CURRENT_VERSION, new, old), out)
+            with open(os.path.join(home3, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), new)
+            rc, out, err = self.install_shared(old, home3, via=old)
+            self.assertEqual(rc, 0, err)
+            with open(os.path.join(home3, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), new)
+            # a different folder under the same last name is not taken for it
+            other = os.path.join(td, "other", "hpcworker")
+            copy_framework(os.path.join(other, "v" + CURRENT_VERSION))
+            os.symlink("v" + CURRENT_VERSION, os.path.join(other, "current"))
+            rc, out, err = self.install_shared(os.path.join(other, "current"), home)
+            self.assertEqual(rc, 0, err)
+            with open(os.path.join(home, "shared")) as fh:
+                self.assertEqual(fh.read().strip(), posix(os.path.join(other, "current")))
 
     def test_current_link_is_followed_one_level(self):
         # the code root is the numbered directory the link names, spelled through the same parents:

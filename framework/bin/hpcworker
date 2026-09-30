@@ -28,7 +28,7 @@
 # directories under the state directory and a job's own node-local temp; the one subcommand that
 # replaces a file of yours (install --force) runs only for a person at a terminal. Versions are integers.
 set -uo pipefail
-VERSION=6
+VERSION=7
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -83,7 +83,7 @@ load_profile() {
 }
 # "heavy" = a container or Claude Code itself: only inside a job, never on the login node
 refuse_heavy() { in_job || die "$1 would run a container or Claude Code on this node ($(hostname -s)); that is not allowed on a login node, so hpcworker does it inside a job for you: $2"; }
-# a destructive action needs a person at a terminal: never an agent (Claude Code, Ashley), never a pipeline
+# a destructive action needs a person at a terminal: never an agent (Claude Code, a Beethoven for VS Code worker), never a pipeline
 refuse_if_agent() { hpcw_agent_marker && die "$1 would replace or remove something of yours; it runs only for a person at a terminal, not under Claude Code, another agent or a pipeline. Nothing was changed."; return 0; }
 consent_markers() { printf '%s\n' "$HPCW_HOME/consent"; local m; for m in ${P_consent_markers:-}; do printf '%s\n' "$m"; done; }
 consent_source() { # claude_config | marker | none : Claude Code's own record first, the fallback marker files second
@@ -105,7 +105,7 @@ clean_env_args() { # the environment Claude Code gets inside the container (matc
 # ---- the shell: ~/.hpcworker/bin on PATH for a person at a terminal -----------------------------
 # The extension never needs this (it calls the command by its full path through the portal's shell);
 # a person opening the portal's terminal does. One managed block in ~/.bashrc, rewritten in place and
-# never duplicated, the way Ashley's grid CLI does it. Only for the default install location: a custom
+# never duplicated, the way the grid command of Beethoven for VS Code does it. Only for the default install location: a custom
 # HPCW_HOME (or --no-shell-path) gets the one-line hint instead and nothing of theirs is touched.
 SHELL_BLOCK_BEGIN='# >>> hpcworker (managed; "hpcworker install" rewrites this block) >>>'
 SHELL_BLOCK_END='# <<< hpcworker <<<'
@@ -214,10 +214,26 @@ install_profile() { # NAME DISCOVER FORCE: profile.json from a site profile or f
   [ -s "$PROFILE" ] && { prof_py validate "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
   return 0
 }
+# Two spellings of one shared copy: the same last name (current) under one physical parent. A lab that
+# renames its shared folder leaves the old name behind as a link (Wayne State, 2026-09-30:
+# /rs/rs_grp_oschome/shared/ashley -> beethoven), and extensions built before the rename (Beethoven 4.0.0
+# to 7.0.0) still run install --shared with the old spelling.
+same_copy_spelled() { # A B
+  local a="${1%/}" b="${2%/}"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ] && [ "${a##*/}" = "${b##*/}" ] && same_dir "${a%/*}" "${b%/*}"
+}
 install_shared() { # DIR NAME DISCOVER FORCE: the launcher, the marker and the profile; no code is copied
-  local dir="$1" name="$2" discover="$3" force="$4"
+  local dir="$1" name="$2" discover="$3" force="$4" given alt
   [ -n "$dir" ] || dir=$(shared_default "$name")
   [ -n "$dir" ] || die "install --shared: no shared copy is named here; give its folder (hpcworker install --shared DIR) or use a site profile that names one (shared_install)"
+  # the folder named through an old spelling: the spelling on record is used instead (the one this
+  # copy's site profile names, else this account's marker), so the older command changes nothing; the
+  # messages below name the folder as it was given
+  given="$dir"
+  for alt in "$(shared_default "$name")" "$SHARED_DIR"; do
+    [ "$dir" = "${alt%/}" ] && break
+    same_copy_spelled "$dir" "$alt" && { dir="${alt%/}"; break; }
+  done
   local why; why=$(shared_problem "$dir")
   # exit 3 means "this shared copy cannot be used from this account": the extension then falls back to a copy of the account's own
   if [ -n "$why" ]; then echo "hpcworker: the shared copy at $dir cannot be used from this account: $why. Nothing was changed." >&2; exit 3; fi
@@ -238,10 +254,11 @@ install_shared() { # DIR NAME DISCOVER FORCE: the launcher, the marker and the p
   { printf '%s\n' "$dir" > "$HPCW_HOME/shared.part" && mv -f "$HPCW_HOME/shared.part" "$HPCW_HOME/shared"; } || die "could not write $HPCW_HOME/shared"
   SHARED_DIR="$dir"; SRC_ROOT="$code"; LIB="$code/lib"; JOBS="$code/jobs"; PROFILES="$code/profiles"
   install_profile "$name" "$discover" "$force"
-  if [ -n "$parts" ]; then say "switched to the shared copy of hpcworker $sv at $dir; your own copy${own_old:+ (version $own_old)} was moved to $ASIDE (nothing deleted)"
-  elif [ -z "$prev" ]; then say "installed: this account uses the shared copy of hpcworker $sv at $dir (nothing copied into $HPCW_HOME)"
-  elif [ "$prev" != "$dir" ]; then say "this account now uses the shared copy of hpcworker $sv at $dir (it used $prev)"
-  else say "hpcworker $sv: shared copy at $dir; launcher and marker refreshed (nothing copied)"; fi
+  local named=""; [ "$given" = "$dir" ] || named=" (recorded under the folder's new name)"
+  if [ -n "$parts" ]; then say "switched to the shared copy of hpcworker $sv at $given; your own copy${own_old:+ (version $own_old)} was moved to $ASIDE (nothing deleted)$named"
+  elif [ -z "$prev" ]; then say "installed: this account uses the shared copy of hpcworker $sv at $given (nothing copied into $HPCW_HOME)$named"
+  elif [ "$prev" != "$dir" ]; then say "this account now uses the shared copy of hpcworker $sv at $given (it used $prev)$named"
+  else say "hpcworker $sv: shared copy at $given; launcher and marker refreshed (nothing copied)$named"; fi
 }
 install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as before shared copies existed
   local name="$1" discover="$2" force="$3" hint=""

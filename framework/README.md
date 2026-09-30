@@ -1,7 +1,7 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 6.
+or the Claude app on your phone. Version 7.
 
 The cluster-side half of Beethoven, the browser extension. Bash plus the system `python3`, nothing
 installed, nothing running on the login node except the one `sbatch`, `squeue` or `scancel` an
@@ -19,8 +19,12 @@ keeps one copy of this framework on its shared storage, published by `tools/depl
 every account uses it; nothing of the code is copied into the home:
 
 ```
-bash /rs/rs_grp_oschome/shared/ashley/hpcworker/current/bin/hpcworker install --shared /rs/rs_grp_oschome/shared/ashley/hpcworker/current --profile wayne
+bash /rs/rs_grp_oschome/shared/beethoven/hpcworker/current/bin/hpcworker install --shared /rs/rs_grp_oschome/shared/beethoven/hpcworker/current --profile wayne
 ```
+
+(Until 2026-09-30 the lab folder was `/rs/rs_grp_oschome/shared/ashley`; that name is now a link to
+`shared/beethoven`, and Beethoven 4.0.0 to 7.0.0 still run this command with it. Version 7 keeps the
+spelling already on record, so the old command changes nothing; see "The rename" below.)
 
 That is the whole install, and it is the command the extension runs through the portal's shell. It
 writes four things into `~/.hpcworker` and nothing else: `bin/hpcworker`, a short launcher
@@ -29,7 +33,7 @@ the shared tree); `shared`, one line naming the shared directory (the marker); `
 from the shared copy's `profiles/<site>.json` and kept if one is there; and `log/`. The consent marker
 (`~/.hpcworker/consent`) stays there too, and the run directories stay under `shared_state_dir`. `DIR`
 may be left out when the profile names it (`hpcworker install --shared --profile wayne`).
-`hpcworker version` then says `5 (shared copy at DIR)`, and `hpcworker diag` names the shared
+`hpcworker version` then says `7 (shared copy at DIR)`, and `hpcworker diag` names the shared
 directory and the numbered directory it resolves to.
 
 - Run `install` again (through the launcher, or from a checkout) and it stays on the shared copy: it
@@ -60,11 +64,23 @@ path, which stays out of jobs and messages). A running worker and the successors
 version while `current` moves on; `worker start` picks up the new one. So a published version is
 never removed while a worker may still name it.
 
+**The rename (2026-09-30).** The lab folder at Wayne State was `/rs/rs_grp_oschome/shared/ashley`
+until the VS Code tool it came with was renamed Beethoven for VS Code; it is now
+`/rs/rs_grp_oschome/shared/beethoven`, and `shared/ashley` is a relative link to it, kept until every
+build older than Beethoven 8.0.0 is retired (Beethoven 4.0.0 to 7.0.0 carry the old name in their
+bundled profile and run `install --shared` with it). The sign-in folder moved the same way:
+`~/.beethoven/claude`, reached also as `~/.ashley/claude`. Two spellings of one shared copy (the same
+last name under one physical parent) are one copy to `install --shared`: the spelling on record wins
+(the one the running copy's site profile names, else the account's marker), so the older command
+rewrites the launcher and the marker with the bytes they already have, and its message names the
+folder as it was given, which an older panel then hides as before. A different folder is never
+taken for it.
+
 **A copy of your own** (a site with no shared copy, or `--own`): the command copies itself into
 `~/.hpcworker`.
 
 ```
-git clone <this repository> && bash ashley-bridge/framework/bin/hpcworker install --profile wayne
+git clone <this repository> && bash <the checkout>/framework/bin/hpcworker install --profile wayne
 ```
 
 At a university without a profile: `hpcworker install --discover` seeds one from the login node,
@@ -97,13 +113,13 @@ pass `bash -n`. On the cluster it is file work on the login node and nothing els
 setfacl, one link; no scheduler call, no container, no temp file under `/tmp`):
 
 ```
-ROOT/v5/          one directory per framework version, read-only for everyone
-ROOT/current      a relative link to v5, switched in one rename (ln -s, then mv -T)
+ROOT/v7/          one directory per framework version, read-only for everyone
+ROOT/current      a relative link to v7, switched in one rename (ln -s, then mv -T)
 ROOT/deploy.log   one line per publish
 ```
 
 `ROOT` is the directory above `current` in the site profile's `shared_install`
-(`/rs/rs_grp_oschome/shared/ashley/hpcworker` at Wayne State). The group is the one that owns the
+(`/rs/rs_grp_oschome/shared/beethoven/hpcworker` at Wayne State). The group is the one that owns the
 directory above `ROOT` (`oschome`): read and traverse, no write; others nothing. The volume carries
 POSIX ACLs with a group-writable default, so the script sets the group and mask entries (and the
 directories' defaults) to read as well, and prints `getfacl` to show it. Running it again with the
@@ -236,8 +252,9 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
   node-local temp and `/dev/shm` directory, and those go through one helper that refuses any path not
   named `hpcworker_<id>`, `hpcw_<id>` or `hpcw_probe_<id>`. The one subcommand that replaces a file
   of yours, `install --force` (profile.json), refuses to run under an agent (`CLAUDECODE`,
-  `ASHLEY_REQUEST_ID` and kin) or without a terminal. No subcommand can remove `~/.ashley`, the
-  profile, or a Claude Code configuration directory.
+  `BEETHOVEN_REQUEST_ID` and kin, and their older `ASHLEY_` names) or without a terminal. No subcommand
+  can remove `~/.beethoven` (or `~/.ashley`, its old name), the profile, or a Claude Code configuration
+  directory.
 
 ## Always on
 
@@ -332,13 +349,14 @@ Continue coding in the Claude mobile app or https://claude.ai/code?environment=e
 
 Only `profiles/wayne.json`: partitions `secp/secondary` (starts at once) and `reqp/requeue`, GPU
 partitions `gmsap` and `gvohp`, `module load apptainer/1.2.2` at `/wsu/el7/gnu7/apptainer/1.2.2/bin`,
-the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/ashley`, the lab's shared
-copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/ashley/hpcworker/current`, which
+the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/beethoven`, the lab's shared
+copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/beethoven/hpcworker/current`, which
 every account must be in the group `oschome` to read, like everything else on that volume), the CephFS state
 directory `/rs/rs_grp_oschome/$USER/hpcworker`, node temp at `/tmp/$USER/hpcworker_$SLURM_JOB_ID`
-(never `$TMPDIR`), `claude_config_dir` `$HOME/.ashley/claude` (the sign-in the lab's VS Code tool
+(never `$TMPDIR`), `claude_config_dir` `$HOME/.beethoven/claude` (the sign-in Beethoven for VS Code
 already made; the framework starts Claude Code there, reads `claude auth status` and the two consent
-booleans), that tool's consent marker honoured beside hpcworker's own, the portal
+booleans), that tool's consent markers (`.beethoven-remote-consent`, and `.ashley-remote-consent`, its
+name before the rename) honoured beside hpcworker's own, the portal
 `https://ondemand.grid.wayne.edu` behind the VPN, the 20-process login-node cap, and the Panasas home
 (new images at this site should be SIF).
 
@@ -476,6 +494,34 @@ the unreadable directory, which need Linux) and under WSL (none skipped). Not me
 probe job running from the shared copy (the next `worker start` is the first), what an account
 outside `oschome` sees (no such account was at hand), and whether the portal's Files app reads
 through the `current` link.
+
+2026-09-30 (version 7, the rename; user go2432): with no `ashley_`, `beethoven_` or `hpcw_` job queued
+or running and the account's worker and probe finished, `/rs/rs_grp_oschome/shared/ashley` was moved
+to `shared/beethoven` and a relative link `ashley -> beethoven` left in its place (one `mv -T`, one
+`ln -s`, on the login node); the lab's `library.json` and the account's `config.env` and `READY` name
+the new folder, and copies of every rewritten file are kept in the account. `tools/deploy_shared.sh`
+over `ssh wsu-grid` (from WSL) derived its root from the new `shared_install` and published
+`shared/beethoven/hpcworker/v7`, `current -> v7`; `hpcworker version` through the old spelling's
+`current` answers 7 too. v7 was published once more with `--replace` minutes later (no job had named
+it), for the order of the spelling rule above; the first copy is kept as `v7.replaced-<time>`. The
+account's `profile.json` (framework 5's `wayne.json`, without `shared_install`, the same in every
+other key) became framework 7's, the old one kept in `~/.hpcworker/replaced/20260930-beethoven-rename/`,
+and `install --shared <new folder> --profile wayne` moved the launcher and the marker to the new name.
+Then Beethoven 7.0.0's own line, `bash '/rs/rs_grp_oschome/shared/ashley/hpcworker/current/bin/hpcworker'
+install --shared '/rs/rs_grp_oschome/shared/ashley/hpcworker/current' --profile 'wayne'`, said `hpcworker
+7: shared copy at /rs/rs_grp_oschome/shared/ashley/hpcworker/current; launcher and marker refreshed
+(nothing copied) (recorded under the folder's new name)`, and the launcher, the marker, `profile.json`,
+`~/.bashrc` and the account's `config.env` kept their bytes (SHA-256 before and after), the file list
+under `~/.hpcworker` too; `hpcworker version` says `7 (shared copy at
+/rs/rs_grp_oschome/shared/beethoven/hpcworker/current)`. A ten-minute job on asx13 (40513153,
+`secp/secondary`, 7 s, not a worker) started the lab's container once with the lab folder named and
+bound by its old spelling and once by its new one: both ran `node v22.23.3` and `claude 2.1.283`, read
+framework 7 through `current`, and reached the sign-in folder as `~/.ashley/claude` and as
+`~/.beethoven/claude`; so apptainer 1.2.2 binds a folder named through a link. Nothing of ours under
+warrior's `/tmp`. The 121 unit tests pass under WSL (none skipped, among them the new one for the two
+spellings) and on a Windows checkout (the link, pty and permission tests skipped there). Not measured:
+a worker or probe of framework 7 running on the grid, and whether the portal's Files app lists the old
+spelling (a link) as a folder.
 
 Not verified on the grid by the framework itself, because the student's grid sign-in was gone before
 the first worker started (`claude auth status` inside the image says `loggedIn: false`): the

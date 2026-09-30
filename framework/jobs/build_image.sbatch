@@ -1,6 +1,6 @@
 #!/bin/bash
 # hpcworker build_image: make the worker image for a site that has none. NOT RUN ON WAYNE STATE
-# (an image exists there: the shared Ashley sandbox named in profiles/wayne.json); written from
+# (an image exists there: the shared sandbox of Beethoven for VS Code named in profiles/wayne.json); written from
 # bootstrap.sbatch's guards and the Apptainer documentation, untested on a real cluster.
 #
 # Product: an Apptainer SIF from docker://node:22-bookworm with Claude Code pinned to

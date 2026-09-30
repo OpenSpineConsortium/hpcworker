@@ -7,7 +7,8 @@
 #   tools/deploy_shared.sh --here [the same options]     on the cluster itself, from a checkout there
 #
 # Layout on the cluster (ROOT defaults to the directory above `current` in profiles/<site>.json's
-# shared_install; at Wayne State /rs/rs_grp_oschome/shared/ashley/hpcworker):
+# shared_install; at Wayne State /rs/rs_grp_oschome/shared/beethoven/hpcworker, which was .../shared/ashley
+# until 2026-09-30 and is still reached through the link shared/ashley -> beethoven):
 #   ROOT/v<N>/      one directory per framework VERSION: bin/ lib/ jobs/ profiles/ VERSION README.md
 #   ROOT/current    a relative link to v<N>, switched in one rename (ln -s, then mv -T; coreutils 8.22's
 #                   `ln -sfn` unlinks first, which leaves a moment with no `current`)

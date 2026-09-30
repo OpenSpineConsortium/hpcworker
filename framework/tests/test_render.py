@@ -70,8 +70,8 @@ class Render(RenderBase):
         self.assertIn("#SBATCH --time=0-01:00:00", text)
         self.assertIn("#SBATCH --signal=B:TERM@120", text)
         self.assertIn("HPCW_NODE_TMP_PATTERN='/tmp/go2432/hpcworker_$SLURM_JOB_ID'", text)
-        self.assertIn("IMAGE='/rs/rs_grp_oschome/shared/ashley/containers/claude-node22'", text)
-        self.assertIn("CLAUDE_CONFIG_DIR_VALUE='/wsu/home/go/go24/go2432/.ashley/claude'", text)
+        self.assertIn("IMAGE='/rs/rs_grp_oschome/shared/beethoven/containers/claude-node22'", text)
+        self.assertIn("CLAUDE_CONFIG_DIR_VALUE='/wsu/home/go/go24/go2432/.beethoven/claude'", text)
         self.assertIn("IPC_DIR='/dev/shm'", text)
         self.assertIn("remote-control", text)
         self.assertIn("--continue", text)
@@ -85,8 +85,8 @@ class Render(RenderBase):
 
     def test_code_comes_from_hpcw_code_not_the_home(self):
         # on a shared copy ~/.hpcworker has no lib/: every source line of the job goes through HPCW_CODE
-        text = self.rendered(HPCW_CODE="/rs/rs_grp_oschome/shared/ashley/hpcworker/v5")
-        self.assertIn("HPCW_HOME='/wsu/home/go/go24/go2432/.hpcworker'; HPCW_CODE='/rs/rs_grp_oschome/shared/ashley/hpcworker/v5';", text)
+        text = self.rendered(HPCW_CODE="/rs/rs_grp_oschome/shared/beethoven/hpcworker/v7")
+        self.assertIn("HPCW_HOME='/wsu/home/go/go24/go2432/.hpcworker'; HPCW_CODE='/rs/rs_grp_oschome/shared/beethoven/hpcworker/v7';", text)
         self.assertIn('source "$HPCW_CODE/lib/adapters/common.sh"', text)
         self.assertIn('source "$HPCW_CODE/lib/adapters/$SCHEDULER.sh"', text)
         self.assertIn('echo "source $(printf %q "$HPCW_CODE/lib/adapters/common.sh")"', text)

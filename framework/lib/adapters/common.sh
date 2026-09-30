@@ -108,13 +108,17 @@ hpcw_rm_own_tmp() { # PATH... : remove ONLY directories the framework made for o
   # home directory, a config directory, a state directory or the root.
   local p; for p in "$@"; do
     [ -n "$p" ] || continue
-    case "$p" in /|"$HOME"|"$HOME"/|/tmp|/dev/shm|"${HOME}/.ashley"*|*/.claude*|*/.hpcworker*) echo "REFUSING to remove $p (not a per-job directory)" >&2; continue;; esac
+    case "$p" in /|"$HOME"|"$HOME"/|/tmp|/dev/shm|"${HOME}/.beethoven"*|"${HOME}/.ashley"*|*/.claude*|*/.hpcworker*) echo "REFUSING to remove $p (not a per-job directory)" >&2; continue;; esac
     case "${p%/}" in */hpcworker_[A-Za-z0-9_.-]*|*/hpcw_[A-Za-z0-9_.-]*) rm -rf -- "${p%/}";; *) echo "REFUSING to remove $p (not a per-job directory)" >&2;; esac
   done
 }
 
-hpcw_agent_marker() { # 0 when an agent, not a person, is at the keyboard: CLAUDECODE, ASHLEY_REQUEST_ID and kin, or no terminal
-  [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || [ ! -t 0 ]
+# 0 when an agent, not a person, is at the keyboard: CLAUDECODE, the request and worker a Beethoven for
+# VS Code worker sets in Claude's shell (BEETHOVEN_REQUEST_ID and kin, and the ASHLEY_ twins it still
+# sets for older readers: its names before 2026-09-30), or no terminal
+hpcw_agent_marker() {
+  [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${BEETHOVEN_REQUEST_ID:-}" ] || [ -n "${BEETHOVEN_WORKER:-}" ] \
+    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || [ ! -t 0 ]
 }
 
 hpcw_strip_codes() { # stdin -> stdout: a terminal transcript without escape sequences, NULs or carriage returns
