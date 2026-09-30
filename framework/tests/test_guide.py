@@ -86,10 +86,35 @@ class GuideRender(GuideBase):
             "IRB",
             "export-controlled",
             "the Claude sign-in under `/wsu/home/go/go24/go2432/.beethoven/claude`: never read, copy or print anything there",
+            # framework 9: Slurm inside the worker (the Wayne profile's scheduler_in_worker)
+            "- The cluster's own Slurm commands work in here: `sbatch`, `squeue`, `sacct`, `scancel` and `sinfo` (also in `/opt/hpcw/slurm/bin`).",
+            "keeps running when this worker's job ends",
+            "- If `command -v sbatch` finds nothing, this node lacked a piece when the worker started",
+            "never `scancel -u` or a name pattern, and never this worker's own job (`$HPCW_JOB`)",
+            "(`APPTAINER_TMPDIR`, `APPTAINER_CACHEDIR`) on the node's local disk inside that job",
+            "- A job you submitted: have it write its output and results under this workspace (`#SBATCH --output` too, submitted with `-D`), follow it with `squeue -j <id>` or `sacct -j <id>` at most once every 60 seconds",
         ):
             self.assertIn(want, text)
+        self.assertNotIn("this container may not carry the scheduler's commands", text)
         self.assertNotIn("--account", text, "Wayne State names no account")
         self.assertNotIn("$USER", text, "the login side expands $USER")
+
+    def test_flag_off_is_the_text_before_version_9(self):
+        # a site without scheduler_in_worker keeps the one line every version since 8 wrote, and nothing else changes
+        prof = json.loads(json.dumps(self.prof))
+        prof["scheduler_in_worker"] = False
+        off, on = self.rendered(prof), self.rendered()
+        line = ("- Check first with `command -v sbatch`: this container may not carry the scheduler's commands. If it does not, write the job script "
+                "into this workspace and ask the person to submit it from a terminal on the cluster (for example the shell in the portal, https://ondemand.grid.wayne.edu).")
+        self.assertIn(line + "\n", off)
+        for gone in ("/opt/hpcw", "$HPCW_JOB", "APPTAINER_TMPDIR", "A job you submitted", "Slurm commands work in here"):
+            self.assertNotIn(gone, off)
+        self.assertIn("- Save results under this workspace and give the person the full path.\n- To put a figure", off)
+        # the two texts differ only in the running-work lines and the one results line
+        extra = [l for l in on.splitlines() if l not in off.splitlines()]
+        missing = [l for l in off.splitlines() if l not in on.splitlines()]
+        self.assertEqual(missing, [line])
+        self.assertEqual(len(extra), 5, extra)
 
     def test_no_credential_words(self):
         for text in (self.tpl, self.rendered()):
@@ -101,7 +126,7 @@ class GuideRender(GuideBase):
         prof.update({
             "display_name": "", "scheduler": "pbs", "submit_host": "", "ood_base_url": "", "account": "lab42",
             "partition_cpu_batch": "", "qos_cpu": "", "partitions_gpu": ["gpu"], "max_walltime": "48:00:00",
-            "shared_state_dir": "$HOME/hpcworker", "binds": ["$HOME", "/scratch/$USER:/scratch"],
+            "shared_state_dir": "$HOME/hpcworker", "binds": ["$HOME", "/scratch/$USER:/scratch"], "scheduler_in_worker": False,
         })
         self.assertEqual(P.validate(prof), [])
         text = self.rendered(prof, run="w2")

@@ -23,6 +23,13 @@
 # about to start, never removing a key, never touching an unparseable file. status.json says in
 # "needs" (login | consent | nothing) and "hint" what the student must do now, for the panel's one line.
 #
+# Slurm inside the worker (framework 9, when the site profile sets scheduler_in_worker): the host's
+# own client, its library, the munge library and socket, /etc/slurm and a user list naming the slurm
+# and munge users are bound into the container read-only, with wrappers that give a submitted job
+# the host's environment, so Claude Code can submit and watch jobs; a job it submits runs on the
+# host, not in the container. A piece missing on the node: the worker starts without it and says so
+# (the job log, status.json "scheduler_note"). lib/adapters/common.sh hpcw_slurm_in_container.
+#
 # The code: lib/ comes from HPCW_CODE, the directory the command that rendered this job ran from
 # (the lab's shared copy, by its numbered directory, or ~/.hpcworker); HPCW_HOME is the student's
 # own folder (profile, consent marker). A chain keeps the code it started with until the next start.
@@ -43,7 +50,7 @@ CLAUDE_CONFIG_DIR_VALUE='@CLAUDE_CONFIG_DIR@'
 CONSENT_MARKERS='@CONSENT_MARKERS@'
 IPC_DIR='@IPC_DIR@'
 HPCW_NODE_TMP_PATTERN='@NODE_TMP@'; HPCW_NODE_TMP_VAR='@NODE_TMP_VAR@'; HPCW_TMPDIR_IS_NODE_LOCAL=@TMPDIR_IS_NODE_LOCAL@
-XDG_FIX=@XDG_FIX@
+XDG_FIX=@XDG_FIX@; SCHED_IN_WORKER=@SCHED_IN_WORKER@
 PERMISSION_MODE='@PERMISSION_MODE@'; CAPACITY='@CAPACITY@'
 HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@; LOGIN_RECHECK_S=@LOGIN_RECHECK_S@
 export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VAR HPCW_TMPDIR_IS_NODE_LOCAL
@@ -69,7 +76,7 @@ STARTED_AT=$(date -u +%FT%TZ)
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 STATE=starting; MESSAGE=""; REQUESTED_NAME="$SITE-$RUN"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
 AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
-NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false
+NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false; SCHED_INSIDE=false; SCHED_NOTE="off in the site profile"
 # trust for the workspace as Claude Code has it on record (the second of the two booleans read); the seed below may add it later
 hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
 consent_source() { # claude_config | marker | none : where the student's recorded answer was found
@@ -83,11 +90,11 @@ write_status() { # STATE MESSAGE : atomic status.json, the one file clients read
   local src; src=$(consent_source); local consent=false; [ "$src" != none ] && consent=true
   # the one thing the student must do now, and a sentence for it: what the panel shows on its one line
   local needs hint; needs=$(hpcw_needs "$STATE" "$consent"); hint=$(hpcw_hint "$STATE" "$needs" "$NEXT_JOB")
-  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"needs":%s,"hint":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
+  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"needs":%s,"hint":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"scheduler_in_worker":%s,"scheduler_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
     "$HPCW_VERSION" "$(json_str "$SITE")" "$(json_str "$RUN")" "$(json_str "$JOB")" "$(json_str "$NODE")" "$$" "$(json_str "$STATE")" "$(json_str "$MESSAGE")" "$(json_str "$needs")" "$(json_str "$hint")" \
     "$(json_str "$STARTED_AT")" "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" \
     "$AUTH_JSON" "$consent" "$(json_str "$src")" "$WS_TRUSTED" "$RC_ALIVE" "$RESUMED" "$USING_TMUX" "$RESTARTS" "$([ "$CHAIN" = 1 ] && echo true || echo false)" "$(json_str "$NEXT_JOB")" "$(json_str "$CHAIN_NOTE")" \
-    "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$RUN_DIR/job.token")" > status.json.part && mv -f status.json.part status.json
+    "$SCHED_INSIDE" "$(json_str "$SCHED_NOTE")" "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$RUN_DIR/job.token")" > status.json.part && mv -f status.json.part status.json
 }
 write_connection() {
   printf '{"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"node":%s,"job":%s,"pid":%s,"started_at":%s,"token_path":%s,"workspace":%s,"rc_log":%s,"permission_mode":%s,"capacity":%s,"resumed":%s,"next_job":%s}\n' \
@@ -122,6 +129,18 @@ write_status starting "checking the container and the sign-in"
 export HPCW_BINDS="$BINDS"
 if [ "$IMAGE_TYPE" = sandbox ]; then [ -x "$IMAGE/usr/local/bin/node" ] || { write_status error "image $IMAGE is not a readable sandbox with node"; exit 1; }
 else [ -r "$IMAGE" ] || { write_status error "image $IMAGE is not readable"; exit 1; }; fi
+# Slurm inside the container, when the profile asks for it: the binds and wrappers are made on this
+# node for this job, under its /dev/shm directory (not /tmp, which a cleaner sweeps while jobs run),
+# and added to every container start below; a job submitted from inside gets the host's PATH and
+# LD_LIBRARY_PATH and the TMPDIR this job was given, not the container's
+SCHED_PATH=""
+if [ "$SCHED_IN_WORKER" = 1 ]; then
+  if [ "$SCHEDULER" = slurm ] && HPCW_HOST_TMPDIR="$ORIG_TMPDIR" hpcw_slurm_in_container "$IPC/slurm" "$IMAGE" "$IMAGE_TYPE"; then
+    BINDS="$BINDS $HPCW_SLURM_BINDS"; export HPCW_BINDS="$BINDS"; SCHED_INSIDE=true; SCHED_PATH="$HPCW_SLURM_INSIDE"
+  fi
+  SCHED_NOTE="${HPCW_SLURM_NOTE:-not available: only the Slurm client can be bound into the container}"
+  say "scheduler inside the container: $SCHED_NOTE"
+fi
 # The environment Claude Code gets: its own config dir, no other credential or endpoint (a token
 # in the environment would outrank the sign-in and switch Remote Control off), feature flags left
 # on (Remote Control needs them), no self-update under a running worker.
@@ -132,6 +151,8 @@ CLEAN_ENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_UR
 # `script` and tmux can all run it without quoting travelling through them
 { echo '#!/bin/bash'; echo "# written by hpcworker job $JOB on $NODE: one command inside the worker image, with Claude Code's clean environment"
   echo "export RUNTIME=$(printf %q "$RUNTIME") RUNTIME_BIN=$(printf %q "$RUNTIME_BIN") RUNTIME_MODULE=$(printf %q "$RUNTIME_MODULE") HPCW_BINDS=$(printf %q "$BINDS") HPCW_NODE_TMP=$(printf %q "$HPCW_NODE_TMP") HPCW_JOB_ID=$(printf %q "$JOB")"
+  # the Slurm wrappers first on the container's PATH (the runtime prepends it to the image's own)
+  [ -n "$SCHED_PATH" ] && echo "export APPTAINERENV_PREPEND_PATH=$(printf %q "$SCHED_PATH") SINGULARITYENV_PREPEND_PATH=$(printf %q "$SCHED_PATH")"
   echo "source $(printf %q "$HPCW_CODE/lib/adapters/common.sh")"
   printf 'hpcw_runtime_exec %q' "$IMAGE"; for a in "${CLEAN_ENV[@]}"; do printf ' %q' "$a"; done; echo ' "$@"'; } > in_image.sh.part
 chmod 700 in_image.sh.part && mv -f in_image.sh.part in_image.sh

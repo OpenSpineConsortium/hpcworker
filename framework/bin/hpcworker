@@ -30,7 +30,7 @@
 # replaces a file of yours (install --force) runs only for a person at a terminal; the workspace guide
 # (CLAUDE.md) is written only where there is none, never over a file of yours. Versions are integers.
 set -uo pipefail
-VERSION=8
+VERSION=9
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -522,6 +522,8 @@ EOT
       say "  session: $(read_field "$sj" session_name)   open in Claude: $(read_field "$sj" environment_url)"
       say "  signed in: $(tr -d '\n' < "$sj" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false') $(tr -d '\n' < "$sj" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4); consent recorded: $(read_field "$sj" consent) ($(read_field "$sj" consent_source)); restarts: $(read_field "$sj" restarts)"
       say "  always on: $(read_field "$sj" chain); next job: ${nid:-none} $(read_field "$sj" chain_note)"
+      local sn; sn=$(read_field "$sj" scheduler_note)
+      [ -n "$sn" ] && say "  scheduler inside the worker: $sn"
       [ "$age" -gt 120 ] && case "$st" in stopped) ;; preempted) [ -n "$nid" ] && say "  (this job ended; job $nid is queued to take over)" || say "  (this job ended with no successor; hpcworker worker start --name $name starts it again)";; *) say "  (no heartbeat for ${age}s: the job may have ended; ${nid:+job $nid is queued to take over; }hpcworker worker start --name $name starts it again if not)";; esac
       return 0;;
     list)
@@ -699,6 +701,17 @@ emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
   if [ $DIAG_JSON = 1 ]; then [ $DIAG_FIRST = 1 ] || printf ','; DIAG_FIRST=0; printf '{"id":%s,"ok":%s,"warn":%s,"skip":%s,"detail":%s}' "$(json_str "$1")" "$2" "$3" "$4" "$(json_str "$5")"
   else local tag=FAIL; [ "$2" = true ] && tag=ok; [ "$3" = true ] && tag=warn; [ "$4" = true ] && tag=skip; printf '%-5s %-24s %s\n' "$tag" "$1" "$5"; fi
 }
+diag_slurm_in_worker() { # Slurm inside the worker's container (framework 9): what the newest worker heartbeat says about it
+  if [ "${P_scheduler_in_worker:-false}" = true ]; then
+    local sbest="" sbt=0 sd sm; for sd in "$STATE_DIR"/*/; do [ -s "$sd/status.json" ] || continue; sm=$(stat -c %Y "$sd/status.json"); [ "$sm" -gt "$sbt" ] && { sbt=$sm; sbest="$sd/status.json"; }; done
+    if [ -z "$sbest" ]; then emit hpcw.slurm-in-worker true true false "asked for in the site profile; no worker has reported yet"
+    else case "$(read_field "$sbest" scheduler_in_worker)" in
+      true) emit hpcw.slurm-in-worker true false false "job $(read_field "$sbest" job) on $(read_field "$sbest" node): $(read_field "$sbest" scheduler_note)";;
+      false) emit hpcw.slurm-in-worker false false false "asked for in the site profile, but job $(read_field "$sbest" job) on $(read_field "$sbest" node) went without it: $(read_field "$sbest" scheduler_note)";;
+      *) emit hpcw.slurm-in-worker true true false "the newest worker heartbeat is from a version before 9; the next worker start reports it";;
+    esac; fi
+  else emit hpcw.slurm-in-worker true false true "off in the site profile (scheduler_in_worker)"; fi
+}
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
@@ -747,6 +760,7 @@ cmd_diag() {
     if [ "$eg" = none ]; then emit hpcw.probe false false false "probe ${age}d old: compute nodes cannot reach api.anthropic.com/platform.claude.com; ask your center for an HTTP proxy"
     else emit hpcw.probe true "$([ "$age" -gt 30 ] && echo true || echo false)" false "probe ${age}d old on $(read_field "$pj" hostname): egress $eg, claude $(read_field "$pj" claude_version), loggedIn=$li, tmux=$(tr -d '\n' < "$pj" | grep -o '"tmux": *{[^}]*}' | grep -o '"present": *\(true\|false\)' | grep -o 'true\|false'), sbatch on node=$(read_field "$pj" sbatch_on_node)"; fi
   else emit hpcw.probe false true false "no probe yet: hpcworker probe (up to ten minutes on a compute node)"; fi
+  diag_slurm_in_worker
   local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
     local st age nid; st=$(read_field "$d/status.json" state); age=$(( $(date +%s) - $(stat -c %Y "$d/status.json") )); nid=$(next_job_of "$d")
     case "$st" in

@@ -234,6 +234,80 @@ hpcw_runtime_exec() {
   esac
 }
 
+# ---- the host's Slurm client inside the worker's container (profile: scheduler_in_worker) ----------
+# The container has no scheduler of its own. The host's client works inside it with these binds,
+# measured at Wayne State on asx1 (2026-09-28, Apptainer 1.2.2, the Debian bookworm sandbox the
+# workers use; the lab's VS Code tool has bound them since): /usr/bin under /opt/host/bin (never all
+# of it on PATH), /usr/lib64/slurm (libslurmfull and the plugins), the munge library into /usr/lib (a
+# default search folder, so no LD_LIBRARY_PATH is needed), /etc/slurm, the munge socket's folder, and
+# an /etc/passwd and /etc/group that add the users slurm.conf names (without the slurm user: "Invalid
+# user for SlurmUser slurm", then "Unable to process configuration file"). Small wrappers run each
+# client with the host's PATH, LD_LIBRARY_PATH and TMPDIR and without the container's variables or
+# the worker job's own SLURM_ ones, so a job submitted from inside runs on the host as if submitted
+# from a terminal (it would otherwise start with the container's LD_LIBRARY_PATH, /.singularity.d/libs,
+# and without the person's module libraries: seen in check job 40518457; and a worker's
+# SLURM_CPUS_PER_TASK or SLURM_MEM_PER_NODE left in a new job would steer its srun). A library path
+# the host sees but the container does not is simply absent inside, so the client loads what the
+# host's own copy loads, or the container's newer system library. Everything is read-only except the
+# socket, and written under DIR (the job's /dev/shm directory: node-local, never swept, removed with
+# the job). scontrol is left out: the host's needs libreadline.so.6, which the bookworm image does not
+# have ("error while loading shared libraries", check job 40518457 on asx1, 2026-09-30); squeue and
+# sacct answer what a worker needs to know about a job.
+HPCW_SLURM_CMDS="sbatch squeue scancel sacct sinfo"
+HPCW_SLURM_INSIDE=/opt/hpcw/slurm/bin   # the wrappers, as the container sees them
+hpcw_getent() { getent "$@"; }          # a function, so the tests can stand in for the host's user list
+hpcw_slurm_in_container() { # DIR IMAGE IMAGE_TYPE -> 0 with HPCW_SLURM_BINDS set, or 1; HPCW_SLURM_NOTE says which in one sentence
+  # HPCW_HOST_ROOT (empty on a cluster) prefixes every host path, for the tests only
+  local dir="${1%/}" image="$2" itype="${3:-sandbox}" r="${HPCW_HOST_ROOT:-}" node miss="" c lib sock conf su users own
+  HPCW_SLURM_BINDS=""; HPCW_SLURM_NOTE=""
+  node=$(hostname -s 2>/dev/null || echo "this node")
+  case "$dir$r" in *[[:space:]]*) HPCW_SLURM_NOTE="not bound: the folder $dir has a space in its name, which a bind list cannot carry"; return 1;; esac
+  [ -x "$r/usr/bin/sbatch" ] && [ -x "$r/usr/bin/squeue" ] || miss="$miss /usr/bin/sbatch"
+  [ -d "$r/usr/lib64/slurm" ] || miss="$miss /usr/lib64/slurm"
+  [ -d "$r/etc/slurm" ] || miss="$miss /etc/slurm"
+  lib=$(readlink -f "$r/usr/lib64/libmunge.so.2" 2>/dev/null) || lib=""
+  [ -n "$lib" ] && [ -f "$lib" ] || { lib=""; miss="$miss /usr/lib64/libmunge.so.2"; }
+  sock=""; for c in "$r/var/run/munge" "$r/run/munge"; do [ -d "$c" ] && { sock="$c"; break; }; done
+  [ -n "$sock" ] || miss="$miss /var/run/munge"
+  # the account slurm.conf runs the daemons as (SlurmUser; Slurm's own default is root), plus munge and this user
+  conf="$r/etc/slurm/slurm.conf"; su=""
+  [ -r "$conf" ] && su=$(sed -n 's/^[[:space:]]*[Ss][Ll][Uu][Rr][Mm][Uu][Ss][Ee][Rr][[:space:]]*=[[:space:]]*\([A-Za-z0-9._-]*\).*/\1/p' "$conf" | head -1)
+  users="${su:-slurm} munge $USER"
+  [ "${su:-slurm}" = root ] || hpcw_getent passwd "${su:-slurm}" >/dev/null 2>&1 || miss="$miss the ${su:-slurm} user"
+  if [ -n "$miss" ]; then HPCW_SLURM_NOTE="not available: missing on $node:$miss"; return 1; fi
+  # the container's own user list first (a name it has keeps its entry), then the host's for the rest
+  if [ "$itype" = sandbox ]; then own=$(cat "$image/etc/passwd" 2>/dev/null) || own=""
+  else own=$(hpcw_runtime_exec "$image" cat /etc/passwd 2>/dev/null) || own=""; fi
+  [ -n "$own" ] || { HPCW_SLURM_NOTE="not available: the container's /etc/passwd could not be read ($image)"; return 1; }
+  mkdir -p "$dir/bin" "$dir/etc" && chmod 700 "$dir" || { HPCW_SLURM_NOTE="not available: cannot create $dir on $node"; return 1; }
+  # shellcheck disable=SC2086
+  { printf '%s\n' "$own"; hpcw_getent passwd $users; } | awk -F: 'NF && !seen[$1]++' > "$dir/etc/passwd.part" || return 1
+  if [ "$itype" = sandbox ]; then own=$(cat "$image/etc/group" 2>/dev/null) || own=""
+  else own=$(hpcw_runtime_exec "$image" cat /etc/group 2>/dev/null) || own=""; fi
+  # shellcheck disable=SC2086
+  { printf '%s\n' "$own"; hpcw_getent group ${su:-slurm} munge "$(id -gn 2>/dev/null)"; } | awk -F: 'NF && !seen[$1]++' > "$dir/etc/group.part" || return 1
+  chmod 644 "$dir/etc/passwd.part" "$dir/etc/group.part" && mv -f "$dir/etc/passwd.part" "$dir/etc/passwd" && mv -f "$dir/etc/group.part" "$dir/etc/group" || return 1
+  # the wrappers: the environment a submitted job starts from is the host's, as this job had it
+  local path_q tmp_q ld_q have=""
+  path_q=$(printf %q "$PATH"); tmp_q=$(printf %q "${HPCW_HOST_TMPDIR:-}"); ld_q=$(printf %q "${LD_LIBRARY_PATH:-}")
+  for c in $HPCW_SLURM_CMDS; do
+    [ -x "$r/usr/bin/$c" ] || continue
+    { printf '%s\n' '#!/bin/bash' \
+        "# hpcworker: the host's $c for Claude Code inside the worker's container (written by job $(hpcw_job_id) on $node)." \
+        "# A job submitted from here runs on the host: the host's PATH, LD_LIBRARY_PATH and TMPDIR, none of the" \
+        "# container's variables, none of the worker job's own SLURM_ ones (SLURM_CONF is kept)." \
+        'for v in $(compgen -e); do case "$v" in APPTAINER_*|SINGULARITY_*|APPTAINERENV_*|SINGULARITYENV_*|XDG_RUNTIME_DIR) unset "$v";; SLURM_CONF) ;; SLURM_*) unset "$v";; esac; done'
+      printf 'export PATH=%s\n' "$path_q"
+      if [ -n "${LD_LIBRARY_PATH:-}" ]; then printf 'export LD_LIBRARY_PATH=%s\n' "$ld_q"; else printf 'unset LD_LIBRARY_PATH\n'; fi
+      if [ -n "${HPCW_HOST_TMPDIR:-}" ]; then printf 'export TMPDIR=%s\n' "$tmp_q"; else printf 'unset TMPDIR\n'; fi
+      printf 'exec /opt/host/bin/%s "$@"\n' "$c"; } > "$dir/bin/$c.part" && chmod 755 "$dir/bin/$c.part" && mv -f "$dir/bin/$c.part" "$dir/bin/$c" || return 1
+    have="$have${have:+ }$c"
+  done
+  HPCW_SLURM_BINDS="-B $r/usr/bin:/opt/host/bin:ro -B $r/usr/lib64/slurm:/usr/lib64/slurm:ro -B $lib:/usr/lib/libmunge.so.2:ro -B $r/etc/slurm:/etc/slurm:ro -B $sock:/var/run/munge -B $dir/etc/passwd:/etc/passwd:ro -B $dir/etc/group:/etc/group:ro -B $dir/bin:$HPCW_SLURM_INSIDE:ro"
+  HPCW_SLURM_NOTE="the host's Slurm client is in the container ($have, in $HPCW_SLURM_INSIDE)"
+  return 0
+}
+
 hpcw_normalise_state() { # FAMILY RAWSTATE [EXIT] -> PENDING|RUNNING|DONE|FAILED|UNKNOWN
   local fam="$1" raw="$2" ex="${3:-}"
   case "$fam" in

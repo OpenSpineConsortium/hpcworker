@@ -1,7 +1,7 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 8.
+or the Claude app on your phone. Version 9.
 
 The cluster-side half of Beethoven, the browser extension. Bash plus the system `python3`, nothing
 installed, nothing running on the login node except the one `sbatch`, `squeue` or `scancel` an
@@ -33,7 +33,7 @@ the shared tree); `shared`, one line naming the shared directory (the marker); `
 from the shared copy's `profiles/<site>.json` and kept if one is there; and `log/`. The consent marker
 (`~/.hpcworker/consent`) stays there too, and the run directories stay under `shared_state_dir`. `DIR`
 may be left out when the profile names it (`hpcworker install --shared --profile wayne`).
-`hpcworker version` then says `8 (shared copy at DIR)`, and `hpcworker diag` names the shared
+`hpcworker version` then says `9 (shared copy at DIR)`, and `hpcworker diag` names the shared
 directory and the numbered directory it resolves to.
 
 - Run `install` again (through the launcher, or from a checkout) and it stays on the shared copy: it
@@ -113,8 +113,8 @@ pass `bash -n`. On the cluster it is file work on the login node and nothing els
 setfacl, one link; no scheduler call, no container, no temp file under `/tmp`):
 
 ```
-ROOT/v8/          one directory per framework version, read-only for everyone
-ROOT/current      a relative link to v8, switched in one rename (ln -s, then mv -T)
+ROOT/v9/          one directory per framework version, read-only for everyone
+ROOT/current      a relative link to v9, switched in one rename (ln -s, then mv -T)
 ROOT/deploy.log   one line per publish
 ```
 
@@ -302,12 +302,74 @@ to go without one. The write refuses an existing name (bash's noclobber), so two
 moment cannot write over each other. `hpcworker worker guide [--name N]` prints the current text and
 writes nothing; to take a newer text, move yours aside and start the worker again.
 
-One thing the guide does not settle: whether the container can reach the scheduler. This framework
-binds no Slurm client into the container (the VS Code edition's worker job binds the host's client,
-its libraries, the munge socket and `/etc/slurm` read-only; nothing of that is here), so the guide
-tells Claude Code to check `command -v sbatch` first and, when it is missing, to write the job script
-into the workspace for the person to submit from a terminal. With the Wayne State profile as it is, a
-worker there should find no `sbatch`; that has not been checked in a running worker.
+Whether the container can reach the scheduler follows the site profile's `scheduler_in_worker`
+(version 9, next section). With it, the guide says the Slurm commands are there; without it, the
+guide tells Claude Code to check `command -v sbatch` first and, when it is missing, to write the job
+script into the workspace for the person to submit from a terminal.
+
+## Slurm inside the worker (version 9)
+
+With `scheduler_in_worker: true` in the site profile (Wayne State sets it; the default is false, so
+every other site is unchanged), the worker job binds the host's own Slurm client into the container,
+and Claude Code there can submit and watch jobs itself (`sbatch`, `squeue`, `sacct`, `scancel`,
+`sinfo`; not `scontrol`, whose host binary needs `libreadline.so.6`, which the Debian bookworm image
+does not have). The binds are the set measured on asx1 on 2026-09-28 for the lab's VS Code tool,
+whose worker has carried them since: `/usr/bin` under `/opt/host/bin` (never all of the host's
+`/usr/bin` on the container's PATH), `/usr/lib64/slurm`, the munge library into `/usr/lib` (a default
+search folder, so no `LD_LIBRARY_PATH`), `/etc/slurm`, the munge socket's folder `/var/run/munge`,
+and an `/etc/passwd` and `/etc/group` that are the container's own plus the host's entries for the
+user `slurm.conf` names as `SlurmUser`, `munge` and the person (without the slurm user the client
+stops at "Invalid user for SlurmUser slurm"). All read-only except the socket.
+`lib/adapters/common.sh` `hpcw_slurm_in_container` makes them on the compute node at the start of
+each job, under the job's `/dev/shm` directory (node-local, not swept like `/tmp`, removed with the
+job); the job adds them to every container start and puts the wrappers' folder,
+`/opt/hpcw/slurm/bin`, first on the container's PATH (`APPTAINERENV_PREPEND_PATH`).
+
+The wrappers run each host command with the host's PATH and `LD_LIBRARY_PATH` and the `TMPDIR` the
+job was given, and without the container's `APPTAINER_` and `SINGULARITY_` variables, the worker's
+`XDG_RUNTIME_DIR` or the worker job's own `SLURM_` variables (`SLURM_CONF` is kept). A job submitted
+from inside therefore starts much as if submitted from a terminal: on the host, not in the
+container, with the person's module libraries (without the wrapper's `LD_LIBRARY_PATH` it would get
+the container's, `/.singularity.d/libs`, as the check job showed), and not steered by the worker's
+`SLURM_CPUS_PER_TASK` or `SLURM_MEM_PER_NODE`, which a new job would otherwise inherit and its `srun`
+would read. Such a job keeps running when the worker's job ends. The rest of Claude Code's
+environment goes along unchanged, the worker's own variables included (`HPCW_JOB`, `HPCW_NODE_TMP`,
+`HPCW_BINDS`, `CLAUDE_CONFIG_DIR`): only hpcworker's own helpers read the `HPCW_` ones, and only
+Claude Code reads `CLAUDE_CONFIG_DIR`. The agent markers Claude Code sets (`CLAUDECODE`) stay too, so
+the tool's destructive subcommands still refuse inside such a job. Inside the container a host
+library folder the container cannot see is simply absent, so the client loads what the host's own
+copy loads, or the container's newer system library.
+
+When a piece is missing on the node, the worker starts without it: the job log names the piece,
+`status.json` carries `"scheduler_in_worker": false` and a `scheduler_note`, `hpcworker worker
+status` prints the note, and `hpcworker diag` reports `hpcw.slurm-in-worker` from the newest
+heartbeat. Only Slurm with Apptainer or Singularity is built; `validate` refuses the flag for another
+scheduler or runtime.
+
+An account's `profile.json` is a copy of the site profile, made at install and kept since, so one
+installed before version 9 does not carry the field. Such a field (`FIELDS_FROM_SITE` in
+`lib/profile.py`; this is its only member) takes the value in the site profile of the same name in
+the copy the command runs from, until the account sets its own: `hpcworker profile set
+scheduler_in_worker false` turns it off for one account, and `profile set` of any other field writes
+neither the site's value nor the default into the account's file, so a later publish still reaches it.
+
+The workspace guide follows the flag. With it, the running-work lines say the Slurm commands are
+here (and in `/opt/hpcw/slurm/bin`), that a submitted job runs outside the container and outlives the
+worker, what to do when `command -v sbatch` finds nothing, to cancel only its own jobs and by id
+(never `scancel -u`, never the worker's own job, `$HPCW_JOB`), and the lab's rule for containers in
+jobs (`APPTAINER_TMPDIR` and `APPTAINER_CACHEDIR` on the node's local disk); "Handing results back"
+gains one line: a submitted job writes its output and results under the workspace, is followed with
+`squeue -j` or `sacct -j` at most once a minute, and what came out, and where, goes back to the
+person. Without the flag the text is version 8's. A workspace that already has a `CLAUDE.md` keeps
+it (the guide is never replaced); version 8's text there already says to check `command -v sbatch`
+first, which now finds the command. `hpcworker worker guide` prints the new text.
+
+Measured and not: the check job (`tests/grid/slurm_in_container.sbatch`, job 40518457; "What was run
+on the Wayne State grid") ran the binds and wrappers from inside the container. Two changes came
+after it and have not been run on the grid: `scontrol` dropped, and the host's `LD_LIBRARY_PATH` in
+the wrappers. A worker's Claude Code submitting a real job from a Remote Control session has not been
+run, nor a SIF image (the user lists are then read with one `cat` inside the image instead of from
+the image folder).
 
 ## Files
 
@@ -325,6 +387,7 @@ jobs/worker.sbatch.tpl   the worker job, rendered per start from the profile
 jobs/workspace-guide.md.tpl  the CLAUDE.md a new worker workspace gets, filled from the profile (see below)
 jobs/build_image.sbatch  a SIF with Claude Code pinned, for sites without an image (not run at Wayne State)
 tests/run.sh             bash -n for every script, then the unittest suite
+tests/grid/slurm_in_container.sbatch  the maintainer's grid check for scheduler_in_worker (one 5-minute job; not published)
 ../tools/deploy_shared.sh  publishes bin/ lib/ jobs/ profiles/ VERSION README.md as the lab's shared copy
 ```
 
@@ -390,8 +453,8 @@ name before the rename) honoured beside hpcworker's own, the portal
 `https://ondemand.grid.wayne.edu` behind the VPN, the 20-process login-node cap, and the Panasas home
 (new images at this site should be SIF).
 
-The Slurm client is not bound into the container by this version, so the worker's Claude cannot
-submit jobs of its own yet; the bind set measured for the lab's VS Code tool is the template for that.
+`scheduler_in_worker` is on: the host's Slurm client is bound into the worker's container (the set
+measured on asx1 for the lab's VS Code tool; see "Slurm inside the worker").
 
 ## Tests
 
@@ -552,6 +615,29 @@ warrior's `/tmp`. The 121 unit tests pass under WSL (none skipped, among them th
 spellings) and on a Windows checkout (the link, pty and permission tests skipped there). Not measured:
 a worker or probe of framework 7 running on the grid, and whether the portal's Files app lists the old
 spelling (a link) as a folder.
+
+2026-09-30 (framework 9, `scheduler_in_worker`): one check job, 40518457 on asx1 (`secp/secondary`,
+five minutes asked, under one used, not a worker), from a copy of the framework under
+`/rs/rs_grp_oschome/go2432/tmp/hpcw9_check`. On the node: `/usr/bin/sbatch`, `/usr/lib64/slurm`,
+`/etc/slurm`, `/var/run/munge/munge.socket.2` and `/usr/lib64/libmunge.so.2 -> libmunge.so.2.0.0`
+present, `SlurmUser=slurm`. `hpcw_slurm_in_container` bound them and wrote the user lists and
+wrappers under `/dev/shm/go2432/hpcw_40518457/slurm`; inside the container (Debian 12, as go2432)
+`command -v` found every wrapper in `/opt/hpcw/slurm/bin`, first on PATH, and `slurm` (9114) and
+`munge` (9113) were in `/etc/passwd`. `squeue -u go2432` listed the account's jobs, this one among
+them (exit 0); `sinfo -s` listed the partitions (exit 0); `sacct -j 40518457 -X` showed it RUNNING
+on asx1 in `secp`/`secondary` (exit 0); `sbatch --test-only -p secp -q secondary` was answered by the
+controller ("Job 40518458 to start at 2026-09-30T11:52:33 using 1 processors on nodes asx1 in
+partition secp"; `--test-only` submits nothing) (exit 0); `scancel --version` said `slurm 23.02.6`.
+`scontrol show job` failed: `/opt/host/bin/scontrol: error while loading shared libraries:
+libreadline.so.6` (exit 127); scontrol gets no wrapper since. The environment a submitted job would
+start from (the sbatch wrapper with `env` in place of sbatch): the host's PATH, `TMPDIR` the job's
+own (`/rs/rs_grp_oschome/go2432/tmp`), `SLURM_CONF` and no other `SLURM_` variable (36 inside the
+container), no `APPTAINER_` or `SINGULARITY_` variable, but `LD_LIBRARY_PATH=/.singularity.d/libs`
+where the host job had the person's module paths; the wrappers carry the host's since. The EXIT trap
+removed the node temp and the `/dev/shm` folder. No worker was started. Then `tools/deploy_shared.sh`
+published framework 9 as `v9` (`current: v8 -> v9`, 2026-09-30T16:07Z, from c05f595 with the changes
+not yet committed; v8 and the older versions kept), and `~/.hpcworker/bin/hpcworker version` over
+ssh said `9 (shared copy at /rs/rs_grp_oschome/shared/beethoven/hpcworker/current)`.
 
 Not verified on the grid by the framework itself, because the student's grid sign-in was gone before
 the first worker started (`claude auth status` inside the image says `loggedIn: false`): the

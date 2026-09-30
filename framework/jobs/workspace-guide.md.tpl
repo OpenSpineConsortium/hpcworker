@@ -10,7 +10,7 @@ hpcworker @VERSION@ wrote this file for Claude Code when the workspace was made.
 ## Running work
 - Light work (reading, editing, short scripts, small tests) runs here, within this job's CPUs and memory (`nproc`, `free -g`).
 - Heavy or long work (many CPUs, a GPU, more than an hour) goes to the scheduler as its own job: `@SUBMIT_EXAMPLE@`.
-- Check first with `command -v @SUBMIT@`: this container may not carry the scheduler's commands. If it does not, write the job script into this workspace and ask the person to submit it from a terminal on the cluster@TERMINAL@.
+@SUBMITTING@
 - Never run work on the login node@LOGIN_NODE@, and do not reach it over ssh yourself: everyone shares it.
 - Ask the scheduler about a job at most once every @POLL_S@ seconds, never in a tight loop.
 @SCHEDULING@
@@ -22,7 +22,7 @@ The cluster's folders you can see from here:
 @DATA@
 
 ## Handing results back
-- Save results under this workspace and give the person the full path.
+- Save results under this workspace and give the person the full path.@JOB_RESULTS@
 - To put a figure, a table or a file in front of the person in claude.ai or the Claude app, use your tool for sending a file to the user when your tool list has one; otherwise name the path.
 - Google Drive, Docs or Sheets: only through a connector the person has turned on in Claude's settings (Connectors). When one is on, its tools appear in your list. You cannot turn one on, and you never ask for a Google password or token.
 

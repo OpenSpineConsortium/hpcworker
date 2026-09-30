@@ -262,6 +262,80 @@ class FromDiscovery(unittest.TestCase):
         self.assertEqual(prof["node_tmp_var"], "SLURM_TMPDIR")
 
 
+class SchedulerInWorker(unittest.TestCase):
+    """scheduler_in_worker (framework 9): Wayne State asks for it, every other site starts without it,
+    it is refused where it cannot work, and an account's profile.json written before version 9 (a copy
+    of the site profile, kept since) takes the site's value until the account sets its own."""
+
+    def older_copy(self, td, **fields):
+        """An account's profile.json as an install before version 9 left it: the Wayne profile without the field."""
+        with open(WAYNE) as fh:
+            prof = json.load(fh)
+        prof.pop("scheduler_in_worker", None)
+        prof.update(fields)
+        path = os.path.join(td, "profile.json")
+        with open(path, "w") as fh:
+            json.dump(prof, fh)
+        return path
+
+    def test_wayne_asks_for_it_and_others_start_without(self):
+        self.assertIs(P.load(WAYNE)["scheduler_in_worker"], True)
+        self.assertIs(P.defaults()["scheduler_in_worker"], False)
+        d = {"host": "login01", "scheduler": {"family": "slurm"}, "partitions": [{"name": "compute", "avail": "up", "default": True}],
+             "runtime": {"candidates": [{"name": "apptainer", "path": "/usr/bin/apptainer"}], "modules": [], "pyxis": False}, "env": {}, "home_fs": "nfs"}
+        self.assertIs(P.from_discovery(d, "example")["scheduler_in_worker"], False)
+        self.assertIn("P_scheduler_in_worker=true", P.shellenv(P.load(WAYNE)))
+
+    def test_refused_where_it_cannot_work(self):
+        prof = P.load(WAYNE)
+        prof["scheduler"] = "pbs"
+        self.assertTrue(any("Slurm only" in e for e in P.validate(prof)))
+        prof = P.load(WAYNE)
+        prof["runtime"] = "podman"
+        self.assertTrue(any("apptainer or singularity" in e for e in P.validate(prof)))
+        prof["scheduler_in_worker"] = False
+        self.assertEqual(P.validate(prof), [])
+        prof = P.load(WAYNE)
+        prof["runtime"] = "singularity"
+        self.assertEqual(P.validate(prof), [])
+        prof["scheduler_in_worker"] = "yes"
+        self.assertTrue(any("scheduler_in_worker" in e for e in P.validate(prof)))
+
+    def test_render_flag(self):
+        os.environ.update(ENV)
+        try:
+            prof = P.load(WAYNE)
+            self.assertEqual(P.mapping(prof, {"RUN": "worker"})["SCHED_IN_WORKER"], "1")
+            prof["scheduler_in_worker"] = False
+            self.assertEqual(P.mapping(prof, {"RUN": "worker"})["SCHED_IN_WORKER"], "0")
+        finally:
+            for k in ENV:
+                os.environ.pop(k, None)
+
+    def test_older_account_profile_takes_the_site_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIs(P.load(self.older_copy(td))["scheduler_in_worker"], True)
+            # the account's own value wins, either way
+            self.assertIs(P.load(self.older_copy(td, scheduler_in_worker=False))["scheduler_in_worker"], False)
+            # a site this copy has no profile for: the schema's default
+            self.assertIs(P.load(self.older_copy(td, site="elsewhere"))["scheduler_in_worker"], False)
+            self.assertEqual(P.site_values("elsewhere"), {})
+            self.assertEqual(P.site_values("../wayne"), {})
+            self.assertEqual(P.site_values("wayne"), {"scheduler_in_worker": True})
+
+    def test_set_never_writes_the_site_value_into_the_account_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self.older_copy(td)
+            self.assertEqual(P.main(["profile.py", "set", path, "partition_cpu_batch", "reqp"]), 0)
+            with open(path) as fh:
+                self.assertNotIn("scheduler_in_worker", json.load(fh))
+            self.assertIs(P.load(path)["scheduler_in_worker"], True)
+            self.assertEqual(P.main(["profile.py", "set", path, "scheduler_in_worker", "false"]), 0)
+            with open(path) as fh:
+                self.assertIs(json.load(fh)["scheduler_in_worker"], False)
+            self.assertIs(P.load(path)["scheduler_in_worker"], False)
+
+
 class SetAndSave(unittest.TestCase):
     def test_set_roundtrip(self):
         prof = P.load(WAYNE)

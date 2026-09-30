@@ -93,6 +93,7 @@ SCHEMA = [
     ("vpn_required", bool, False, False, "portal and login node need the VPN"),
     ("login_node_rules", "dict", True, {"max_processes": 20, "poll_floor_seconds": 60}, "{max_processes, poll_floor_seconds}"),
     ("xdg_runtime_fix", bool, False, True, "point XDG_RUNTIME_DIR at ipc_dir/$USER/xdg for Claude Code's bash tool"),
+    ("scheduler_in_worker", bool, False, False, "bind the host's scheduler client into the worker's container so Claude Code there can submit and watch jobs (Slurm with apptainer or singularity only; the binds were measured at Wayne State)"),
     ("home_filesystem", str, False, "", "panfs, lustre, gpfs, nfs, cephfs...: parallel homes want SIF over sandbox"),
     ("worker_defaults", "dict", False, {"cpus": 2, "mem": "8G", "hours": 8, "permission_mode": "default", "capacity": 4}, "defaults for hpcworker worker start"),
     ("notes", str, False, "", "free text for the maintainer"),
@@ -213,6 +214,11 @@ def validate(prof):
         v = prof.get(key)
         if isinstance(v, str) and not (v.startswith("/") or v.startswith("$HOME") or v.startswith("${HOME}")):
             errs.append("%s must be absolute or start with $HOME" % key)
+    if prof.get("scheduler_in_worker") is True:
+        if prof.get("scheduler") != "slurm":
+            errs.append("scheduler_in_worker is built for Slurm only (this profile's scheduler is %s)" % prof.get("scheduler"))
+        if prof.get("runtime") not in ("apptainer", "singularity"):
+            errs.append("scheduler_in_worker needs apptainer or singularity (this profile's runtime is %s)" % prof.get("runtime"))
     si = prof.get("shared_install")
     if isinstance(si, str) and si and (not si.startswith("/") or re.search(r"[\s'\"]", si)):
         errs.append("shared_install must be an absolute directory without spaces or quotes (or empty)")
@@ -240,10 +246,35 @@ def _walk(obj, prefix=""):
         yield prefix.rstrip("."), obj
 
 
+# Fields a later version added to a site profile, which an account's profile.json (a copy of the site
+# profile made when the account was installed, and kept since) does not carry. Until the account sets
+# its own value, such a field takes the value of the site profile of the same name in this copy of
+# the framework (profiles/<site>.json beside lib/), so a site switches it on for every account by
+# publishing a new version, and `hpcworker profile set` still overrides it per account.
+FIELDS_FROM_SITE = ("scheduler_in_worker",)
+
+
+def site_values(site):
+    """FIELDS_FROM_SITE as this copy's profiles/<site>.json sets them ({} when there is no such file)."""
+    if not isinstance(site, str) or not re.match(r"^[a-z0-9][a-z0-9-]{0,31}$", site):
+        return {}
+    try:
+        with open(os.path.join(code_root(), "profiles", site + ".json"), "r") as fh:
+            sp = json.load(fh)
+    except (IOError, OSError, ValueError):
+        return {}
+    if not isinstance(sp, dict) or sp.get("site") != site:
+        return {}
+    return dict((k, sp[k]) for k in FIELDS_FROM_SITE if k in sp)
+
+
 def load(path):
+    """The profile at PATH over the site's values for FIELDS_FROM_SITE, over the schema's defaults."""
     with open(path, "r") as fh:
         prof = json.load(fh)
     merged = defaults()
+    if isinstance(prof, dict):
+        merged.update(site_values(prof.get("site")))
     merged.update(prof)
     return merged
 
@@ -473,6 +504,7 @@ def mapping(prof, overrides=None):
         "EGRESS_CLASS": (prof.get("egress") or {}).get("class", "direct"),
         "EGRESS_EXPORTS": egress_exports(prof),
         "XDG_FIX": "1" if prof.get("xdg_runtime_fix", True) else "0",
+        "SCHED_IN_WORKER": "1" if prof.get("scheduler_in_worker") is True else "0",
         "PERMISSION_MODE": str(o.get("PERMISSION_MODE", wd.get("permission_mode", "default"))),
         "CAPACITY": str(o.get("CAPACITY", wd.get("capacity", 4))),
         "HEARTBEAT_S": str(o.get("HEARTBEAT_S", 30)),
@@ -578,6 +610,30 @@ def guide_scheduling_lines(prof):
     return lines
 
 
+def scheduler_in_worker(prof):
+    """The profile asks for the host's scheduler client inside the worker's container, and this
+    version can bind it there (Slurm only)."""
+    return prof.get("scheduler_in_worker") is True and prof.get("scheduler") == "slurm"
+
+
+def guide_submitting_lines(prof, submit, terminal):
+    """Markdown list lines on reaching the scheduler from inside the worker. Without
+    scheduler_in_worker, the one line every version since 8 has written: check first, else hand the
+    script to the person. With it: the client is here, what a submitted job is, the fallback when
+    a piece was missing on the node, what not to cancel, and the lab's rule for containers in jobs."""
+    ask = "write the job script into this workspace and ask the person to submit it from a terminal on the cluster%s." % terminal
+    if not scheduler_in_worker(prof):
+        return ["- Check first with `command -v %s`: this container may not carry the scheduler's commands. If it does not, %s" % (submit, ask)]
+    lines = [
+        "- The cluster's own Slurm commands work in here: `sbatch`, `squeue`, `sacct`, `scancel` and `sinfo` (also in `/opt/hpcw/slurm/bin`). A job you submit runs on the cluster outside this container, with the person's usual environment, and keeps running when this worker's job ends.",
+        "- If `command -v sbatch` finds nothing, this node lacked a piece when the worker started (the worker's log says which): %s" % ask,
+        "- Cancel only jobs you submitted, by their id (`scancel <id>`); never `scancel -u` or a name pattern, and never this worker's own job (`$HPCW_JOB`).",
+    ]
+    if prof.get("runtime") in ("apptainer", "singularity"):
+        lines.append("- A job that runs a container keeps the runtime's temporary and cache folders (`APPTAINER_TMPDIR`, `APPTAINER_CACHEDIR`) on the node's local disk inside that job, and removes them at its end.")
+    return lines
+
+
 def guide_mapping(prof, overrides=None):
     """The @KEY@ -> value table for jobs/workspace-guide.md.tpl. Plain words for a person and for
     Claude Code; the multi-line values (SCHEDULING, DATA) are whole Markdown list lines. Nothing here
@@ -594,6 +650,14 @@ def guide_mapping(prof, overrides=None):
         name = "the " + name
     portal = prof.get("ood_base_url") or ""
     host = prof.get("submit_host") or ""
+    terminal = " (for example the shell in the portal, %s)" % portal if portal else ""
+    poll = str((prof.get("login_node_rules") or {}).get("poll_floor_seconds", 60))
+    # a line of its own under "Handing results back" only where Claude Code can submit jobs itself;
+    # it carries its own line break so the section is unchanged elsewhere
+    results = ""
+    if scheduler_in_worker(prof):
+        results = ("\n- A job you submitted: have it write its output and results under this workspace (`#SBATCH --output` too, submitted with `-D`),"
+                   " follow it with `squeue -j <id>` or `sacct -j <id>` at most once every %s seconds, then read what it wrote and tell the person what came out and where." % poll)
     return {
         "VERSION": framework_version(),
         "SITE": prof["site"],
@@ -603,9 +667,10 @@ def guide_mapping(prof, overrides=None):
         "WORKSPACE": workspace,
         "SUBMIT": submit,
         "SUBMIT_EXAMPLE": line % workspace,
-        "TERMINAL": " (for example the shell in the portal, %s)" % portal if portal else "",
+        "SUBMITTING": "\n".join(guide_submitting_lines(prof, submit, terminal)),
+        "JOB_RESULTS": results,
         "LOGIN_NODE": " (`%s`)" % host if host else "",
-        "POLL_S": str((prof.get("login_node_rules") or {}).get("poll_floor_seconds", 60)),
+        "POLL_S": poll,
         "SCHEDULING": "\n".join(guide_scheduling_lines(prof)),
         "IPC": expand(posixpath.join(prof["ipc_dir"], "$USER")),
         "DATA": "\n".join(guide_data_lines(prof)),
@@ -812,6 +877,13 @@ def main(argv):
         if errs:
             sys.stderr.write("refusing: the change makes the profile invalid:\n  " + "\n  ".join(errs) + "\n")
             return 1
+        # a field the site supplies stays out of the account's file (neither the site's value nor the
+        # schema's default is written there) until the account sets it: a later publish still reaches it
+        with open(path, "r") as fh:
+            own = json.load(fh)
+        for key in FIELDS_FROM_SITE:
+            if key != top and isinstance(own, dict) and key not in own:
+                prof.pop(key, None)
         save(prof, path)
         print("set %s" % argv[3])
         return 0
