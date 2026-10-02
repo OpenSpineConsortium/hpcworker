@@ -96,6 +96,12 @@ SCHEMA = [
     ("vpn_app", str, False, "", "the VPN app's name (GlobalProtect)"),
     ("vpn_help_url", str, False, "", "the university's page on setting up the VPN (https)"),
     ("grid_account_help_url", str, False, "", "the university's page on getting a cluster account (https)"),
+    ("grid_2fa_help_url", str, False, "", "the university's page on setting up the cluster's two-factor code for a password sign-in (https)"),
+    ("ssh_host", str, False, "", "the login node's public ssh name, for Beethoven's ssh path (grid.wayne.edu); empty = no ssh path"),
+    ("ssh_port", int, False, 22, "the port of ssh_host"),
+    ("ssh_host_key", str, False, "", "ssh_host's host key fingerprint as ssh-keygen -l prints it (SHA256:...); Beethoven refuses any other key"),
+    ("ssh_relay", "str_or_none", False, None, "a relay Beethoven may use to reach ssh_host (a wss:// or https:// address), or null for none"),
+    ("browser_key_days", "int_or_none", False, None, "days a browser key's line stays valid; past them the gate removes it (null = no expiry)"),
     ("session_title", str, False, "", "the Remote Control session title a worker asks for (\"Wayne State grid\"; \"<title> · <name>\" for a worker not named worker); empty = \"Grid worker\""),
     ("login_abandon_s", int, False, 1200, "seconds a worker job waits for the Claude sign-in before it stops itself and queues no successor (0 = never)"),
     ("restricted", bool, False, False, "no worker may start on this site's accounts (hpcworker connect refuses)"),
@@ -148,6 +154,8 @@ def _type_ok(typ, value):
         return value is None or (isinstance(value, int) and not isinstance(value, bool))
     if typ == "bool_or_none":
         return value is None or isinstance(value, bool)
+    if typ == "str_or_none":
+        return value is None or isinstance(value, str)
     if isinstance(typ, tuple):
         return isinstance(value, str) and value in typ
     if typ is int:
@@ -235,13 +243,29 @@ def validate(prof):
     st = prof.get("session_title")
     if isinstance(st, str) and (len(st) > 64 or re.search(r"['\"`$\\\x00-\x1f\x7f]", st)):
         errs.append("session_title must be at most 64 characters without quotes, backslashes, $ or control characters")
-    for key in ("vpn_help_url", "grid_account_help_url"):
+    for key in ("vpn_help_url", "grid_account_help_url", "grid_2fa_help_url"):
         v = prof.get(key)
         if isinstance(v, str) and v and not re.match(r"^https://[^\s'\"]+$", v):
             errs.append("%s must be an https address (or empty)" % key)
     vp = prof.get("vpn_portal")
     if isinstance(vp, str) and vp and not re.match(r"^[A-Za-z0-9.-]{1,253}$", vp):
         errs.append("vpn_portal must be a host name (letters, digits, dots and dashes)")
+    # framework 11: the ssh path's keys (the extension reads them from the site profile)
+    sh = prof.get("ssh_host")
+    if isinstance(sh, str) and sh and not re.match(r"^[A-Za-z0-9.-]{1,253}$", sh):
+        errs.append("ssh_host must be a host name (letters, digits, dots and dashes)")
+    sp = prof.get("ssh_port")
+    if isinstance(sp, int) and not isinstance(sp, bool) and not 1 <= sp <= 65535:
+        errs.append("ssh_port must be between 1 and 65535")
+    hk = prof.get("ssh_host_key")
+    if isinstance(hk, str) and hk and not re.match(r"^SHA256:[A-Za-z0-9+/]{43}$", hk):
+        errs.append("ssh_host_key must be a SHA256: fingerprint as ssh-keygen -l prints it (or empty)")
+    rl = prof.get("ssh_relay")
+    if isinstance(rl, str) and not re.match(r"^(wss|https)://[^\s'\"]+$", rl):
+        errs.append("ssh_relay must be a wss:// or https:// address (or null)")
+    bd = prof.get("browser_key_days")
+    if isinstance(bd, int) and not isinstance(bd, bool) and not 1 <= bd <= 3650:
+        errs.append("browser_key_days must be between 1 and 3650 (or null for no expiry)")
     la = prof.get("login_abandon_s")
     if isinstance(la, int) and not isinstance(la, bool) and la != 0 and la < 300:
         errs.append("login_abandon_s must be 0 (never) or at least 300 seconds")
@@ -280,7 +304,9 @@ def _walk(obj, prefix=""):
 # the framework (profiles/<site>.json beside lib/), so a site switches it on for every account by
 # publishing a new version, and `hpcworker profile set` still overrides it per account.
 FIELDS_FROM_SITE = ("scheduler_in_worker", "session_title", "login_abandon_s", "ood_auth", "vpn_portal", "vpn_app",
-                    "vpn_help_url", "grid_account_help_url", "restricted", "restricted_workspaces")
+                    "vpn_help_url", "grid_account_help_url", "restricted", "restricted_workspaces",
+                    # framework 11
+                    "grid_2fa_help_url", "ssh_host", "ssh_port", "ssh_host_key", "ssh_relay", "browser_key_days")
 
 
 def session_title(prof, run):

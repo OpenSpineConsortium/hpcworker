@@ -115,13 +115,24 @@ hpcw_rm_own_tmp() { # PATH... : remove ONLY directories the framework made for o
 
 # a person's terminal on stdin; a function of its own so the unit tests, which run without one, can stand in for it
 hpcw_have_terminal() { [ -t 0 ]; }
-# 0 when an agent, not a person, is at the keyboard: CLAUDECODE, the request and worker a Beethoven for
-# VS Code worker sets in Claude's shell (BEETHOVEN_REQUEST_ID and kin, and the ASHLEY_ twins it still
-# sets for older readers: its names before 2026-09-30), or no terminal
-hpcw_agent_marker() {
+# 0 when an agent's own variables are set: CLAUDECODE, the request and worker a Beethoven for VS Code
+# worker sets in Claude's shell (BEETHOVEN_REQUEST_ID and kin, and the ASHLEY_ twins it still sets for
+# older readers: its names before 2026-09-30)
+hpcw_agent_env() {
   [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${BEETHOVEN_REQUEST_ID:-}" ] || [ -n "${BEETHOVEN_WORKER:-}" ] \
-    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || ! hpcw_have_terminal
+    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ]
 }
+# 0 when an agent, not a person, is at the keyboard: an agent's variables, or no terminal
+hpcw_agent_marker() { hpcw_agent_env || ! hpcw_have_terminal; }
+# framework 11: 0 under the browser key's forced command. `hpcworker gate` is the only way a browser key
+# reaches this tool, and it hands every verb on with HPCW_GATE=1 (an environment of its own: the client
+# cannot unset it); version, read and forget it answers itself. browser-key and the Remote Control record
+# go by this test alone: SSH_ORIGINAL_COMMAND, which sshd sets for any forced command (a site's own
+# ForceCommand too), would refuse the student's own first sign-in at such a site.
+hpcw_under_gate() { [ -n "${HPCW_GATE:-}" ]; }
+# 0 where no Claude sign-in may start: under the gate, and, as a second wall, under any forced command at
+# all (no site this tool knows forces one for every session; one that did would have the sign-in refused)
+hpcw_signin_barred() { [ -n "${HPCW_GATE:-}" ] || [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; }
 
 # ---- framework 10: times and the run's progress log ------------------------------------------------
 hpcw_now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }

@@ -321,11 +321,38 @@ class SchedulerInWorker(unittest.TestCase):
             self.assertIs(P.load(self.older_copy(td, site="elsewhere"))["scheduler_in_worker"], False)
             self.assertEqual(P.site_values("elsewhere"), {})
             self.assertEqual(P.site_values("../wayne"), {})
-            # framework 10 adds the extension's keys to what a site supplies
+            # framework 10 adds the extension's keys to what a site supplies; framework 11 the ssh path's
+            # (browser_key_days is not set at Wayne State, so it is not supplied)
             self.assertEqual(P.site_values("wayne"), {"scheduler_in_worker": True, "session_title": "Wayne State grid", "login_abandon_s": 1200,
                                                       "ood_auth": "http-basic", "vpn_portal": "protect.wayne.edu", "vpn_app": "GlobalProtect",
                                                       "vpn_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/Article/20314/Wayne-State-VPN-and-the-Global-Protect-client",
-                                                      "grid_account_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/ArticleDet?ID=20199"})
+                                                      "grid_account_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/ArticleDet?ID=20199",
+                                                      "grid_2fa_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/Article/20242/How-do-I-set-up-and-use-Google-Authenticator-for-the-Grid",
+                                                      "ssh_host": "grid.wayne.edu", "ssh_port": 22,
+                                                      "ssh_host_key": "SHA256:kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s", "ssh_relay": None})
+
+    def test_framework11_keys_validated(self):
+        prof = P.load(WAYNE)
+        self.assertEqual(P.validate(prof), [])
+        for key, bad in (("ssh_host", "grid wayne"), ("ssh_host", "a;b"), ("ssh_port", 0), ("ssh_port", 70000), ("ssh_port", "22"),
+                         ("ssh_host_key", "kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s"), ("ssh_host_key", "SHA256:short"),
+                         ("ssh_relay", "http://relay.example"), ("ssh_relay", "wss://a b"), ("ssh_relay", 5),
+                         ("grid_2fa_help_url", "http://services.wayne.edu/x"), ("browser_key_days", 0), ("browser_key_days", 5000),
+                         ("browser_key_days", "30")):
+            with self.subTest(key=key, value=bad):
+                p = dict(prof)
+                p[key] = bad
+                self.assertTrue(any(key in e for e in P.validate(p)), (key, bad, P.validate(p)))
+        for key, good in (("ssh_relay", None), ("ssh_relay", "wss://relay.example/ssh"), ("ssh_host", ""), ("ssh_host_key", ""),
+                          ("browser_key_days", None), ("browser_key_days", 30)):
+            p = dict(prof)
+            p[key] = good
+            self.assertEqual(P.validate(p), [], (key, good))
+        # absent, every one of them: an older site profile is still valid
+        p = dict(prof)
+        for key in ("ssh_host", "ssh_port", "ssh_host_key", "ssh_relay", "grid_2fa_help_url", "browser_key_days"):
+            p.pop(key, None)
+        self.assertEqual(P.validate(p), [])
 
     def test_set_never_writes_the_site_value_into_the_account_file(self):
         with tempfile.TemporaryDirectory() as td:

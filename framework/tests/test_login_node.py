@@ -5,15 +5,17 @@ python3, python-notebook, R, rsync, zellij".
 
 Every verb the extension types runs here against the fake scheduler of fakegrid.py, with each banned
 name first on PATH as a stand-in that records the call and fails, and HPCW_PYTHON a stand-in that records
-which profile.py command ran and for how long. Nothing banned is ever looked up on PATH; the system
-python3 runs only the short profile.py commands in EXPECTED (README.md, "The login node": reading the
-site profile and filling the job file, which have no shell replacement yet), each well under a second;
-and the sign-in sitting, as long as srun's wait, is relayed by bash (lib/relay.sh). Then the two JSON
-readers that took python's place on this path, status_patch and prof_get, against profile.py's answers."""
+which profile.py command ran and for how long. Nothing banned is ever looked up on PATH, and since
+framework 11 no line the extension types starts python3 at all (README.md, "The login node": the profile
+is read and the job file and the guide are filled by lib/profile.awk and lib/profile_sh.sh, which
+tests/test_profile_awk.py holds to profile.py's answers); the sign-in sitting, as long as srun's wait, is
+relayed by bash (lib/relay.sh). Then the two JSON readers on this path, status_patch and prof_get,
+against profile.py's answers."""
 import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
@@ -22,19 +24,32 @@ import fakegrid as G
 
 BANNED = ["bedtools", "conda", "CONVERGE_Studio", "fastq-dump", "gcc", "gfortran", "g++", "icc", "ifort", "lsdyna", "make", "md5sum",
           "namd2", "namd3", "node", "pip", "python", "python2", "python3", "python-notebook", "R", "rsync", "zellij"]
-# the profile.py commands each verb still runs on the login node, in order (none of them for more than a moment)
+# the profile.py commands each verb runs on the login node: since framework 11, none (warrior's banner
+# bans python3, and Beethoven 12 reaches the login node over ssh by itself)
 EXPECTED = {
-    "install --shared": ["validate"],
+    "install --shared": [],
     "claude consent --record": [],
-    "connect, first": ["shellenv", "guide", "render"],
-    "worker status --json": ["shellenv"],
-    "worker restrict": ["shellenv"],
-    "worker stop": ["shellenv"],
-    "connect, returning": ["shellenv", "render"],
+    "connect, first": [],
+    "worker status --json": [],
+    "worker restrict": [],
+    "worker stop": [],
+    "connect, returning": [],
     "discover": [],
-    "probe": ["shellenv"],
+    "probe": [],
     "login-setup": [],
+    "browser-key add": [],
+    "gate version": [],
+    "gate status": [],
+    "gate read": [],
+    "gate watch": [],
+    "gate connect": [],
+    "gate restrict": [],
+    "gate stop": [],
+    "gate forget": [],
+    "profile changed, then status": [],
 }
+BROWSER_KEY_OK = os.name != "nt" and shutil.which("ssh-keygen")
+SESSION = "203.0.113.7 51234 141.217.136.64 22"
 PY_WRAP = r"""#!/bin/bash
 t0=$(date +%s%N)
 "$HPCW_REAL_PYTHON" "$@"; rc=$?
@@ -108,6 +123,33 @@ class BannedPrograms(unittest.TestCase):
             os.rename(os.path.join(g.hpcw, "profile.json"), os.path.join(g.hpcw, "profile.json.aside"))
             run("login-setup", None, source="hpcw_have_terminal() { return 0; }; cmd_login_setup", SSH_CONNECTION="10.0.0.1 52341 10.0.0.2 22")
             os.rename(os.path.join(g.hpcw, "profile.json.aside"), os.path.join(g.hpcw, "profile.json"))
+        # framework 11: the browser key, as Beethoven adds it over the student's first ssh sign-in, then each of
+        # the gate's verbs as sshd runs the forced command (no terminal, SSH_ORIGINAL_COMMAND)
+        if BROWSER_KEY_OK:
+            for root, dirs, files in os.walk(os.path.dirname(g.shared)):
+                for n in dirs + files:
+                    p = os.path.join(root, n)
+                    if not os.path.islink(p):
+                        os.chmod(p, stat.S_IMODE(os.lstat(p).st_mode) & ~0o022)
+            kd = os.path.join(td, "key")
+            subprocess.run(["ssh-keygen", "-q", "-t", "ecdsa", "-N", "", "-C", "t", "-f", kd], check=True, stdin=subprocess.DEVNULL)
+            with open(kd + ".pub") as fh:
+                kt, kb, _ = fh.read().split(" ", 2)
+            run("browser-key add", "browser-key add %s %s" % (kt, kb), SSH_CONNECTION=SESSION)
+        g.write_status({"state": "online", "job": "7", "node": "asx15", "environment_url": "https://claude.ai/code?environment=env_01X"}, name="w2")
+        run("gate version", "gate", SSH_ORIGINAL_COMMAND="version", SSH_CONNECTION=SESSION)
+        run("gate status", "gate", SSH_ORIGINAL_COMMAND="status worker", SSH_CONNECTION=SESSION)
+        run("gate read", "gate", SSH_ORIGINAL_COMMAND="read worker status.json", SSH_CONNECTION=SESSION)
+        run("gate watch", "gate", SSH_ORIGINAL_COMMAND="watch w2", SSH_CONNECTION=SESSION)
+        run("gate connect", "gate", SSH_ORIGINAL_COMMAND="connect worker testsite %s default chain" % G.INSTALL_ID, SSH_CONNECTION=SESSION)
+        run("gate restrict", "gate", SSH_ORIGINAL_COMMAND="restrict worker", SSH_CONNECTION=SESSION)
+        run("gate stop", "gate", SSH_ORIGINAL_COMMAND="stop worker", SSH_CONNECTION=SESSION)
+        if BROWSER_KEY_OK:
+            run("gate forget", "gate", SSH_ORIGINAL_COMMAND="forget", SSH_CONNECTION=SESSION)
+        # a profile changed by a person (profile set, an install, a new version published): shellenv once more
+        with open(os.path.join(g.hpcw, "profile.json"), "a") as fh:
+            fh.write("\n")
+        run("profile changed, then status", "worker status --name worker --json")
 
     @classmethod
     def tearDownClass(cls):
@@ -120,6 +162,16 @@ class BannedPrograms(unittest.TestCase):
         self.assertIn("HPCW-STEP signed-in a@b.edu max", self.ran["connect, returning"]["out"])
         if LOGIN_SETUP_OK:
             self.assertTrue(self.ran["login-setup"]["out"].endswith("Done. The grid will not ask again.\n"), self.ran["login-setup"])
+        if BROWSER_KEY_OK:
+            self.assertTrue(self.ran["browser-key add"]["out"].startswith("HPCW-KEY added SHA256:"), self.ran["browser-key add"])
+            self.assertEqual(self.ran["gate forget"]["out"], "HPCW-KEY forgotten\n")
+        self.assertTrue(self.ran["gate version"]["out"].startswith("HPCW-GATE ok %s " % G.CURRENT_VERSION), self.ran["gate version"])
+        self.assertEqual(json.loads(self.ran["gate status"]["out"])["run"], "worker")
+        self.assertEqual(json.loads(self.ran["gate read"]["out"])["run"], "worker")
+        self.assertTrue(json.loads(self.ran["gate watch"]["out"].splitlines()[-1])["final"])
+        self.assertIn("HPCW-STEP done", self.ran["gate connect"]["out"])
+        self.assertNotIn("signin", self.ran["gate connect"]["out"])
+        self.assertIn("worker worker: stopped", self.ran["gate stop"]["out"])
 
     def test_nothing_banned_is_looked_for(self):
         for label, r in self.ran.items():
@@ -133,11 +185,11 @@ class BannedPrograms(unittest.TestCase):
 
     def test_the_sitting_is_not_python(self):
         # the sitting lasted as long as srun's wait (3 s here, up to fourteen minutes on the grid), with
-        # keepalives; no python call lasted a fraction of it
+        # keepalives; and since framework 11 no python call at all, before it or during it
         r = self.ran["connect, first"]
         self.assertGreaterEqual(r["wall"], 3)
         self.assertGreaterEqual(r["out"].count("HPCW-LOGIN: still waiting"), 2, r["out"])
-        self.assertLess(max(ms for ms, _ in r["python"]), 2000)
+        self.assertEqual(r["python"], [])
 
 
 class StatusPatch(unittest.TestCase):

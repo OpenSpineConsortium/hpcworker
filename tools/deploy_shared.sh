@@ -18,6 +18,10 @@
 # until the student starts the worker again. Remove an old version by hand, and only when no worker
 # can still name it.
 #
+# It never moves `current` from version 11 or later (the first with the gate that Beethoven's browser keys
+# run) back to a version before 11, and it checks each site profile with `hpcworker profile check` (awk),
+# never with python3, which warrior's login banner bans.
+#
 # What it does, in order: checks VERSION against bin/hpcworker's VERSION= line, LF line endings and
 # `bash -n`; tars exactly the files it lists, with a SHA-256 manifest; over ssh (BatchMode) runs its
 # own --publish part on the login node, which is file work only (tar, chmod, setfacl, one symlink):
@@ -80,6 +84,10 @@ publish() {
   if [ -e "$root/current" ] && [ ! -L "$root/current" ]; then die "$root/current exists and is not a link; nothing changed"; fi
   [ -L "$root/current" ] && prev=$(readlink "$root/current")
   if [ -d "$dest" ]; then status=$(compare_to_manifest "$dest" "$man"); else status=new; fi
+  # framework 11 brought the gate that every Beethoven browser key's forced command runs
+  # (restrict,command=".../current/bin/hpcworker gate"); a version before it answers each key with
+  # "unknown command 'gate'", so `current` never moves from 11 or later back below 11
+  case "$prev" in v[0-9]*) [ "${prev#v}" -ge 11 ] 2>/dev/null && [ "$n" -lt 11 ] && die "current names $prev, whose gate the students' browser keys run; v$n has no gate, so every key would fail. Nothing changed";; esac
   say "   root: $([ -d "$root" ] && echo present || echo absent); group: $group; v$n: $status; current: ${prev:-none} -> v$n"
   if [ "$dry" = 1 ]; then say "   dry run: nothing written ($(printf '%s\n' "$man" | wc -l | tr -d ' ') files would be published)"; return 0; fi
   if [ ! -d "$root" ]; then mkdir "$root" || die "cannot create $root"; fi
@@ -136,8 +144,11 @@ publish() {
   say "   kept versions: $(cd "$root" && ls -d v[0-9]* 2>/dev/null | tr '\n' ' ')"
   say "== checks"
   say "   $(HPCW_HOME=/nonexistent/.hpcworker bash "$root/current/bin/hpcworker" version 2>&1) = hpcworker version through current"
-  local py f; py=$(command -v python3 || echo /usr/bin/python3)
-  for f in "$dest"/profiles/*.json; do say "   $(basename "$f"): $("$py" "$dest/lib/profile.py" validate "$f" 2>&1 | tr '\n' ' ')"; done
+  # each site profile, checked with framework 11's awk reader (no python3: warrior's login banner bans it)
+  local f
+  if [ "$n" -ge 11 ]; then
+    for f in "$dest"/profiles/*.json; do say "   $(basename "$f"): $(HPCW_HOME=/nonexistent/.hpcworker bash "$dest/bin/hpcworker" profile check "$f" 2>&1 | tr '\n' ' ')"; done
+  else say "   site profiles: not checked (v$n has no python-free check, and python3 is not run on the login node)"; fi
 }
 
 if [ "${1:-}" = --publish ]; then shift; publish "$@"; exit $?; fi

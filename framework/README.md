@@ -1,7 +1,19 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 10.
+or the Claude app on your phone. Version 11.
+
+Version 11 is the cluster side of Beethoven 12.0.0, which reaches the grid over ssh without the VPN
+first, and through the Open OnDemand portal (version 10's path) only when no ssh bridge is there. It
+adds the browser's key: `hpcworker browser-key add`, run once over the student's first ssh sign-in
+(password and code), writes one `authorized_keys` line whose only command is `hpcworker gate`, and the
+gate lets that key do eight fixed things and never a Claude sign-in (see "The browser's key" and "The
+gate" below). `worker watch --json` streams a worker's state as lines; `connect` and `claude login
+--plain` work over a plain ssh exec with no terminal, the code arriving on standard input; `claude
+login --profile SITE` sets up an account that never was; and the site profile is read, and the job
+file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `lib/profile_sh.sh`), so no
+command on the extension's path starts python3 at all, the first connect included (see "The login
+node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
 Version 10 is the cluster side of Beethoven 11.0.0 (the wire contract is
 `../docs/V11_CONTRACT.md`): one line, `hpcworker connect`, sets the account up, records the Remote
@@ -12,11 +24,11 @@ minutes; and `hpcworker login-setup` (unproven on the grid) is the one-time key 
 whose portal terminal asks for a password. Everything the 10.0.0 extension and a framework 9 worker
 use still works: see "Version 10 and what it keeps" below.
 
-The cluster-side half of Beethoven, the browser extension. Bash, coreutils, awk, sed and grep, and
-the system `python3` for a fraction of a second at a time to read the site profile; nothing
-installed; nothing running on the login node beyond the one `sbatch`, `squeue` or `scancel` an action
-needs and, for connect's sign-in, `srun` relayed by bash (see "The login node" below: warrior's banner
-bans `python3` among others). Claude Code runs inside a container on a compute node and registers itself with
+The cluster-side half of Beethoven, the browser extension. Bash, coreutils, awk, sed and grep on the
+login node (the system `python3` only for `profile show|set|validate|schema` and a discovered seed, typed
+by a person at a terminal); nothing installed; nothing running on the login node beyond the one
+`sbatch`, `squeue` or `scancel` an action needs and, for connect's sign-in, `srun` relayed by bash (see
+"The login node" below: warrior's banner bans `python3` among others). Claude Code runs inside a container on a compute node and registers itself with
 Anthropic over outbound HTTPS (Claude Code's Remote Control); the browser extension in
 `../extension/` only starts, watches and stops that job through your Open OnDemand portal.
 
@@ -44,7 +56,7 @@ the shared tree); `shared`, one line naming the shared directory (the marker); `
 from the shared copy's `profiles/<site>.json` and kept if one is there; and `log/`. The consent marker
 (`~/.hpcworker/consent`) stays there too, and the run directories stay under `shared_state_dir`. `DIR`
 may be left out when the profile names it (`hpcworker install --shared --profile wayne`).
-`hpcworker version` then says `10 (shared copy at DIR)`, and `hpcworker diag` names the shared
+`hpcworker version` then says `11 (shared copy at DIR)`, and `hpcworker diag` names the shared
 directory and the numbered directory it resolves to.
 
 - Run `install` again (through the launcher, or from a checkout) and it stays on the shared copy: it
@@ -469,6 +481,243 @@ Shell app runs plain `ssh` (an `OOD_SSH_WRAPPER` passing `-i` or `-F` would bypa
 the site's ssh does not offer the key for any reason, the step changes nothing that matters and the
 password prompt stays.
 
+## The ssh path: Beethoven's own sign-in, without the VPN (version 11)
+
+Beethoven 12.0.0 first tries the grid's ssh port from the internet (`ssh_host`, `ssh_port`, pinned to
+`ssh_host_key`), through a bridge on the student's computer, and falls back to the portal on the VPN
+only when there is none. Its first sign-in is the student's own: the AccessID, the password and the
+Google Authenticator code, typed into Beethoven's sign-in sheet and sent only inside that encrypted
+session. Over that session it runs lines of this tool, each by the shared copy's full path, as 11.0.0
+does through the portal. Beethoven 12.0.0 asks sshd for a pseudo-terminal (echo off) for the key line
+and the Claude sign-in, as 11.0.0's portal terminal had one; both lines also work over a plain exec with
+no terminal, which is what the end-to-end test runs:
+
+```
+bash '<shared>/bin/hpcworker' browser-key add <keytype> <base64>          the browser's key (next section)
+bash '<shared>/bin/hpcworker' install --shared '<shared>' --profile <site>   the account set up for the lab's copy
+exec bash '<shared>/bin/hpcworker' connect --name <name> --profile <site> [--consent <id>] --login auto ...
+bash '<shared>/bin/hpcworker' claude login --plain [--profile <site>]     the Claude sign-in alone, when wanted
+```
+
+Every later connection signs in with the browser's key and runs only what the gate allows.
+
+**`connect` and `claude login --plain` with or without a terminal.** With a terminal on standard input
+(the portal's Shell, a person, Beethoven 12's pty) the Claude sign-in sitting runs as in version 10: echo
+off on the login node and `srun --pty`. With none (a plain ssh exec) `srun` is asked for no pseudo-terminal at all
+(`adapter_interactive` with `HPCW_ALLOC_PTY=0`; LSF's `bsub -I` in place of `-Is`, written from the
+documentation and not run): the code then travels on a pipe from the session's standard input through
+`srun` to the sitting's standard input, where no terminal can echo it, and the sitting itself
+(`lib/login_plain.sh`) is unchanged: it reads the code with `read`, gives Claude Code its own terminal
+with `script`, never copies Claude Code's screen to its output, and already runs with a standard input
+that is not a terminal (its `stty -echo` is only for one that is). Measured against the fake scheduler
+only (`tests/test_connect.py`, `PlainExec`): one `srun` without `--pty`, the code read from standard
+input, never written back. Not run on the grid: `srun` without `--pty` relaying standard input to the
+sitting on Wayne State's Slurm 23.02.
+
+**`claude login --profile SITE`.** An account with no `profile.json` (one that never connected) is set
+up for the lab's shared copy first, as connect's first step does (the shared install with all its
+guards, without the `~/.bashrc` block), and the sitting then runs as for any account. `SITE` may be left
+out when exactly one site profile of the copy names that copy as its shared copy. Under `--plain` the
+setup says `HPCW-LOGIN: this account is set up for the lab's copy at <dir>` before the sitting's lines,
+or one `HPCW-LOGIN-FAILED: <sentence>` (exit 1) when it cannot be done.
+
+## The browser's key: `hpcworker browser-key` (version 11; UNPROVEN ON THE GRID)
+
+Tried against a real OpenSSH server (StrictModes on, `restrict` honoured) under WSL and in the unit
+tests, never on Wayne State's OpenSSH 7.4 with a student's account. Until a key has signed in to the
+real grid, it is a design.
+
+```
+hpcworker browser-key add TYPE BASE64 [COMMENT | SHA256:CHECK]
+hpcworker browser-key remove
+hpcworker browser-key check
+```
+
+`add` writes exactly one line into `~/.ssh/authorized_keys`:
+
+```
+restrict,command="<shared copy>/bin/hpcworker gate" <ssh-ed25519|ecdsa-sha2-nistp256> <base64> beethoven-browser <YYYY-MM-DD UTC>
+```
+
+`<shared copy>` is the site profile's `shared_install` as it spells it (the lab's `current` link, never
+the numbered directory behind it, so the key follows the lab's updates), and the command must run from
+that copy; at a site with no shared copy the line names the copy that ran (an account's own
+`~/.hpcworker`). `restrict` takes away a terminal, port, agent and X11 forwarding and `~/.ssh/rc`;
+`command=` makes the gate the only thing the key can run. The key is the browser's public key (the
+private half never leaves the browser): `ssh-ed25519` or `ecdsa-sha2-nistp256`, checked whole (its
+prefix, its length, the decoded size, and `ssh-keygen -l`, which also refuses an EC point off the curve;
+where `ssh-keygen` cannot read a key from a pipe at all, which is first asked of a known-good key, the
+shell's checks are what there is). A `SHA256:` word is a check: a key whose fingerprint does not start
+with it is refused. A comment is ignored (the line carries its own).
+
+It changes nothing and prints one `HPCW-KEY refused <code> <sentence>` line (the sentence is for the
+student) when: the words are not one whole key (`key`, exit 2); it runs under Claude Code or another
+agent, inside a batch job, through the gate (`HPCW_GATE`, which the gate sets for every verb it hands on;
+not `SSH_ORIGINAL_COMMAND`, which a site's own ForceCommand would set for the student's own sign-in too),
+or with neither a terminal nor an ssh connection (`agent`, 2: Beethoven's own session has an ssh
+connection, with or without a terminal; a person has a terminal);
+as root (`root`, 2); the home folder is missing, a link, or writable by group or others (`home`, 3:
+sshd's StrictModes would ignore every key there); `~/.ssh` is a link, someone else's, or writable by
+group or others (`ssh-dir`, 4; made at 700 when missing, an acceptable mode of the student's left as it
+is); `authorized_keys` is a link, not a plain file, someone else's, writable by group or others, holds
+a NUL byte, or cannot be locked or written (`authorized-keys`, 7); another copy runs than the one the
+site profile names, or the copy cannot be named safely, or **anyone but its owner can change the copy,
+or rename anything in a folder above it** (`copy`, 8, naming the folder or file). Otherwise it removes
+every line of its own form (an older key of this account's, the same key on another date), keeps every
+other line byte for byte and in its place, writes through a temporary file at 600 in `~/.ssh` and one
+rename, keeps the file it replaced as `authorized_keys.beethoven-prev` (600; a link of that name is
+replaced, never followed) with every line of the student's own and none of Beethoven's (so putting it
+back can never bring back a key that was replaced or forgotten), clears the worker names the gate's cap
+counted (below: this is the student's own sign-in), runs
+`restorecon` where SELinux labels homes, and prints `HPCW-KEY added SHA256:<fingerprint>` (exit 0; the
+same line when the key was there already, with nothing rewritten). One account, one browser key: a new
+computer's key replaces the last one. A line of the student's own that merely mentions
+`beethoven-browser` is never taken for ours: ours is recognised only in exactly the form above.
+
+**The copy the key runs.** Every key line names a command in the lab's copy, so whoever can change that
+copy can run anything in every enrolled account the moment its key is used. `add` therefore refuses
+unless the copy's own folders and files can be changed by their owner alone: the folder that holds the
+`current` link (re-pointing the link re-points every key), the numbered directory, `bin/`, `lib/`,
+`lib/adapters/`, `jobs/` and `profiles/` (a profile names the image and the `claude` a worker runs),
+and each file in them, each owned by the copy's owner or root, none a link but `current`.
+`tools/deploy_shared.sh` publishes the copy that way (group read and traverse, no write). **Every folder
+from `/` down to the copy is judged as well, and one that others may write to is refused** unless it is
+sticky (`chmod +t`: then only an entry's owner may rename or remove it). Whoever can rename a folder
+above the copy can put another `current/bin/hpcworker` in its place, and every enrolled key's forced
+command would run it in its own account at Beethoven's next poll, from anywhere on the internet; the
+portal path of 11.0 has the same weakness, but only when the student types a command, and the key path
+should not be opened on top of it. At Wayne State this README records the volume `/rs/rs_grp_oschome`
+as `drwxrws---` (group-writable, not sticky) since 2026-09-29; if that is still so, `browser-key add`
+refuses there until its owner (C&IT) sets the sticky bit or removes group write on it, and Greg does the
+same for any folder of his between it and the copy (`shared`, `shared/beethoven`, `hpcworker`). Before
+any student enrols, the lab lead runs `hpcworker browser-key check` (read only): one line per folder or
+file that others may change, then `ok` or `refused`. Not measured on the grid: the modes of
+`/rs/rs_grp_oschome`, `shared` and `shared/beethoven` today.
+
+`remove` takes our line out (`HPCW-KEY removed`, or `HPCW-KEY none`), with the same guards; the gate's
+`forget` does the same for the key itself, and neither leaves the line in `authorized_keys.beethoven-prev`.
+`check` (read only, anyone) prints one line per folder or file that others than its owner may change,
+`copy: ...` or `above the copy: ... (chmod +t or chmod go-w on it, by its owner)`, then `HPCW-KEY check
+ok <copy>` (exit 0) or `HPCW-KEY check refused <copy>` (exit 8). Withdrawing a student's approval in the
+access service does not remove the line: the gate never asks the access service. The student's Forget,
+`browser-key remove`, or removing the line by hand does.
+
+An expiry is the site's choice: `browser_key_days` in the site profile (none at Wayne State). Past it the
+gate removes the line on the key's next use and answers `HPCW-KEY expired` (exit 125).
+
+## The gate: what the browser's key may do (version 11)
+
+`hpcworker gate` is the line's forced command. It reads `SSH_ORIGINAL_COMMAND`, the line the ssh client
+sent, and accepts exactly this, as bash and nothing else (it runs no `python3`; the verbs it hands on to
+are this tool's own):
+
+| The client sends | The gate runs | Prints |
+|---|---|---|
+| `version` | itself | `HPCW-GATE ok <framework> <due\|never\|-> <account> claude=<yes\|no\|unknown>` (due: the expiry date; claude: the newest Claude Code answer any run recorded, from the files) |
+| `status NAME` | `worker status --name NAME --json --poll-floor 60` | its one JSON line (section "Where a worker is") |
+| `watch NAME` | `worker watch --name NAME --json --minutes 30 --poll-floor 60` | JSON lines (next section) |
+| `connect NAME SITE ID\|- MODE chain\|no-chain` | `connect --name NAME --profile SITE --permission-mode MODE [--consent ID] [--no-chain] --login never` | the `HPCW-STEP` lines, never `signin` |
+| `stop NAME` | `worker stop --name NAME` | `worker NAME: stopped (...)` |
+| `restrict NAME` | `worker restrict --name NAME` | `worker NAME: marked restricted (...)` |
+| `read NAME FILE` | itself; FILE `status.json`, `connection.json`, `progress.log` or `node` | the file's bytes (`progress.log`'s last 256 KB; the others at most 256 KB); exit 1 `HPCW-GATE missing`, 3 `not-plain` (a link, a folder) or `too-large`, on stderr |
+| `forget` | itself | `HPCW-KEY forgotten` \| `none` \| `stuck` (7) |
+
+Anything else is `HPCW-GATE refused`, exit 126, with nothing run: an empty or absent command (a shell
+asked for), more than 200 bytes, any character outside `A-Z a-z 0-9 . _ -` and single spaces (so no
+quote, newline, tab, `;`, `|`, `$`, glob or non-ASCII byte, judged byte by byte whatever locale the
+client sent), a word longer than 64 or one that starts with `-` (only the lone `-` that means "no install
+id" is a word of its own), a worker name outside `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`, a site outside
+`^[a-z0-9][a-z0-9-]{0,31}$`, an install id that is not 32 hex characters, a mode other than `default`,
+`acceptEdits` or `plan`, any other file to `read`, and any word given to `gate` itself. `--login never`
+is written last on connect's line, so no earlier word could outrank it; and connect pins it again
+itself whenever `HPCW_GATE` (which the gate sets) or, as a second wall, `SSH_ORIGINAL_COMMAND` is in its
+environment, as do `claude login`, `claude consent` (the sitting), the sitting's own `_exec login` and
+connect's sign-in step, which all refuse there (`HPCW-LOGIN-FAILED: the Claude sign-in never runs
+through Beethoven's browser key`); `claude consent --record` refuses under `HPCW_GATE` (connect records
+the answer itself). A site whose sshd forced a command for every session would therefore have the
+Claude sign-in refused everywhere; no such site is known, and whether warrior's sshd sets a ForceCommand
+is not measured.
+The verb runs in a fresh bash started by `env` without `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
+`CDPATH`, `GLOBIGNORE` or `PROMPT_COMMAND`, and a job a gate's connect submits gets none of the gate's
+variables.
+
+**The caps** (one small file per account, `<shared_state_dir>/.gate/caps`, 600 in a 700 folder, under a
+lock): at most **3 worker names** through the key, each counting for **7 days after its last use** (a
+name used once may be used again; `restrict` takes no name; and the student's own sign-in, which runs
+`browser-key add`, clears them all, so a renamed worker is never locked out for longer than it takes to
+sign in once), at most **12 actions in any hour** (every connect through the gate, whether or not it
+submitted, and a `restrict` of a name that has no run), and at most **2 watches at once** (slot folders
+`.gate/watch.1|2`, taken only for a run that exists and given back when the watch ends however it ends;
+one older than 35 minutes is a leftover). Past a cap: `HPCW-GATE limit names|hourly|watch` (or `busy`
+when the file cannot be locked or is not a plain file), exit 123, nothing run. And whoever asks, the scheduler hears about a worker in line
+at most once a minute: the gate's `status` and `watch` pass `--poll-floor 60`, which skips the one
+`squeue` when the queued file says it was asked less than 60 s ago, by any command.
+
+**sshd and the account's own files.** sshd runs the forced command through the account's login shell
+(`$SHELL -c '<copy>/bin/hpcworker gate'`). bash started by sshd reads `~/.bashrc` first on Debian's and
+some other builds (whether warrior's does is not measured), so whatever the student's own `~/.bashrc`
+prints comes before the gate's own lines: a reader takes the line that starts `HPCW-` (or, for `status`
+and `watch`, the lines that start `{"v":1`) and ignores the rest. `read` prints a file's bytes after
+whatever was printed before them, so a worker's state is read with `status`, and `read` is for
+`progress.log` and the others as text. The key holder cannot change that file.
+
+**What a copied key can and cannot do.** The browser keeps its key and does not let it be exported, so
+this is for the case it is copied anyway. Until the line is removed (by `forget`, `browser-key remove`,
+an expiry, or by hand), whoever holds the key can, from anywhere: learn the framework version, the
+account name and whether Claude Code on the grid is signed in; read four run files of the account's
+workers (states, times, job ids and nodes, the session link, and the e-mail and plan Claude Code
+reports); set the account up for the lab's shared copy; start a worker under at most three names, at
+most twelve times an hour, in the student's own Claude sign-in and usage limit; record the Remote
+Control answer; stop a worker; mark a workspace restricted; and remove the key's own line. They cannot
+open a shell or run any other command, get a terminal, forward a port or the agent, copy a file in or
+out, read any other file (not `job.token`, `rc.log`, the workspace, `~/.ssh` or Claude Code's folder),
+sign in to Claude or sign the worker in to another Claude account, add another key, or change the
+profile; and a session link it reads opens only in the student's own Claude account. All of this holds
+only while the lab's copy, and every folder above it, can be changed by its owner alone ("The copy the
+key runs", above), which is why `browser-key add` refuses otherwise.
+
+## `worker watch --json` (version 11)
+
+`hpcworker worker watch --name NAME --json [--minutes MIN] [--poll-floor S]` writes one JSON line per
+change and nothing else:
+
+```
+{"v":1,"event":"status","final":false,"run":"worker","job":"40501234","next_job":"","state_dir":"...","status":{...},"connection":null,"scheduler":{...},"line":"Your worker is in line for a computer (3 min so far)."}
+{"v":1,"event":"keepalive","at":"2026-10-02T14:03:20Z"}
+{"v":1,"event":"status","final":true,"run":"worker",...,"line":"Your worker is online."}
+```
+
+A status line (the fields of `worker status --json`, after `event` and `final`) comes at the start, each
+time the worker's `state`, `needs`, `job`, `node`, `environment_url`, `message`, `scheduler_state`,
+`reason`, `expected_start`, `next_job` or `stop_reason` changes (a heartbeat alone is no change), and at
+the end with `final: true`. A keepalive line comes when 20 s pass with nothing written. `status.json` is
+read every 5 s with bash builtins alone (no process is started for the look); the scheduler is asked at
+most once a minute and only while the worker is in line (and, with `--poll-floor`, not within that many
+seconds of anyone's last ask). It ends with `final: true` and exit 0 online with its link, 1 stopped,
+error, or ended with no successor queued, 2 out of time (30 minutes unless given). `need_login` is a
+change like any other and the watch goes on: through the gate nothing signs in, and a sign-in made
+elsewhere brings the worker online. When the reader goes away (the ssh channel closed) the watch ends at
+its next line, a change or the next keepalive, so within 20 s; a hang-up ends it at once; through the gate
+its watch slot is given back either way, and a watch that never started (no such run, no profile) takes
+none.
+With no run folder it prints `hpcworker: no worker named NAME ...` on standard error, exit 1. Without
+`--json`, `worker watch` is version 10's, for a person.
+
+## Version 11 and what it keeps
+
+Every verb, flag, file and line Beethoven 11.0.0 and 10.0.0 use is unchanged (docs/V11_CONTRACT.md):
+`connect` with its `HPCW-STEP` grammar, exit statuses, keepalive, relay, budgets and `--pty` when there
+is a terminal; `worker status --json` byte for byte (the same function prints it, with no prefix); `worker
+stop`, `worker restrict`, `claude consent --record`, `install --shared`, `login-setup`, `claude login
+--plain` with every line (a set-up account sees no new line; `--profile` and the setup line are new and
+only for an account with no profile); the queued file and every `status.json` field; `progress.log`;
+`VERSION` is 11. One thing a reader could notice and neither 11.0.0 nor 10.0.0 reads: `~/.hpcworker`
+gains `profile.env` (the profile as shell variables, 600), made again from the profile whenever it does
+not match, so deleting it is harmless. The job file and the workspace guide are now filled by bash
+(`lib/profile_sh.sh`) instead of `profile.py`, with the same bytes for every profile the tests hold
+(`tests/test_profile_awk.py`); `hpcworker profile show|set|validate|schema` still use `profile.py`, and
+`hpcworker profile check [FILE]` gives `validate`'s verdict with no python3.
+
 ## Version 10 and what it keeps
 
 The 10.0.0 extension and a worker started by framework 9 keep working when the lab's copy moves to
@@ -498,6 +747,16 @@ grid`), `login_abandon_s` (1200; 0 or at least 300), `restricted` and `restricte
 optional and checked by `profile validate`. An account's `profile.json` copied before version 10 takes
 these from the site profile of the same name in the copy it runs from (`FIELDS_FROM_SITE`), until the
 account sets its own. The worker partition is not changed (the lab lead's choice).
+
+Version 11 adds, each optional, checked by `validate` and taken from the site profile the same way:
+`ssh_host` (`grid.wayne.edu`: the login node's public ssh name; empty means no ssh path), `ssh_port`
+(22), `ssh_host_key` (`SHA256:kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s`, the fingerprint the grid's
+`ssh-rsa` host key had from the internet on 2026-10-02; Beethoven refuses any other), `ssh_relay`
+(`null`: no relay; a `wss://` or `https://` address otherwise), `grid_2fa_help_url` (KB 20242, the
+university's page on the grid's Google Authenticator code, which a password sign-in asks for), and
+`browser_key_days` (days a browser key stays valid, or `null`/absent for no expiry; Wayne State sets
+none). `vpn_portal`, `vpn_help_url` (KB 20314) and `grid_account_help_url` (KB 20199) are kept as they
+were.
 
 What you should know before step 4, and the command tells you: files the worker reads and every
 command's output go to Anthropic; while you are connected the transcript is also stored on
@@ -542,9 +801,12 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
   named `hpcworker_<id>`, `hpcw_<id>` or `hpcw_probe_<id>`. Version 10 adds two exceptions, each for
   a file of the tool's own: `connect` removes its outcome file under `~/.hpcworker/log`, and
   `login-setup --remove` (or a `login-setup` that stops after making its key) removes the key pair
-  whose public half says `login-setup` made it, with its own config block and authorized_keys line;
-  `login-setup` is also the only subcommand that writes under `~/.ssh`, and it refuses to run under
-  an agent or without a terminal. The one subcommand that replaces a file
+  whose public half says `login-setup` made it, with its own config block and authorized_keys line.
+  `login-setup` and, from version 11, `browser-key add|remove` and the gate's `forget` and expiry are
+  the only subcommands that write under `~/.ssh`, each only its own line (and `login-setup` its own key
+  and config block); `login-setup` refuses to run under an agent or without a terminal, `browser-key`
+  under an agent, in a job, through the gate, or with neither a terminal nor an ssh connection. The gate
+  writes its own `.gate` folder under the state directory and nothing else. The one subcommand that replaces a file
   of yours, `install --force` (profile.json), refuses to run under an agent (`CLAUDECODE`,
   `BEETHOVEN_REQUEST_ID` and kin, and their older `ASHLEY_` names) or without a terminal. No subcommand
   can remove `~/.beethoven` (or `~/.ashley`, its old name), the profile, or a Claude Code configuration
@@ -560,39 +822,69 @@ under WSL by `tests/test_login_node.py`, which puts a stand-in for every banned 
 fails if one is looked for; every program not named below is coreutils, `grep`, `sed` or `awk`,
 running for milliseconds):
 
-| line | python3 (`lib/profile.py`) | longer than a moment |
+| line | python3 | longer than a moment |
 |---|---|---|
-| `install --shared` | `validate`, once | nothing |
+| `install --shared` | none | nothing |
 | `claude consent --record` | none | nothing |
-| `connect` | `shellenv` once; `render` when it submits; `guide` for a new workspace | the sitting: `srun` (up to 600 s for a computer, 840 s in all), the relay (bash builtins) and its ticker (bash, `sleep 1` a second) |
-| `worker status --json` | `shellenv`, once | nothing (one `squeue` under `timeout 20`, only while in line) |
-| `worker stop` | `shellenv`, once | for a running worker, bash waits up to 45 s for its `stop.done` (`sleep 5` between looks); one `squeue`, one `scancel` |
-| `worker restrict` | `shellenv`, once | nothing |
+| `connect` | none | the sitting: `srun` (up to 600 s for a computer, 840 s in all), the relay (bash builtins) and its ticker (bash, `sleep 1` a second) |
+| `worker status --json` | none | nothing (one `squeue` under `timeout 20`, only while in line; with `--poll-floor 60`, not within a minute of the last) |
+| `worker stop` | none | for a running worker, bash waits up to 45 s for its `stop.done` (`sleep 5` between looks); one `squeue`, one `scancel` |
+| `worker restrict` | none | nothing |
 | `login-setup` | none | nothing (`ssh-keygen`, `ssh -G`, `getent` under `timeout 5`, `restorecon` where present) |
-| `discover` | none | nothing (one `sinfo` under `timeout 10`) |
-| `probe` | `shellenv`, once | nothing (one `squeue` for a probe on record, one `sbatch`) |
+| `discover`, `probe`, `diag` | none | nothing (one `sinfo` under `timeout 10`; one `squeue` for a probe on record, one `sbatch`) |
+| `browser-key add` (version 11) | none | nothing (`sha256sum`, `base64`, two `ssh-keygen -l`, one `stat` over the copy's files, `restorecon` where present) |
+| gate `version`, `read`, `forget` | none | nothing |
+| gate `status`, `stop`, `restrict` | none | as `worker status`, `stop`, `restrict` |
+| gate `watch` | none | up to 30 minutes, bash alone: a look at `status.json` every 5 s with builtins and a `sleep`, one `squeue` a minute at most while in line, a keepalive line every 20 s; it ends within 20 s when its reader goes |
+| gate `connect` | none | nothing (never an `srun`) |
 
-Taken off python3 in this version: the relay (it was `python3` for the whole sitting, which the
+Measured by `tests/test_login_node.py` under WSL (2026-10-02, fixer run): every line in the table above,
+the first connect of a never-set-up account, the gate's eight verbs, `browser-key add`, and the first
+command after `profile.json` changed, started no `python3` at all, and looked up no program on the
+banned list. Reading Wayne State's site profile with awk took 25 to 35 ms more than sourcing the tool
+(about 55 ms), and loading it, filling the job file and the workspace guide 130 to 210 ms in all, with
+gawk 5.2 and with mawk 1.3.4 (`profile.py shellenv` alone took 110 ms on the same machine). Not measured
+on warrior (gawk 4.0.2, bash 4.2.46, CephFS).
+
+**How (version 11).** `lib/profile.awk` reads the profile as JSON (every escape, `\u` and surrogate
+pairs, refusing anything that is not JSON), merges it as `profile.py load()` does (the schema's
+defaults, then the site profile's values for `FIELDS_FROM_SITE`, then the account's own file), checks it
+as `profile.py validate()` does, and prints three things for bash to `eval`, every value shell-quoted by
+`shlex.quote`'s rule and every name `[A-Za-z0-9_]`: the `P_<key>=<value>` lines `profile.py shellenv`
+printed, the verdict (`HPCW_PV_errors`, `HPCW_PV_note`), and for a valid profile the values the job file
+and the guide are filled from (`HPCW_M_*`, `HPCW_G_*`). `lib/profile_sh.sh` fills `jobs/worker.sbatch.tpl`
+(`hpcw_render`) and `jobs/workspace-guide.md.tpl` (`hpcw_guide`) from them as `profile.py render` and
+`guide` did: the same values, the same refusals (a quote or a line break in a value, a run name out of
+pattern, `CHAIN` not 0 or 1, an invalid profile), each placeholder replaced once, and the values handed to
+awk in an environment of their own (`env -i`), so nothing in the caller's environment can fill one.
+`tests/test_profile_awk.py` holds the two implementations together: the awk schema is compared with
+`profile.py`'s `SCHEMA` line by line, and for Wayne State's profile and profiles bent to reach every
+branch (escapes and non-ASCII text, an older account's file, other schedulers, a proxy, binds, every
+rule `validate` names) the P_ lines, the verdict and its words, the job file and the guide are compared
+byte for byte. The awk output is kept in `~/.hpcworker/profile.env` (600) under a SHA-256 of what it
+depends on (the account's `profile.json`, the site profile, `profile.awk` and `profile_sh.sh`, `$HOME`,
+`$USER` and the copy's directory; `sha256sum`, not on the banned list; `md5sum` is), and read back while
+that is unchanged. The job file is filled afresh at every start (framework 11's earlier `job.key` is gone:
+there is no python3 left to save, and a file reused from a folder others might change was the one thing
+it added to trust). Known differences from `profile.py`, all on profiles no site has: a `\u0000`,
+`NaN` and `Infinity` are refused rather than read, a value with a trailing line break in a key `validate`
+matches by pattern is refused rather than accepted, and a value nested three objects deep (which no
+variable the tool reads holds) prints as python's repr only for plain values.
+
+Taken off python3 in version 10: the relay (it was `python3` for the whole sitting, which the
 banner's "terminated on sight" would have ended mid-sign-in), the `status.json` patch that `worker
 status` makes on each poll while a worker is in line and that `worker stop` makes for a worker still
-in line (awk now, refusing any file that is not the flat queued file it patches), the six plain
+in line (awk, refusing any file that is not the flat queued file it patches), and the six plain
 top-level profile reads on the way to a worker (`site`, `shared_install`, `shared_state_dir`,
-`submit_host`, `ood_shell_host`, `ood_base_url`: awk, with `profile.py get` only when awk cannot say),
-and `connect`'s second read of the profile.
+`submit_host`, `ood_shell_host`, `ood_base_url`: the short awk reader, and `lib/profile.awk` for a value
+with an escape in it). Taken off in version 11: `shellenv`, `render`, `guide` and `validate`, as above.
 
-Still `python3`, each a single short process (`python3 -c pass` 0.05 s and `profile.py shellenv` 0.19 s
-of wall time, 0.1 s of CPU, under WSL with Python 3.12; not measured on warrior's 3.6.8): `shellenv`
-(the profile as shell variables), `render` (the worker's job file), `guide` (a workspace's CLAUDE.md)
-and `validate`. They are not a simple swap: they parse the site profile's JSON, merge the fields a
-site supplies and the schema's defaults, and fill the job template, and a shell copy would be a second
-implementation of the schema to keep in step with the first. Whether a `python3` process of a fraction
-of a second, one to three times per command, is acceptable on warrior is a question for C&IT; if it is
-not, the next integer version moves them off the login node (the site profile rendered to shell
-assignments when the lab publishes the shared copy, the job file submitted unrendered with its values
-in `--export`, the guide written by the job on its compute node). Off the extension's path, `python3`
-also runs for `profile show|set|validate|schema`, `install --discover`, `probe --show`, `diag`, the
-maintainer's `tools/deploy_shared.sh` (one `validate` per site profile when it publishes) and, at a
-PBS site only, the `qstat` JSON parse in `lib/adapters/pbs.sh`.
+Still `python3`, never on a line the extension types: `profile show|set|validate|schema` and `install
+--discover` (a person at a terminal), the maintainer's `tools/deploy_shared.sh` (one `validate` per site
+profile when it publishes; `hpcworker profile check FILE` gives the same verdict without it), the
+probe's and the worker's own reads on the compute node (`hpcw_workspace_trusted`), and, at a PBS site
+only, the `qstat` JSON parse in `lib/adapters/pbs.sh`. `diag` reports whether `python3` is there and
+no longer runs it.
 
 ## Always on
 
@@ -623,7 +915,7 @@ recorded state into `preempted`; the unit tests now send real TERMs into the ren
 
 Claude Code reads a `CLAUDE.md` in the folder it works in at the start of every session. `worker
 start` writes one into the worker's workspace (`<shared_state_dir>/workspaces/<name>/CLAUDE.md`)
-from `jobs/workspace-guide.md.tpl`, filled from the site profile (`lib/profile.py guide`): what the
+from `jobs/workspace-guide.md.tpl`, filled from the site profile (`hpcw_guide` in `lib/profile_sh.sh`, as `lib/profile.py guide` did): what the
 machine is (a compute node under the site's scheduler, the worker started by hpcworker), how to run
 work (light work in the worker, heavy or long work as its own job, never on the login node, the
 partitions and QoS, the account, node-local `/tmp`, sockets under `ipc_dir`), which folders the
@@ -712,9 +1004,12 @@ the image folder).
 
 ```
 bin/hpcworker            the command (bash)
-lib/profile.py           site profile schema, validation, template rendering, the two-key consent reader (python3, stdlib, 3.6+)
+lib/profile.py           site profile schema, validation, template rendering, the two-key consent reader (python3, stdlib, 3.6+): the reference, and the tool for a person at a terminal
+lib/profile.awk          version 11: the site profile read, merged and checked with no python3, for bash to eval (POSIX awk)
+lib/profile_sh.sh        version 11: the job file and the workspace guide filled from it (bash), as profile.py render and guide did
 lib/login_plain.sh       the panel's sign-in sitting (claude auth login under a pty, a line contract on stdout)
 lib/relay.sh             connect's one writer to the terminal during the sitting: whole lines and the keepalive (bash builtins only), and its once-a-second ticker (--ticks)
+lib/browser_key.sh       version 11: browser-key add|remove|check and the gate, with its caps (bash, coreutils, grep, sed, awk)
 lib/adapters/common.sh   scheduler and runtime detection, node-local temp, the container exec line, the registration parser, needs/hint, the guarded remove
 lib/adapters/slurm.sh    Slurm (run for real on the Wayne State grid)
 lib/adapters/pbs.sh      PBS Pro / OpenPBS (documented commands; fixture-tested only)
@@ -730,7 +1025,8 @@ tests/grid/slurm_in_container.sbatch  the maintainer's grid check for scheduler_
 ```
 
 `~/.hpcworker` on a shared copy: `bin/hpcworker` (the launcher), `shared` (the marker), `profile.json`,
-`log/`, and when there is one, `consent`, `discover.json` and `replaced/<time>/` (a copy of the
+`log/`, `profile.env` (version 11: the profile as shell variables, made again whenever it does not
+match), and when there is one, `consent`, `discover.json` and `replaced/<time>/` (a copy of the
 account's own, or a marker, moved aside by an install). On a copy of its own: the files above under
 `bin/`, `lib/`, `jobs/`, `profiles/`, plus `VERSION`, `README.md`, `profile.json` and `log/`. A worker
 job carries both: `HPCW_HOME` (the account's folder: profile, consent marker) and `HPCW_CODE` (where
@@ -738,7 +1034,8 @@ job carries both: `HPCW_HOME` (the account's folder: profile, consent marker) an
 Site profiles and job templates are also where a later workflow engine's cluster templates would go
 (one file per site, one template per kind of job); nothing of that is built.
 
-Run directory (`<shared_state_dir>/<name>/`): `job.sbatch`, `job.id`, `next.id` (successor id and
+The state directory also holds `.gate/` (version 11: the gate's `caps` file, its lock and its watch
+slots; 700) and `workspaces/`. Run directory (`<shared_state_dir>/<name>/`): `job.sbatch`, `job.id`, `next.id` (successor id and
 the id that queued it), `chain.log`, `node`, `progress.log` (version 10), `status.json` (state `queued`
 (version 10), `starting`, `need_login`,
 `need_consent`, `running`, `online`, `stopped`, `preempted`, `error`; `needs` and `hint` for the
@@ -775,7 +1072,8 @@ Continue coding in the Claude mobile app or https://claude.ai/code?environment=e
    (`adapter_detect_scheduler`, `adapter_detect_runtime`, `adapter_submit`, `adapter_status`,
    `adapter_cancel`, `adapter_attach`, `adapter_node_tmp`, `adapter_runtime_exec`) plus
    `adapter_interactive`, `adapter_run_short`, `adapter_status_many` and `adapter_submit_after`, a
-   header block in `profile.py:header_lines`, and fixtures under `tests/fixtures/`.
+   header block in `profile.py:header_lines` and the same in `hpcw_render` (`lib/profile_sh.sh`;
+   `tests/test_profile_awk.py` holds them together), and fixtures under `tests/fixtures/`.
 
 ## What is Wayne-State-specific
 
@@ -812,7 +1110,8 @@ failure code, the keepalive, the relay and its ticker with an empty PATH, and a 
 the session leader of a pseudo-terminal that hangs up mid-sitting, after which nothing of the sitting
 is left running), `test_login_node.py` (every
 line the extension types with each banned program a failing stand-in on PATH and each `python3` call
-named and timed; the awk `status.json` patch and profile reads against `profile.py`'s answers),
+named and timed, none expected since version 11; the awk `status.json` patch and profile reads against
+`profile.py`'s answers),
 `test_status.py` (the queued file, `worker status` and its
 one scheduler call, every person-facing line, stop of a worker in line, restrict, consent --record,
 watch, and what 10.0.0 and a framework 9 worker still find), `test_job.py` (the rendered job run whole
@@ -820,7 +1119,59 @@ against a stand-in runtime and Claude Code: online then stopped, a renewal, the 
 only) and `test_login_setup.py` (in a scratch HOME; Linux only, it needs POSIX file modes). On a
 Windows checkout the Linux-only ones are skipped; run the suite under WSL for all of them.
 
+Version 11 adds `test_browser_key.py` (Linux only: POSIX modes, a pseudo-terminal, `ssh-keygen`; the
+lab's layout with a `current` link, a stand-in for every banned program first on PATH: `browser-key
+add` from Beethoven's session and from a terminal, every form of the key, the fingerprint check, every
+other line kept, the same key again, a second key replacing the first, umask 000; 33 hostile keys; each
+refusal (an agent, a job, the gate, a pipeline, home, `~/.ssh`, `authorized_keys`, the lock); every
+part of the copy writable by group or by others, a link inside it, a folder above it (refused unless
+sticky), another copy run; `remove` and `check`; `authorized_keys.beethoven-prev` never keeping a line of
+ours; then the gate through a stand-in for
+`bin/hpcworker` that prints the words it was handed: every accepted line and its exact argv, `--login
+never` last, 84 hostile lines under three locales, a hostile environment, `version`, the expiry,
+`read`, `forget`, the three caps (a name ageing out after seven days, the student's own sign-in
+clearing them, a restrict of no run taking no name) and the watch slots (none for a run that does not
+exist); and the real verbs against the fake scheduler with no python3 on PATH),
+`test_profile_awk.py` (`lib/profile.awk` and `lib/profile_sh.sh` against `profile.py`, byte for byte, as
+"The login node" says), `test_watch_json.py` (each line of `worker watch --json`, the keepalive, a
+heartbeat that is no change, the ends and their exit statuses, the poll floor, a reader that goes and a
+hang-up giving back the slot), `PlainExec` in `test_connect.py` (connect and `claude login --plain`
+with no terminal: no `--pty`, the code from standard input and never written back; the setup of an
+account never set up; no sign-in under the gate), the gate's verbs and `browser-key add` in the
+login-node audit, and the new profile keys in `test_profile.py`.
+
+Under bash 4.2 (EL7's, the version warrior runs): put a bash 4.2.46 built from source first on PATH and
+run the suite the same way; `tests/run.sh` hands that bash to every test.
+
+`tests/e2e_sshd.sh` (not part of `run.sh`; Linux, an OpenSSH `sshd` this account can run,
+`HPCW_E2E_SSHD`) runs the whole key path against a real sshd on 127.0.0.1 with StrictModes on and the
+grid's algorithms: an unrestricted stand-in for the student's password session adds the browser's key
+over a plain exec; the key signs in and sshd runs only the gate (`forced-command (key-option)` in its
+log, `key options: command` and nothing else for our line); 25 hostile lines, no command, sftp, a
+terminal and stdio forwarding refused; connect with the Claude sign-in over the session, the code on
+standard input, `srun` without `--pty`; the gate's status, read, connect (no `srun`), the names cap,
+watch to the end and a watch whose channel closed giving back its slot; a second computer's key
+replacing the first; `forget`. It never touches the account's own `~/.ssh` or `~/.hpcworker` (their
+checksums are compared before and after) and uses none of its keys or config. `HPCW_E2E_BASH` runs the
+copy under another bash.
+
 ## What was run on the Wayne State grid
+
+2026-10-02 (version 11): nothing. No framework code ran on the grid for this version, and version 11
+was not published (the extension's build made three connections to the grid's ssh port, which ended
+at its banner or its answer to the unauthenticated "none" request; none signed in). The build's record
+of the same day says framework 10 is the published `current` (`/rs/rs_grp_oschome/shared/beethoven/
+hpcworker/current`); this README did not record that publish. Not measured there, and each needed
+before a student relies on it: `lib/profile.awk` under warrior's gawk 4.0.2 (gawk 5 and mawk 1.3.4
+were tested); a key line of
+this form accepted by the grid's OpenSSH 7.4 with StrictModes and its home folders (and whether `$HOME`
+there is a link, which `browser-key add` refuses); `ecdsa-sha2-nistp256` and `ssh-ed25519` user keys
+accepted by 7.4; `restrict` and the forced command on 7.4 (local tests used 9.6); whether warrior's bash
+reads `~/.bashrc` for a forced command (Ubuntu's does); `ssh-keygen -l -f /dev/stdin` on 7.4 (where it
+cannot read a key from a pipe, the shell's own checks stand); the modes of `/rs/rs_grp_oschome` and of
+`shared`, `shared/beethoven` and the published copy (`hpcworker browser-key check` says them in one
+command); `srun` without `--pty` relaying standard input to the sitting; and whether the grid's sshd
+accepts `SSH_ORIGINAL_COMMAND` exactly as sent.
 
 2026-10-01 (version 10): nothing. No version 10 code has run on the grid or against the portal, and
 the shared copy was not published (`tools/deploy_shared.sh` was not run). Not measured there: `connect`

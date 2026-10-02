@@ -268,7 +268,8 @@ class GuideWrite(unittest.TestCase):
         # noclobber write refuses the name, and theirs stays
         ws = os.path.join(self.td, "ws")
         os.makedirs(ws)
-        body = "prof_py() { printf 'theirs\\n' > '%s/CLAUDE.md'; printf 'ours\\n'; }; write_workspace_guide '%s' w7" % (posix(ws), posix(ws))
+        # (framework 11: the guide is filled by hpcw_guide, lib/profile_sh.sh, which this stands in for)
+        body = "hpcw_guide() { printf 'theirs\\n' > '%s/CLAUDE.md'; printf 'ours\\n'; }; write_workspace_guide '%s' w7" % (posix(ws), posix(ws))
         rc, out, err = bash(with_cli(body, os.path.join(self.td, "hpcw")))
         self.assertEqual((rc, out), (0, "kept"), err)
         self.assertEqual(self.read(os.path.join(ws, "CLAUDE.md")), b"theirs\n")

@@ -67,8 +67,9 @@ class Orders(Base):
         self.assertIn("AUTH-URL: https://claude.ai/oauth/authorize?code=true", lines)
         self.assertEqual(lines[-3:], ["SIGNED-IN st1234@wayne.edu max", "HPCW-STEP signed-in st1234@wayne.edu max", "HPCW-STEP done"])
         self.assertNotIn(G.CODE, out, "the pasted code is never echoed")
-        # the account is set up for the shared copy, without the ~/.bashrc block
-        self.assertEqual(sorted(os.listdir(self.g.hpcw)), ["bin", "consent", "log", "profile.json", "shared"])
+        # the account is set up for the shared copy, without the ~/.bashrc block (profile.env: framework 11's
+        # copy of the profile as shell variables, which spares the next commands their python3)
+        self.assertEqual(sorted(os.listdir(self.g.hpcw)), ["bin", "consent", "log", "profile.env", "profile.json", "shared"])
         self.assertEqual(os.listdir(os.path.join(self.g.hpcw, "log")), [], "the sitting's outcome file is removed")
         self.assertFalse(os.path.exists(os.path.join(self.g.home, ".bashrc")))
         with open(os.path.join(self.g.hpcw, "consent")) as fh:
@@ -78,7 +79,9 @@ class Orders(Base):
         self.assertEqual([c.split()[0] for c in calls], ["sbatch", "srun"], calls)
         srun = calls[1]
         self.assertIn("-p secp -q secondary -t 00:20:00", srun)
-        self.assertIn("-I600 --pty", srun)
+        # framework 11: run with no terminal (a pipe on stdin, as Beethoven's plain ssh exec runs it), srun gets no --pty
+        self.assertIn("-J hpcw_claude -I600 ", srun)
+        self.assertNotIn("--pty", srun)
         m = re.search(r"_exec login --plain --keepalive 20 --deadline (\d+)$", srun)
         self.assertTrue(m, srun)
         self.assertLessEqual(abs(int(m.group(1)) - (int(time.time()) + 840)), 120)
@@ -249,6 +252,70 @@ class SigninFailures(Base):
         self.check(7, "signin", FAKE_SRUN="silentok")
 
 
+class PlainExec(Base):
+    """framework 11: Beethoven's own ssh session, a plain exec with no pseudo-terminal: the code arrives on
+    standard input, srun is asked for no --pty, and the code is never written back; `claude login --plain`
+    for an account that was never set up; and nothing reached through the browser key's gate signs in."""
+
+    def test_connect_without_a_terminal(self):
+        rc, out, err = self.connect("--consent %s --login always" % G.INSTALL_ID)
+        self.assertEqual(rc, 0, (out, err))
+        self.assert_whole_lines(out)
+        self.assertNotIn(G.CODE, out + err, "the code is never written back")
+        self.assertIn("HPCW-STEP signed-in st1234@wayne.edu max", out)
+        srun = [c for c in self.g.calls() if c.startswith("srun ")]
+        self.assertEqual(len(srun), 1, self.g.calls())
+        self.assertNotIn("--pty", srun[0].split())
+        self.assertIn("_exec login --plain --keepalive 20 --deadline", srun[0])
+
+    def test_claude_login_plain_for_an_account_never_set_up(self):
+        for args in ("claude login --plain --profile testsite", "claude login --profile testsite --plain", "claude login --plain"):
+            with self.subTest(args=args):
+                if os.path.exists(self.g.hpcw):
+                    import shutil
+                    shutil.rmtree(self.g.hpcw)
+                rc, out, err = self.g.run(args, stdin_text=G.CODE + "\n")
+                self.assertEqual(rc, 0, (out, err))
+                lines = fwd(out).splitlines()
+                self.assertEqual(lines[0], "HPCW-LOGIN: this account is set up for the lab's copy at %s" % G.posix(self.g.shared_spelled))
+                self.assertEqual(lines[1], "HPCW-LOGIN: requesting a compute node")
+                self.assertEqual(lines[-1], "SIGNED-IN st1234@wayne.edu max")
+                self.assertNotIn(G.CODE, out)
+                self.assertTrue(os.path.exists(os.path.join(self.g.hpcw, "profile.json")))
+                self.assertTrue(os.path.exists(os.path.join(self.g.hpcw, "shared")))
+                srun = [c for c in self.g.calls() if c.startswith("srun ")][-1]
+                self.assertNotIn("--pty", srun.split())
+        # set up already: no setup line, the sitting as in framework 10
+        rc, out, err = self.g.run("claude login --plain", stdin_text=G.CODE + "\n")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(out.splitlines()[0], "HPCW-LOGIN: requesting a compute node")
+
+    def test_claude_login_plain_that_cannot_set_up(self):
+        rc, out, err = self.g.run("claude login --plain --profile nosuch", stdin_text="")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertTrue(out.startswith("HPCW-LOGIN-FAILED: "), out)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        self.assertFalse(os.path.exists(os.path.join(self.g.hpcw, "profile.json")))
+        self.assertNotIn("srun", " ".join(self.g.calls()))
+        rc, out, err = self.g.run("claude login --plain --bogus", stdin_text="")
+        self.assertNotEqual(rc, 0)
+
+    def test_never_a_sign_in_under_the_gate(self):
+        for env in ({"HPCW_GATE": "1"}, {"SSH_ORIGINAL_COMMAND": "connect worker testsite - default chain"}):
+            with self.subTest(env=env):
+                for login in ("always", "fresh", "auto"):
+                    rc, out, err = self.connect("--login %s" % login, **env)
+                    self.assertEqual(rc, 0, (out, err))
+                    self.assertEqual(steps(out)[-1], "done")
+                    self.assertNotIn("signin", steps(out))
+                self.assertNotIn("srun", " ".join(self.g.calls()))
+                rc, out, err = self.g.run("claude login --plain", stdin_text=G.CODE + "\n", **env)
+                self.assertEqual((rc, out), (1, "HPCW-LOGIN-FAILED: the Claude sign-in never runs through Beethoven's browser key\n"))
+                rc, out, err = self.g.run("_exec login --plain", **env)
+                self.assertNotEqual(rc, 0)
+                self.assertNotIn("srun", " ".join(self.g.calls()))
+
+
 class Keepalive(Base):
     def test_lines_while_the_computer_is_awaited_and_all_whole(self):
         # one second here for the 20 s of the real thing; srun silent for 3.5 s, then lines ending in CR LF as a pty sends them
@@ -319,6 +386,8 @@ class CutShell(Base):
         self.assertEqual(len(ticker), 1, before)
         self.assertEqual(int(ticker[0][1].split()[-1]), ticker[0][0], "the ticker watches connect's side of the pipe, its parent")
         self.assertNotIn("python", cmds, "nothing of python's runs during the sitting")
+        # with the portal's terminal, srun is asked for a pseudo-terminal, as in framework 10
+        self.assertTrue(any("/srun " in c and "--pty" in c.split() for _, _, _, c in before), cmds)
         os.close(fd)  # the portal's shell is cut: the terminal hangs up
         deadline = time.time() + 10
         while self.members(pid) and time.time() < deadline:

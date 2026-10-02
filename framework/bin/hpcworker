@@ -1,12 +1,13 @@
 #!/bin/bash
 # hpcworker: your own Claude Code, as a batch job on your university's cluster, reachable from
 # claude.ai/code and the Claude app through Claude Code's Remote Control. This is the one command;
-# it runs on the login node with bash, coreutils, awk, sed and grep, and the system python3 only for
-# a moment at a time, to read the site profile and fill the job file (lib/profile.py; README.md, "The
-# login node"). Nothing heavy runs here, and nothing that runs here for longer than a moment is a
-# program on the login node's banned list (warrior's /etc/motd names python3, node, make, md5sum,
-# rsync and others): the one long wait, connect's sign-in sitting, is srun relayed by bash itself
-# (lib/relay.sh). The container and Claude Code run inside jobs. An account has it one of two ways: the lab's
+# it runs on the login node with bash, coreutils, awk, sed and grep. Since framework 11 no verb the
+# extension types starts python3 there: the site profile is read and the job file and the workspace
+# guide are filled by awk and bash (lib/profile.awk, lib/profile_sh.sh), and lib/profile.py is left for
+# a person at a terminal (profile show, set, validate, schema; discover's seed). Nothing on the login
+# node's banned list runs (warrior's /etc/motd names python3, node, make, md5sum, rsync and others), and
+# nothing heavy: the one long wait, connect's sign-in sitting, is srun relayed by bash itself
+# (lib/relay.sh; README.md, "The login node"). The container and Claude Code run inside jobs. An account has it one of two ways: the lab's
 # shared copy (then ~/.hpcworker/bin/hpcworker is a small launcher for it) or a copy of its own.
 #
 #   hpcworker install --shared [DIR] [--profile NAME] [--force] [--no-shell-path]
@@ -14,7 +15,8 @@
 #   hpcworker install [--own] [--profile NAME | --discover] [--force] [--no-shell-path]
 #                     a copy of your own in ~/.hpcworker (again: refresh or upgrade); --own leaves a shared copy
 #                     (--no-shell-path: do not touch ~/.bashrc; profile.json is kept unless --force)
-#   hpcworker profile show|path|validate|set KEY VALUE|schema   the site profile
+#   hpcworker profile show|path|validate|set KEY VALUE|schema   the site profile (python3: for a person at a terminal)
+#   hpcworker profile check [FILE]                               validate's verdict with no python3 (lib/profile.awk)
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
 #   hpcworker connect [--name N] [--profile SITE] [--consent INSTALL_ID] [--login auto|always|fresh|never]
@@ -27,10 +29,17 @@
 #   hpcworker worker watch [--name N] [--minutes MIN]            follow it until it is online (files every 5 s; the scheduler at most once a minute)
 #   hpcworker worker stop|list|log|restrict [--name N] [--lines N]   restrict: mark the workspace so no worker starts there
 #   hpcworker worker guide [--name N]                             print the CLAUDE.md a new workspace gets (writes nothing)
-#   hpcworker claude login [--plain] | status [--alloc]           your Claude sign-in, in one sitting (--plain: the panel's line contract)
+#   hpcworker worker watch --json [--name N] [--minutes MIN]     framework 11: one JSON line per change, a keepalive every 20 s
+#   hpcworker claude login [--plain] [--profile SITE] | status [--alloc]
+#                     your Claude sign-in, in one sitting (--plain: the panel's line contract; --profile sets
+#                     up an account that was never set up, from the lab's shared copy, first)
 #   hpcworker claude consent [--record INSTALL_ID]               the Remote Control answer alone (--record: the extension's, no question asked)
 #   hpcworker login-setup [--remove]                             once, in the grid's own terminal, when the portal's terminal asks
 #                                                                for a password: a key only the portal's own server may use (UNPROVEN on the grid)
+#   hpcworker browser-key add TYPE KEY [COMMENT] | remove | check
+#                     framework 11: the browser's key, one restricted authorized_keys line whose only
+#                     command is the gate (lib/browser_key.sh); check is read only, for the lab lead
+#   hpcworker gate    that line's forced command: SSH_ORIGINAL_COMMAND, eight fixed verbs, never a sign-in
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker version                                            the number; "(shared copy at DIR)" on the lab's copy
 #
@@ -45,10 +54,13 @@
 # --remove (or a login-setup that stops after making its key), the key pair whose public half says
 # login-setup made it; the one subcommand that replaces a file of yours (install --force) runs only for
 # a person at a terminal; the workspace guide (CLAUDE.md) is written only where there is none, never
-# over a file of yours; login-setup alone writes under ~/.ssh, only its own key, its own config block
-# and its own authorized_keys line, and only for a person in the grid's own terminal. Versions are integers.
+# over a file of yours; login-setup writes under ~/.ssh only its own key, its own config block and its
+# own authorized_keys line, and only for a person in the grid's own terminal; browser-key (framework 11)
+# only its own restricted line (and authorized_keys.beethoven-prev), never under an agent, in a job or
+# through the gate, and the gate only removes that line (forget, or past the site's expiry). Nothing
+# reached through the gate ever starts a Claude sign-in. Versions are integers.
 set -uo pipefail
-VERSION=10
+VERSION=11
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -203,7 +215,7 @@ hpcw_expand_login() { # STRING -> $HOME and $USER (and ${HOME}, ${USER}) expande
 }
 prof_get() { # FILE KEY -> what `profile.py get FILE KEY` prints. The plain top-level strings this command
   # reads on the way to a worker (none of them a field the site supplies, each "" when absent) are read
-  # by awk; profile.py only when awk cannot say (an escape in the value, a file that is not well formed)
+  # by the short awk; anything else (an escape in the value) by lib/profile.awk, which reads all of JSON
   local out
   case "$2" in
     site|shared_install|shared_state_dir|submit_host|ood_shell_host|ood_base_url)
@@ -214,22 +226,70 @@ prof_get() { # FILE KEY -> what `profile.py get FILE KEY` prints. The plain top-
         esac
       fi;;
   esac
-  prof_py get "$1" "$2"
+  hpcw_prof_awk get "$1" "$2"
 }
 # shellcheck disable=SC1090
 source "$LIB/adapters/common.sh" || die "$LIB/adapters/common.sh is missing"
+# framework 11: the site profile, the job file and the workspace guide without python3 (lib/profile.awk)
+# shellcheck disable=SC1090,SC1091
+{ [ -r "$LIB/profile.awk" ] && source "$LIB/profile_sh.sh"; } || die "$LIB/profile_sh.sh or $LIB/profile.awk is missing (hpcworker install)"
+# framework 11: the browser's key and its gate. A copy without the file still runs every other verb;
+# `browser-key` and `gate` then refuse (the dispatch below)
+# shellcheck disable=SC1090,SC1091
+[ -r "$LIB/browser_key.sh" ] && source "$LIB/browser_key.sh"
 json_str() { hpcw_json_str "$1"; }
 in_job() { [ -n "${SLURM_JOB_ID:-${PBS_JOBID:-${LSB_JOBID:-}}}" ]; }
 same_dir() { local a b; a=$(cd "$1" 2>/dev/null && pwd -P) && b=$(cd "$2" 2>/dev/null && pwd -P) && [ "$a" = "$b" ]; }   # two directories that exist and are one
 # this run uses the lab's shared copy: a marker, and the code is not a full copy inside this home
 shared_mode() { [ -n "$SHARED_DIR" ] && ! same_dir "$SRC_ROOT" "$HPCW_HOME"; }
 read_version() { local v=""; [ -r "$1" ] && v=$(tr -d '[:space:]' 2>/dev/null < "$1"); [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"; }
-PROFILE_LOADED=""
+PROFILE_LOADED=""; PROFILE_ENV_KEY=""
+# ---- framework 11: the profile as shell variables, made by awk and kept ---------------------------------
+# lib/profile.awk turns the profile into P_<key>=<value> lines (what `profile.py shellenv` printed: the
+# site profile merged with the schema's defaults), the verdict of `profile.py validate`, and the values
+# the job file and the workspace guide are filled from. Its output depends only on the account's
+# profile.json, the site profile it takes fields from (this copy's profiles/<site>.json), profile.awk and
+# profile_sh.sh, $HOME and $USER, and the copy's directory; so it is kept in ~/.hpcworker/profile.env
+# under a SHA-256 of exactly those, and read back by bash while they are unchanged. The file is used only
+# when it is a plain file of this account's that no one else may write (a Windows checkout has no modes).
+prof_env_key() { # -> the hash of everything shellenv reads; 1 when it cannot be made (no sha256sum, an odd profile)
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  local site out h
+  out=$(HPCW_J_MODE=get HPCW_J_FILE="$PROFILE" HPCW_J_KEY=site LC_ALL=C awk "$HPCW_JSON_AWK" < /dev/null 2>/dev/null) || return 1
+  case "$out" in S*) site="${out#S}";; A) site="";; *) return 1;; esac
+  [[ "$site" =~ ^[a-z0-9-]{0,32}$ ]] || return 1
+  h=$({ printf 'hpcworker profile.env 2\n%s\n%s\n%s\n%s\n%s\n' "$PROFILE" "${HOME:-}" "${USER:-}" "$SRC_ROOT" "$site"
+        cat "$PROFILE"; printf '\n--site--\n'; [ -n "$site" ] && [ -f "$PROFILES/$site.json" ] && cat "$PROFILES/$site.json"
+        printf '\n--profile.awk--\n'; cat "$LIB/profile.awk" "$LIB/profile_sh.sh"; } 2>/dev/null | sha256sum 2>/dev/null) || return 1
+  h=${h%% *}
+  [[ "$h" =~ ^[0-9a-f]{64}$ ]] && printf '%s' "$h"
+}
+prof_env_cached() { # KEY -> the cached P_ lines on stdout when the cache was made from exactly these inputs
+  local c="$HPCW_HOME/profile.env" first
+  [ -f "$c" ] && [ ! -L "$c" ] || return 1
+  if ! case "${OSTYPE:-}" in msys*|cygwin*) true;; *) false;; esac; then
+    local m o; m=$(stat -c %a "$c" 2>/dev/null) && o=$(stat -c %u "$c" 2>/dev/null) || return 1
+    [ "$o" = "$(id -u 2>/dev/null)" ] && [ $(( 8#$m & 8#022 )) = 0 ] || return 1
+  fi
+  { IFS= read -r first && [ "$first" = "# hpcworker profile.env $1" ] && cat; } < "$c"
+}
+prof_env_save() { # KEY ENV: the cache, through a temporary name and a rename, 0600; nothing when ~/.hpcworker is not there
+  local c="$HPCW_HOME/profile.env"
+  [ -d "$HPCW_HOME" ] && [ ! -L "$c" ] || return 0
+  { ( umask 077; { printf '# hpcworker profile.env %s\n' "$1"; printf '%s\n' "$2"; } > "$c.$$" ) && chmod 600 "$c.$$" && mv -f "$c.$$" "$c"; } 2>/dev/null || rm -f "$c.$$" 2>/dev/null
+  return 0
+}
 load_profile() {
   # once per command: connect loads it, then worker start inside it would read the same file again
   [ -n "$PROFILE_LOADED" ] && [ "$PROFILE_LOADED" = "$PROFILE" ] && return 0
   [ -s "$PROFILE" ] || die "no profile at $PROFILE: run 'hpcworker install --profile wayne' (or 'hpcworker install --discover')"
-  local env; env=$(prof_py shellenv "$PROFILE") || die "profile $PROFILE unreadable"
+  local env="" key=""
+  key=$(prof_env_key) && env=$(prof_env_cached "$key") && [ -n "$env" ] || env=""
+  if [ -z "$env" ]; then
+    env=$(hpcw_prof_awk env "$PROFILE") || die "profile $PROFILE unreadable (hpcworker profile check says why)"
+    [ -n "$key" ] && prof_env_save "$key" "$env"
+  fi
+  PROFILE_ENV_KEY="$key"
   eval "$env"
   ADAPTER="$LIB/adapters/${P_scheduler}.sh"; [ -s "$ADAPTER" ] || die "no adapter for scheduler '$P_scheduler' (have: $(ls "$LIB/adapters" | sed 's/\.sh$//' | grep -v common | tr '\n' ' '))"
   # shellcheck disable=SC1090
@@ -300,6 +360,8 @@ shared_problem() { # DIR -> one sentence when DIR is not a shared copy this acco
   { [ -d "$d" ] && [ -x "$d" ] && [ -r "$d" ]; } || { echo "this account cannot open it (it does not exist, or this account is not in the group that may read it)"; return 0; }
   [ -n "$(read_version "$d/VERSION")" ] || { echo "it has no readable VERSION file"; return 0; }
   local f; for f in bin/hpcworker lib/profile.py lib/adapters/common.sh jobs/worker.sbatch.tpl; do [ -r "$d/$f" ] || { echo "$f is missing there or cannot be read"; return 0; }; done
+  # framework 11's own copy needs its awk profile reader too (an older copy has none and never asks for it)
+  [ "$(read_version "$d/VERSION")" -ge 11 ] 2>/dev/null && { [ -r "$d/lib/profile.awk" ] && [ -r "$d/lib/profile_sh.sh" ] || { echo "lib/profile.awk is missing there or cannot be read"; return 0; }; }
   pd=$(cd "$d" && pwd -P); ph=$(cd "$HPCW_HOME" 2>/dev/null && pwd -P)
   if [ -n "$ph" ]; then case "$pd/" in "$ph"/*) echo "it is inside $HPCW_HOME, the folder the launcher goes into"; return 0;; esac; fi
   return 0
@@ -372,7 +434,7 @@ install_profile() { # NAME DISCOVER FORCE: profile.json from a site profile or f
     if [ -s "$PROFILE" ] && [ "$force" = 0 ]; then say "profile.json exists; kept (use --force to replace it with a discovered seed)"
     else prof_py from-discovery "$HPCW_HOME/discover.json" "${HPCW_SITE:-$(hostname -s | tr -cd 'a-z0-9-')}" > "$PROFILE" || die "could not seed a profile from discovery"; say "profile.json seeded from discovery: edit partition_cpu, image_store, claude_bin, then run hpcworker probe"; fi
   fi
-  [ -s "$PROFILE" ] && { prof_py validate "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
+  [ -s "$PROFILE" ] && { hpcw_prof_awk check "$PROFILE" || say "fix the profile before starting a worker: hpcworker profile set KEY VALUE"; }
   return 0
 }
 # Two spellings of one shared copy: the same last name (current) under one physical parent. A lab that
@@ -432,7 +494,7 @@ install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as befor
   # a link where the command goes is moved aside first: a copy onto it would write through it
   [ -L "$HPCW_HOME/bin/hpcworker" ] && { move_aside bin/hpcworker || die "could not move the link $HPCW_HOME/bin/hpcworker aside"; }
   if ! same_dir "$SRC_ROOT" "$HPCW_HOME"; then
-    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
+    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/profile.awk" "$SRC_ROOT/lib/profile_sh.sh" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.sh" "$SRC_ROOT/lib/browser_key.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
       && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
     [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
     # copied from a shared copy (read-only there), the files would stay read-only and the next install or upload could not replace them
@@ -440,7 +502,7 @@ install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as befor
     [ -f "$HPCW_HOME/README.md" ] && chmod u+w "$HPCW_HOME/README.md"
   fi
   # files uploaded from a Windows checkout may carry CR line endings, which break bash and sbatch
-  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/*.py "$HPCW_HOME"/lib/*.sh "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
+  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/*.py "$HPCW_HOME"/lib/*.awk "$HPCW_HOME"/lib/*.sh "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
   chmod +x "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/jobs/*.sbatch 2>/dev/null
   # this home has its own copy now: a shared copy's marker is moved aside with the rest, so nothing takes it for the copy in use
   local left="$SHARED_DIR"
@@ -483,6 +545,8 @@ cmd_profile() {
     show) [ -s "$PROFILE" ] || die "no profile at $PROFILE"; prof_py show "$PROFILE";;
     path) echo "$PROFILE";;
     validate) [ -s "$PROFILE" ] || die "no profile at $PROFILE"; prof_py validate "$PROFILE";;
+    # validate's verdict with no python3 (lib/profile.awk): the one the login node uses
+    check) local pf="${1:-$PROFILE}"; [ -s "$pf" ] || die "no profile at $pf"; hpcw_prof_awk check "$pf";;
     set) [ $# -ge 2 ] || die "profile set KEY VALUE"; prof_py set "$PROFILE" "$1" "$2";;
     schema) prof_py schema;;
     *) die "profile: show|path|validate|set KEY VALUE|schema";;
@@ -563,7 +627,7 @@ cmd_probe() {
 # ---- worker: start/stop submit and cancel once; status/list/log read files ---------------------------
 run_dir() { echo "$STATE_DIR/$1"; }
 # The workspace guide: CLAUDE.md in the worker's folder, which Claude Code reads at the start of each
-# session there. jobs/workspace-guide.md.tpl filled from the profile (lib/profile.py guide): what the
+# session there. jobs/workspace-guide.md.tpl filled from the profile (hpcw_guide, lib/profile_sh.sh): what the
 # machine is, how to run work, where data lives, how results go back, what never goes in. Written
 # only when the folder has no CLAUDE.md: a file already there, edited or left empty on purpose, is
 # never replaced, and the write itself refuses an existing name (noclobber opens it with O_EXCL), so
@@ -573,7 +637,7 @@ write_workspace_guide() { # WORKSPACE RUN -> written | kept | skipped: <why>
   local f="$1/CLAUDE.md" text
   if [ -e "$f" ] || [ -L "$f" ]; then echo kept; return 0; fi
   [ -s "$GUIDE_TPL" ] || { echo "skipped: no template at $GUIDE_TPL"; return 0; }
-  text=$(prof_py guide "$GUIDE_TPL" "$PROFILE" RUN="$2" 2>&1) || { echo "skipped: $(printf '%s' "$text" | tail -1)"; return 0; }
+  text=$(hpcw_guide "$GUIDE_TPL" RUN="$2" 2>&1) || { echo "skipped: $(printf '%s' "$text" | tail -1)"; return 0; }
   if ( set -C; printf '%s\n' "$text" > "$f" ) 2>/dev/null; then echo written
   elif [ -e "$f" ] || [ -L "$f" ]; then echo kept
   else echo "skipped: $1 is not writable"; fi
@@ -663,16 +727,23 @@ write_queued_status() { # RUN_DIR NAME JOB CHAIN(0|1): the queued file, right af
     "$([ "$chain" = 1 ] && echo true || echo false)" "$consent" "$(json_str "$src")" > "$tmp" && mv -f "$tmp" "$rd/status.json"
 }
 SCHED_JSON=null
-status_refresh() { # RUN_DIR: while the run is in line (status.json "queued", or none yet, and no node file), ONE scheduler call for its job.
+status_refresh() { # RUN_DIR [FLOOR_S]: while the run is in line (status.json "queued", or none yet, and no node file), ONE scheduler call for its job.
   # A job in line: its fields go into the queued file (got_computer_at too once Slurm says RUNNING). A job
   # the scheduler no longer lists: the request ended before it started (state error). A scheduler that
   # could not be asked: nothing is changed or said. SCHED_JSON: what was learned, or null.
-  local rd="$1" sj="$1/status.json" jid line tstate reason start node now exp="" norm gca
+  # FLOOR_S (framework 11; the gate passes 60): nothing is asked when the queued file says the scheduler
+  # was asked less than FLOOR_S seconds ago, by this command or any other (a copied key that calls status
+  # in a loop, or two watches, still make one squeue a minute)
+  local rd="$1" floor="${2:-0}" sj="$1/status.json" jid line tstate reason start node now exp="" norm gca ca ce
   SCHED_JSON=null
   jid=$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)
   [ -n "$jid" ] && [ ! -e "$rd/node" ] || return 0
   if [ -s "$sj" ]; then
     [ "$(read_field "$sj" state)" = queued ] && [ "$(read_field "$sj" job)" = "$jid" ] || return 0
+    if [[ "$floor" =~ ^[0-9]+$ ]] && [ "$floor" -gt 0 ]; then
+      ca=$(read_field "$sj" checked_at); ce=$(hpcw_iso_epoch "$ca")
+      [ -n "$ce" ] && [ $(( $(date +%s) - ce )) -lt "$floor" ] && return 0
+    fi
   fi
   line=$(adapter_status_one "$jid" '%T|%r|%S|%N') || return 0
   now=$(hpcw_now_iso)
@@ -774,6 +845,78 @@ watch_run() { # RUN_DIR NAME MINUTES SEEN [ASKED_AT]: follow a worker until it i
     sleep "${HPCW_WATCH_POLL_S:-5}"
   done
 }
+status_json() { # RUN_DIR NAME PREFIX: `worker status --json`'s one line (v 1, framework 10; framework 9's run, job,
+  # next_job, status and connection kept as they were), with PREFIX (framework 11's watch: its event and final) after "v":1,
+  local rd="$1" name="$2" sj="$1/status.json" cj="$1/connection.json"
+  printf '{"v":1,%s"run":%s,"job":%s,"next_job":%s,"state_dir":%s,"status":%s,"connection":%s,"scheduler":%s,"line":%s}\n' "$3" "$(json_str "$name")" "$(json_str "$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" \
+    "$(json_str "$STATE_DIR")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)" "$SCHED_JSON" "$(json_str "$(status_line "$rd")")"
+}
+WATCH_KEYS="state needs job node environment_url message scheduler_state reason expected_start next_job stop_reason"
+WSIG=""; WSTATE=""
+watch_sig() { # RUN_DIR -> WSIG, the fields whose change is worth a line, joined, and WSTATE, the state (bash
+  # builtins only, no process started: this runs every 5 s for as long as the watch lasts)
+  local t="" k re
+  WSIG=""; WSTATE=""
+  [ -f "$1/status.json" ] && { IFS= read -r -d '' t < "$1/status.json" || true; }
+  for k in $WATCH_KEYS; do
+    re="\"$k\": *\"([^\"]*)\""
+    if [[ "$t" =~ $re ]]; then WSIG="$WSIG|${BASH_REMATCH[1]}"
+    else re="\"$k\": *([^,} ]*)"; if [[ "$t" =~ $re ]]; then WSIG="$WSIG|${BASH_REMATCH[1]}"; else WSIG="$WSIG|"; fi; fi
+    [ "$k" = state ] && WSTATE="${WSIG#|}"
+  done
+  return 0
+}
+watch_json() { # RUN_DIR NAME MINUTES FLOOR_S: framework 11, `worker watch --json` (the browser key's gate runs it)
+  # One JSON line each time the worker's state, what it needs, its job, node, link or message, or the
+  # scheduler's word on it changes, and once at the start and at the end:
+  #   {"v":1,"event":"status","final":false|true, then the fields of `worker status --json`}
+  # and when 20 s pass with nothing written: {"v":1,"event":"keepalive","at":"<UTC>"}. status.json is read
+  # every 5 s (files only); the scheduler is asked at most once a minute, only while the worker is in line,
+  # and with FLOOR_S not within FLOOR_S s of anyone's last ask. Ends with final true and exit 0 online (with
+  # its link), 1 stopped, error, or ended with no successor, 2 out of time. Waiting for the Claude sign-in
+  # is a change like any other and the watch goes on (the gate never signs in; a sign-in made elsewhere
+  # brings the worker online). A line that cannot be written (the reader went away) ends it at once, and so
+  # does a hang-up; a gate's watch slot (HPCW_GATE_SLOT) is given back either way.
+  local rd="$1" name="$2" mins="$3" floor="${4:-0}" deadline now st sig last_sig="" fin code url last_sched=-100000
+  local ka="${HPCW_WATCH_KEEPALIVE_S:-20}" poll="${HPCW_WATCH_POLL_S:-5}" last_out w
+  [[ "$mins" =~ ^[0-9]+$ ]] || mins=30
+  [[ "$ka" =~ ^[0-9]+$ ]] && [ "$ka" -ge 1 ] || ka=20
+  [[ "$poll" =~ ^[0-9]+$ ]] && [ "$poll" -ge 1 ] || poll=5
+  if [ -n "${HPCW_GATE_SLOT:-}" ]; then trap 'rmdir "$HPCW_GATE_SLOT" 2>/dev/null' EXIT; fi
+  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE
+  # the shell's own clock (SECONDS): nothing is started to read the time while the watch waits
+  deadline=$(( SECONDS + mins * 60 ))
+  SCHED_JSON=null
+  last_out=$SECONDS
+  while :; do
+    now=$SECONDS
+    watch_sig "$rd"; st="$WSTATE"
+    if { [ "$st" = queued ] || [ -z "$st" ]; } && [ $(( now - last_sched )) -ge 60 ]; then
+      status_refresh "$rd" "$floor"; last_sched=$now
+      watch_sig "$rd"; st="$WSTATE"
+    fi
+    sig="$WSIG"
+    fin=""; code=""
+    case "$st" in
+      online) url=$(read_field "$rd/status.json" environment_url); [ -n "$url" ] && { fin=true; code=0; };;
+      stopped|error) fin=true; code=1;;
+      preempted) [ -z "$(read_field "$rd/status.json" next_job)" ] && [ -z "$(next_job_of "$rd")" ] && { fin=true; code=1; };;
+    esac
+    [ -z "$fin" ] && [ "$now" -ge "$deadline" ] && { fin=true; code=2; }
+    if [ -n "$fin" ] || [ "$sig" != "$last_sig" ]; then
+      status_json "$rd" "$name" "\"event\":\"status\",\"final\":${fin:-false}," || exit 141
+      last_sig="$sig"; last_out=$SECONDS
+    fi
+    [ -n "$fin" ] && return "$code"
+    if [ $(( SECONDS - last_out )) -ge "$ka" ]; then
+      printf '{"v":1,"event":"keepalive","at":"%s"}\n' "$(hpcw_now_iso)" || exit 141
+      last_out=$SECONDS
+    fi
+    # the next look: in POLL seconds, or sooner when a keepalive falls due before then
+    w=$(( ka - (SECONDS - last_out) )); [ "$w" -gt "$poll" ] && w=$poll; [ "$w" -lt 1 ] && w=1
+    sleep "$w"
+  done
+}
 read_field() { # FILE KEY -> string value (python-free; strings and simple scalars)
   [ -s "$1" ] || return 1
   tr -d '\n' < "$1" | grep -o "\"$2\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$2\": *//" -e 's/^"//' -e 's/"$//'
@@ -794,11 +937,14 @@ start_lock() { # RUN_DIR -> 0 when this process holds the lock
 }
 start_unlock() { rm -f "$1/.start.lock/pid" 2>/dev/null; rmdir "$1/.start.lock" 2>/dev/null; return 0; }
 cmd_worker() {
+  # a gate's watch slot is given back however this ends (a missing profile or run dies before watch_json)
+  if [ -n "${HPCW_GATE_SLOT:-}" ]; then trap 'rmdir "$HPCW_GATE_SLOT" 2>/dev/null' EXIT; fi
   load_profile
   local sub="${1:-list}"; shift || true
   local name="worker" hours="$P_worker_defaults_hours" cpus="$P_worker_defaults_cpus" mem="$P_worker_defaults_mem" part="" qos="" pm="$P_worker_defaults_permission_mode" cap="$P_worker_defaults_capacity" as_json=0 lines=60 requeue="" chain=1
-  local wait_min=0 details=0 minutes=30
+  local wait_min=0 details=0 minutes=30 floor=0
   while [ $# -gt 0 ]; do case "$1" in
+    --poll-floor) floor="${2:-}"; [[ "$floor" =~ ^[0-9]{1,5}$ ]] || die "--poll-floor must be a whole number of seconds"; shift 2;;
     --name) name="$2"; shift 2;; --hours) hours="$2"; shift 2;; --cpus) cpus="$2"; shift 2;; --mem) mem="$2"; shift 2;;
     --partition) part="$2"; shift 2;; --qos) qos="$2"; shift 2;; --permission-mode) pm="$2"; shift 2;; --capacity) cap="$2"; shift 2;;
     --requeue) requeue=1; shift;; --no-requeue) requeue=0; shift;; --no-chain) chain=0; shift;; --chain) chain=1; shift;; --json) as_json=1; shift;; --lines) lines="$2"; shift 2;;
@@ -863,12 +1009,16 @@ EOT
       # numbered directory, so a chain keeps the version it started on until the next worker start
       local kv=(RUN="$name" HOURS="$hours" CPUS="$cpus" MEM="$mem" PERMISSION_MODE="$pm" CAPACITY="$cap" HPCW_HOME="$HPCW_HOME" HPCW_CODE="$SRC_ROOT" CHAIN="$chain")
       [ -n "$part" ] && kv+=(PARTITION="$part"); [ -n "$qos" ] && kv+=(QOS="$qos"); [ -n "$requeue" ] && kv+=(REQUEUE="$requeue")
-      prof_py render "$JOBS/worker.sbatch.tpl" "$PROFILE" "${kv[@]}" > "$rd/job.sbatch.part.$$" || { rm -f "$rd/job.sbatch.part.$$"; start_unlock "$rd"; die "could not render the job (see the message above)"; }
+      # framework 11: filled by bash from the profile awk read (lib/profile_sh.sh), afresh at every start, as
+      # profile.py render filled it; a job.key an earlier framework 11 build left beside it is not read
+      hpcw_render "$JOBS/worker.sbatch.tpl" "${kv[@]}" > "$rd/job.sbatch.part.$$" || { rm -f "$rd/job.sbatch.part.$$"; start_unlock "$rd"; die "could not render the job (see the message above)"; }
       mv -f "$rd/job.sbatch.part.$$" "$rd/job.sbatch"
+      rm -f "$rd/job.key"
       printf '%s\n' "${kv[@]}" > "$rd/params"
       # framework 10: the node file names the job that has a computer, so the last job's goes before this one is asked for
       rm -f "$rd/node"
-      local out; out=$(cd "$rd" && adapter_submit "$rd/job.sbatch" -D "$rd" 2>&1) || {
+      # framework 11: the job starts with none of the gate's variables (it never signs in either way)
+      local out; out=$(unset HPCW_GATE HPCW_GATE_SLOT SSH_ORIGINAL_COMMAND; cd "$rd" && adapter_submit "$rd/job.sbatch" -D "$rd" 2>&1) || {
         start_unlock "$rd"
         [ "$CONNECT_MODE" = 1 ] && step_fail refused "$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')" 5
         die "the scheduler refused the job: $out"; }
@@ -888,6 +1038,7 @@ EOT
       stop_worker_run "$rd" "$name";;
     watch)
       [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
+      if [ $as_json = 1 ]; then watch_json "$rd" "$name" "$minutes" "$floor"; return $?; fi
       say "$(status_line "$rd")"
       watch_run "$rd" "$name" "$minutes" "$(log_lines "$rd")" 0; return $?;;
     restrict)
@@ -902,13 +1053,8 @@ EOT
       [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
       local sj="$rd/status.json" cj="$rd/connection.json"
       # framework 10: ONE scheduler call, only while the worker is in line (status.json says so, or has not been written yet)
-      status_refresh "$rd"
-      if [ $as_json = 1 ]; then
-        # v 1 (framework 10); framework 9's run, job, next_job, status and connection are kept as they were
-        printf '{"v":1,"run":%s,"job":%s,"next_job":%s,"state_dir":%s,"status":%s,"connection":%s,"scheduler":%s,"line":%s}\n' "$(json_str "$name")" "$(json_str "$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" \
-          "$(json_str "$STATE_DIR")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)" "$SCHED_JSON" "$(json_str "$(status_line "$rd")")"
-        return 0
-      fi
+      status_refresh "$rd" "$floor"
+      if [ $as_json = 1 ]; then status_json "$rd" "$name" ""; return 0; fi
       say "$(status_line "$rd")"
       if [ -s "$sj" ]; then
         local pst purl ptitle page; pst=$(read_field "$sj" state)
@@ -947,7 +1093,7 @@ EOT
     guide)
       # what write_workspace_guide would write for this worker, on stdout; nothing is written
       [ -s "$GUIDE_TPL" ] || die "no workspace guide template at $GUIDE_TPL"
-      prof_py guide "$GUIDE_TPL" "$PROFILE" RUN="$name";;
+      hpcw_guide "$GUIDE_TPL" RUN="$name";;
     *) die "worker: start|stop|status|watch|list|log|guide|restrict";;
   esac
 }
@@ -990,6 +1136,8 @@ in_job_exec() { # MODE [args]: inside an allocation, run claude inside the image
   local -a ce; mapfile -t ce < <(clean_env_args)
   case "$mode" in
     login|consent)
+      # framework 11: never a sign-in sitting through the browser key's gate (it cannot reach here; this is the backstop)
+      if hpcw_signin_barred; then echo "HPCW-LOGIN-FAILED: the Claude sign-in never runs through Beethoven's browser key"; return 3; fi
       # the student asked for a sign-in: Claude Code's own folder may be created for it (settings, not credentials)
       mkdir -p "$CCD" && chmod 700 "$CCD" 2>/dev/null
       if [ "$mode" = login ] && [ "${1:-}" = "--plain" ]; then
@@ -1020,6 +1168,7 @@ in_job_exec() { # MODE [args]: inside an allocation, run claude inside the image
 # Claude Code's terminal and is never echoed. A worker heartbeat younger than 15 min that already
 # says loggedIn answers without an allocation.
 plain_login() {
+  if hpcw_signin_barred; then say "HPCW-LOGIN-FAILED: the Claude sign-in never runs through Beethoven's browser key"; return 1; fi
   local self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
   local best="" bt=0 d m age
   for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; m=$(stat -c %Y "$d/status.json"); [ "$m" -gt "$bt" ] && { bt=$m; best="$d/status.json"; }; done
@@ -1032,8 +1181,10 @@ plain_login() {
     fi
   fi
   say "HPCW-LOGIN: requesting a compute node"
-  # a bounded wait for the node (the panel must get a sentence, never a hang); 20 min of wall time for a 10 min sitting
-  HPCW_ALLOC_WAIT_S=600 adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain
+  # a bounded wait for the node (the panel must get a sentence, never a hang); 20 min of wall time for a 10 min sitting.
+  # framework 11: no --pty for a caller with no terminal (Beethoven's plain ssh exec; the code arrives on standard input)
+  local pty=1; hpcw_have_terminal || pty=0
+  HPCW_ALLOC_WAIT_S=600 HPCW_ALLOC_PTY=$pty adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain
   plain_login_outcome $?
 }
 plain_login_outcome() { # the sitting's exit: 0 signed in; 3 it already printed its own failure line; anything else is the scheduler's
@@ -1048,20 +1199,74 @@ write_consent_marker() { # INSTALL_ID: ~/.hpcworker/consent = "yes <ISO-8601 UTC
   mkdir -p "$HPCW_HOME" 2>/dev/null || return 1
   ( umask 077; printf 'yes %s %s\n' "$(hpcw_now_iso)" "$1" > "$f.part" ) 2>/dev/null && chmod 600 "$f.part" 2>/dev/null && mv -f "$f.part" "$f" 2>/dev/null || { rm -f "$f.part"; return 1; }
 }
+site_of_this_copy() { # -> the one site profile of this copy whose shared_install is this very copy (awk only); nothing when none or several
+  local f s v run n=0 out=""
+  run=$(abs_dir "$(dirname "$SELF")/..") || return 0
+  for f in "$PROFILES"/*.json; do
+    [ -s "$f" ] || continue
+    v=$(prof_get "$f" shared_install 2>/dev/null) || continue
+    [ -n "$v" ] && same_dir "$v" "$run" || continue
+    s=$(prof_get "$f" site 2>/dev/null)
+    [ -n "$s" ] && [ "$f" = "$PROFILES/$s.json" ] && { out="$s"; n=$((n + 1)); }
+  done
+  [ "$n" = 1 ] && printf '%s' "$out"
+  return 0
+}
+claude_login_setup() { # SITE PLAIN(0|1): framework 11, the Claude sign-in for an account never set up. With no
+  # profile.json, the account is set up for the lab's shared copy the site profile names (SITE, else the one
+  # site profile of this copy that names this copy), as connect's first step does, without the ~/.bashrc
+  # block; then the sitting runs as for any account. 1 with one sentence ("HPCW-LOGIN-FAILED: ..." under
+  # --plain) when it cannot be
+  [ -s "$PROFILE" ] && return 0
+  local site="$1" plain="$2" want err rc
+  cls_fail() { if [ "$plain" = 1 ]; then say "HPCW-LOGIN-FAILED: $1"; else echo "hpcworker: $1" >&2; fi; return 1; }
+  [ -n "$site" ] || site=$(site_of_this_copy)
+  [ -n "$site" ] || { cls_fail "this account is not set up yet; name its site: hpcworker claude login --profile SITE"; return 1; }
+  [[ "$site" =~ ^[a-z0-9-]{1,32}$ ]] || { cls_fail "the site profile name must be lower-case letters, digits or -"; return 1; }
+  want=$(shared_default "$site"); want="${want%/}"
+  [ -n "$want" ] || { cls_fail "the site profile names no shared copy and this account is not set up (hpcworker install --profile $site)"; return 1; }
+  err=$( ( CONNECT_MODE=0; install_shared "$want" "$site" 0 0 ) 2>&1 >/dev/null ); rc=$?
+  if [ $rc != 0 ] || [ ! -s "$PROFILE" ]; then
+    err=$(printf '%s\n' "$err" | grep -v '^[[:space:]]*$' | tail -1); err="${err#hpcworker: }"
+    [ -n "$err" ] || err="this account could not be set up for the copy of the lab"
+    cls_fail "$err"; return 1
+  fi
+  SHARED_DIR=""; [ -s "$HPCW_HOME/shared" ] && { IFS= read -r SHARED_DIR < "$HPCW_HOME/shared" || true; }
+  if [ "$plain" = 1 ]; then say "HPCW-LOGIN: this account is set up for the lab's copy at $want"; else say "This account is now set up for the lab's copy at $want."; fi
+  return 0
+}
 cmd_claude() {
   # framework 10: the Remote Control answer from the extension, no question asked and no profile needed
   if [ "${1:-}" = consent ] && [ "${2:-}" = --record ]; then
+    # framework 11: not through the browser key's gate (no gate verb reaches it; connect records the answer itself)
+    hpcw_under_gate && die "the Remote Control answer is recorded by connect, never by this verb through Beethoven's browser key"
     [[ "${3:-}" =~ ^[0-9a-f]{32}$ ]] || { echo "hpcworker: claude consent --record needs this installation's 32-character id" >&2; exit 2; }
     write_consent_marker "$3" || die "could not write $HPCW_HOME/consent"
     say "recorded in $HPCW_HOME/consent (fallback marker): your workers may now host Remote Control"
     return 0
   fi
-  load_profile
   local sub="${1:-status}"; shift || true
+  # framework 11: `claude login [--plain] [--profile SITE]`; never through the browser key's gate; an
+  # account that was never set up is set up for the lab's shared copy first (connect's setup)
+  local plain=0 lsite=""
+  if [ "$sub" = login ] || [ "$sub" = consent ]; then
+    if [ "$sub" = login ]; then
+      while [ $# -gt 0 ]; do case "$1" in
+        --plain) plain=1; shift;;
+        --profile) [ $# -ge 2 ] || die "claude login: --profile needs a site name"; lsite="$2"; shift 2;;
+        *) die "claude login: unknown option $1";; esac; done
+    fi
+    if hpcw_signin_barred; then
+      [ $plain = 1 ] && { say "HPCW-LOGIN-FAILED: the Claude sign-in never runs through Beethoven's browser key"; return 1; }
+      die "the Claude sign-in never runs through Beethoven's browser key"
+    fi
+    if [ "$sub" = login ]; then claude_login_setup "$lsite" "$plain" || return 1; fi
+  fi
+  load_profile
   local self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
   case "$sub" in
     login)
-      if [ "${1:-}" = "--plain" ]; then plain_login; return $?; fi
+      if [ $plain = 1 ]; then plain_login; return $?; fi
       cat <<'EOT'
 Sign in to Claude on the cluster, in one sitting.
 
@@ -1181,7 +1386,8 @@ connect_last_login() { # -> "LOGGEDIN|EMAIL|PLAN" from the newest status.json of
 }
 one_token() { local v="${1:-}"; v="${v//[[:space:]]/}"; printf '%s' "${v:--}"; }   # an e-mail or a plan as one field, "-" when Claude Code did not say
 connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, relayed whole; ends with signed-in, or fails with its code
-  local fresh="$1" t0="$2" self sum rc signed failed ka="${HPCW_KEEPALIVE_S:-20}" tty_saved="" em pl
+  local fresh="$1" t0="$2" self sum rc signed failed ka="${HPCW_KEEPALIVE_S:-20}" tty_saved="" em pl pty=1
+  hpcw_signin_barred && step_fail other "the Claude sign-in never runs through Beethoven's browser key" 1
   self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
   [[ "$ka" =~ ^[0-9]+$ ]] && [ "$ka" -ge 1 ] || ka=20
   [ -r "$LIB/relay.sh" ] || die "lib/relay.sh is missing from this copy of hpcworker"
@@ -1190,8 +1396,10 @@ connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, rel
   mkdir -p "$HPCW_HOME/log" 2>/dev/null && chmod 700 "$HPCW_HOME/log" 2>/dev/null
   sum="$HPCW_HOME/log/connect.$$.outcome"; rm -f "$sum"
   # the code the student pastes travels from this terminal to the sitting and is never shown: echo
-  # off here as well as in the sitting, whatever srun makes of --pty with its output going to a pipe
-  if hpcw_have_terminal; then tty_saved=$(stty -g 2>/dev/null); stty -echo 2>/dev/null; fi
+  # off here as well as in the sitting, whatever srun makes of --pty with its output going to a pipe.
+  # framework 11: with no terminal here (Beethoven's plain ssh exec), srun gets no --pty either: the code
+  # then travels on a pipe from this standard input to the sitting's, where nothing echoes it
+  if hpcw_have_terminal; then tty_saved=$(stty -g 2>/dev/null); stty -echo 2>/dev/null; else pty=0; fi
   local -a extra=(--keepalive "$ka" --deadline "$(( t0 + CONNECT_BUDGET_S ))"); [ "$fresh" = fresh ] && extra+=(--fresh)
   # one writer: srun's output and its own messages go to the relay, which writes whole lines and the
   # keepalive; beside srun, the relay's ticker writes its once-a-second tick into the same pipe (never
@@ -1205,7 +1413,7 @@ connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, rel
     BASH_ENV= "${BASH:-bash}" "$LIB/relay.sh" --ticks "$side" 2>/dev/null &
     tk=$!
     trap 'kill "$tk" 2>/dev/null' EXIT
-    HPCW_ALLOC_WAIT_S=600 adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain "${extra[@]}" 2>&1
+    HPCW_ALLOC_WAIT_S=600 HPCW_ALLOC_PTY=$pty adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain "${extra[@]}" 2>&1
     src=$?
     kill "$tk" 2>/dev/null
     exit "$src"
@@ -1248,6 +1456,8 @@ cmd_connect() {
   [ -z "$cid" ] || [[ "$cid" =~ ^[0-9a-f]{32}$ ]] || connect_usage "--consent needs this installation's 32-character id"
   case "$login" in auto|always|fresh|never) ;; *) connect_usage "--login must be auto, always, fresh or never";; esac
   case "$pm" in ""|default|acceptEdits|plan) ;; *) connect_usage "--permission-mode must be default, acceptEdits or plan";; esac
+  # framework 11: through the browser key's gate there is never a Claude sign-in, whatever the line said
+  hpcw_signin_barred && login=never
   # 2. the account
   connect_setup "$site"
   load_profile
@@ -1510,18 +1720,34 @@ diag_slurm_in_worker() { # Slurm inside the worker's container (framework 9): wh
     esac; fi
   else emit hpcw.slurm-in-worker true false true "off in the site profile (scheduler_in_worker)"; fi
 }
+diag_browser_key() { # framework 11: the browser key's line (its date and the copy it runs, never the key), and that copy's folders
+  declare -F bk_copy_problems >/dev/null || { emit hpcw.browser-key false false false "lib/browser_key.sh is missing from this copy"; return 0; }
+  local ak="$HOME/.ssh/authorized_keys" line root probs bad above
+  line=$(grep -a -E -- "$BK_LINE_RE" "$ak" 2>/dev/null | tail -1)
+  if [ -n "$line" ]; then
+    root="${line#restrict,command=\"}"; root="${root%%/bin/hpcworker gate\"*}"
+    emit hpcw.browser-key true false false "Beethoven's browser key was added ${line##* } (UTC); its only command is $root/bin/hpcworker gate"
+  else emit hpcw.browser-key true false true "no browser key of Beethoven's in ~/.ssh/authorized_keys"; fi
+  if ! root=$(bk_line_root); then emit hpcw.key-copy false false false "a key's command must run from the lab's copy at ${root:-the folder the site profile names}, not from $(bk_root_run)"; return 0; fi
+  if ! probs=$(bk_copy_problems "$root"); then emit hpcw.key-copy false false false "$root could not be read"; return 0; fi
+  bad=$(printf '%s\n' "$probs" | sed -n 's/^copy //p' | tr '\n' ' '); above=$(printf '%s\n' "$probs" | sed -n 's/^above //p' | tr '\n' ' ')
+  if [ -n "$bad" ]; then emit hpcw.key-copy false false false "others than its owner may change $bad in $root: browser-key add refuses"
+  elif [ -n "$above" ]; then emit hpcw.key-copy false false false "others may rename things in ${above}above $root: browser-key add refuses until its owner runs chmod +t or chmod go-w on it (browser-key check)"
+  else emit hpcw.key-copy true false false "$root and every folder above it can be changed by their owners alone"; fi
+}
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
-  local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/relay.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
+  local miss="" f; for f in bin/hpcworker lib/profile.py lib/profile.awk lib/profile_sh.sh lib/login_plain.sh lib/relay.sh lib/browser_key.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
   grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/*.sh "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
   if [ -n "$miss" ]; then emit hpcw.scripts false false false "missing or damaged:$miss"
   elif shared_mode && ! is_launcher "$HPCW_HOME/bin/hpcworker"; then emit hpcw.scripts true true false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); $HPCW_HOME/bin/hpcworker is not its launcher: hpcworker install"
   elif shared_mode; then emit hpcw.scripts true false false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); profile and log in $HPCW_HOME"
   else emit hpcw.scripts true false false "hpcworker $VERSION in $SRC_ROOT"; fi
-  if [ -n "$PY" ]; then emit hpcw.python3 true false false "$PY ($("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null))"; else emit hpcw.python3 false false false "no python3 on this node; the system package is enough"; fi
+  # framework 11: python3 is found, never run (warrior's banner bans it); only `profile show|set|validate` and discover's seed use it
+  if [ -n "$PY" ]; then emit hpcw.python3 true false false "$PY (for profile show, set and validate at a terminal; no verb Beethoven types runs it)"; else emit hpcw.python3 true false true "no python3 on this node: profile show, set and validate need it, nothing else does"; fi
   if [ ! -s "$PROFILE" ]; then emit hpcw.profile false false false "no profile at $PROFILE (hpcworker install --profile NAME or --discover)"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
-  local v; if v=$(prof_py validate "$PROFILE" 2>&1); then emit hpcw.profile true false false "$v"; else emit hpcw.profile false false false "$(echo "$v" | tr '\n' ' ')"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
+  local v; if v=$(hpcw_prof_awk check "$PROFILE" 2>&1); then emit hpcw.profile true false false "$v"; else emit hpcw.profile false false false "$(echo "$v" | tr '\n' ' ')"; [ $DIAG_JSON = 1 ] && echo ']}'; return 1; fi
   load_profile
   local fam; fam=$(hpcw_detect_scheduler || true)
   if [ "$fam" = "$P_scheduler" ]; then emit hpcw.scheduler true false false "$fam client present"; else emit hpcw.scheduler false false false "profile says $P_scheduler, this node shows '$fam'"; fi
@@ -1559,6 +1785,7 @@ cmd_diag() {
     else emit hpcw.probe true "$([ "$age" -gt 30 ] && echo true || echo false)" false "probe ${age}d old on $(read_field "$pj" hostname): egress $eg, claude $(read_field "$pj" claude_version), loggedIn=$li, tmux=$(tr -d '\n' < "$pj" | grep -o '"tmux": *{[^}]*}' | grep -o '"present": *\(true\|false\)' | grep -o 'true\|false'), sbatch on node=$(read_field "$pj" sbatch_on_node)"; fi
   else emit hpcw.probe false true false "no probe yet: hpcworker probe (up to ten minutes on a compute node)"; fi
   diag_slurm_in_worker
+  diag_browser_key
   local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
     local st age nid; st=$(read_field "$d/status.json" state); age=$(( $(date +%s) - $(stat -c %Y "$d/status.json") )); nid=$(next_job_of "$d")
     case "$st" in
@@ -1585,6 +1812,9 @@ case "${1:-help}" in
   worker) shift; cmd_worker "$@";;
   connect) shift; cmd_connect "$@";;
   login-setup) shift; cmd_login_setup "$@";;
+  browser-key) shift; declare -F cmd_browser_key >/dev/null || die "lib/browser_key.sh is missing from this copy (hpcworker install)"; cmd_browser_key "$@";;
+  # the forced command: a copy without the gate refuses everything, as the gate itself would
+  gate) shift; declare -F cmd_gate >/dev/null || { echo "HPCW-GATE refused"; exit 126; }; cmd_gate "$@";;
   claude) shift; cmd_claude "$@";;
   diag) shift; cmd_diag "$@";;
   _exec) shift; in_job_exec "$@";;

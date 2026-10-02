@@ -112,9 +112,13 @@ adapter_attach() { # ID -> a shell inside the running job (sites may forbid --ov
 }
 
 adapter_interactive() { # PART QOS TIME NAME MEM -- CMD... : a short allocation with a terminal, for the student's own sign-in
-  # HPCW_ALLOC_WAIT_S, when set, bounds the wait for a node (the panel's sitting must fail in words, not hang)
-  local part="$1" qos="$2" time="$3" name="$4" mem="$5"; shift 5; [ "${1:-}" = "--" ] && shift
-  srun -p "$part" ${qos:+-q "$qos"} -t "$time" -N1 -n1 --mem="$mem" -J "$name" ${HPCW_ALLOC_WAIT_S:+-I"$HPCW_ALLOC_WAIT_S"} --pty "$@"
+  # HPCW_ALLOC_WAIT_S, when set, bounds the wait for a node (the panel's sitting must fail in words, not hang).
+  # HPCW_ALLOC_PTY=0 (framework 11): no --pty, for a caller with no terminal of its own (Beethoven's plain
+  # ssh exec): standard input is then a pipe all the way to the command, which reads the code from it, and
+  # no remote terminal can echo it back (the sitting's own `script` gives Claude Code its terminal)
+  local part="$1" qos="$2" time="$3" name="$4" mem="$5" pty=--pty; shift 5; [ "${1:-}" = "--" ] && shift
+  [ "${HPCW_ALLOC_PTY:-1}" = 0 ] && pty=""
+  srun -p "$part" ${qos:+-q "$qos"} -t "$time" -N1 -n1 --mem="$mem" -J "$name" ${HPCW_ALLOC_WAIT_S:+-I"$HPCW_ALLOC_WAIT_S"} $pty "$@"
 }
 
 adapter_run_short() { # PART QOS TIME NAME MEM -- CMD... : the same without a terminal (status checks)

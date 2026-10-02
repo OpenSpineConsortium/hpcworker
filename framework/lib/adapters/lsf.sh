@@ -51,8 +51,9 @@ adapter_attach() { # LSF has no attach primitive; ssh to the node is what sites 
 }
 
 adapter_interactive() { # PART QOS TIME NAME MEM -- CMD... (bsub -Is: interactive with a pseudo-terminal)
-  local part="$1" qos="$2" time="$3" name="$4" mem="$5"; shift 5; [ "${1:-}" = "--" ] && shift
-  bsub -Is -q "$part" -J "$name" -W "$time" -n 1 -M "${mem%[GgMm]*}000" "$@"
+  local part="$1" qos="$2" time="$3" name="$4" mem="$5" mode=-Is; shift 5; [ "${1:-}" = "--" ] && shift
+  [ "${HPCW_ALLOC_PTY:-1}" = 0 ] && mode=-I   # framework 11: no pseudo-terminal for a caller without one (documented form, not run)
+  bsub "$mode" -q "$part" -J "$name" -W "$time" -n 1 -M "${mem%[GgMm]*}000" "$@"
 }
 
 adapter_run_short() { # bsub -I: interactive without a terminal
