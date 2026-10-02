@@ -129,8 +129,9 @@ bk_dir_ok() { # DIR -> 0 when only its owner may add, rename or remove entries i
   [ $(( 8#$m & 8#022 )) = 0 ]
 }
 BK_WHY=""; BK_REAL=""
-bk_walk() { # PATH: the directories a lookup of PATH reads, from /, links followed (40 at most); BK_WHY the
-  # first one others may change ("" when none), BK_REAL the physical path; 1 when PATH cannot be walked
+bk_walk() { # PATH: the directories a lookup of PATH reads, from /, links followed (40 at most); BK_WHY every
+  # one others may change, one per line, in walking order ("" when none), BK_REAL the physical path; 1 when
+  # PATH cannot be walked
   local rest="$1" cur=/ c t hops=0 p
   BK_WHY=""; BK_REAL=""
   case "$rest" in /*) ;; *) return 1;; esac
@@ -139,7 +140,8 @@ bk_walk() { # PATH: the directories a lookup of PATH reads, from /, links follow
     [ -n "$rest" ] || break
     c="${rest%%/*}"; if [ "${rest#*/}" != "$rest" ]; then rest="${rest#*/}"; else rest=""; fi
     case "$c" in .) continue;; ..) [ "$cur" = / ] || { cur="${cur%/*}"; [ -n "$cur" ] || cur=/; }; continue;; esac
-    [ -n "$BK_WHY" ] || bk_dir_ok "$cur" || BK_WHY="$cur"
+    bk_dir_ok "$cur" || case "$BK_WHY" in *"$cur"*) ;; *) BK_WHY="${BK_WHY:+$BK_WHY
+}$cur";; esac
     if [ "$cur" = / ]; then p="/$c"; else p="$cur/$c"; fi
     if [ -L "$p" ]; then
       hops=$((hops + 1)); [ $hops -le 40 ] || return 1
@@ -154,14 +156,25 @@ bk_walk() { # PATH: the directories a lookup of PATH reads, from /, links follow
   return 0
 }
 bk_copy_problems() { # ROOT -> one line per thing others than the copy's owner may change: "copy <path>" or
-  # "above <path>" (both refused); nothing when there is none. 1 when the copy cannot be read at all
-  local root="${1%/}" real owner holder hr d f m o n=0
+  # "above <path>" (both refused), or "beyond <path> <uid>" (a folder above the copy that someone other than the
+  # copy's owner or root... see below; reported, not refused); nothing when there is none. 1 when the copy
+  # cannot be read at all.
+  # Why "beyond" is not refused (2026-10-02): at Wayne State the lab's volume sits under CephFS scaffold
+  # folders owned by root or by another lab's user and writable by everyone with no sticky bit. The lab
+  # cannot change them; only the university can. The lab's shared code runs from under them in every
+  # version of this tool, with or without a key, so refusing every student's key over them would protect
+  # nobody. They are reported so that the lab lead can ask the university to set the sticky bit.
+  local root="${1%/}" real owner holder hr d f m o n=0 w wo
   local -a list=()
   bk_msys && return 0   # a Windows checkout has no POSIX modes to judge
   bk_walk "$root" || return 1
   real="$BK_REAL"; [ -d "$real" ] || return 1
   owner=$(stat -c %u "$real" 2>/dev/null) || return 1
-  [ -n "$BK_WHY" ] && printf 'above %s\n' "$BK_WHY"
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    wo=$(stat -c %u "$w" 2>/dev/null) || wo=""
+    if [ "$wo" = "$owner" ]; then printf 'above %s\n' "$w"; else printf 'beyond %s %s\n' "$w" "${wo:-?}"; fi
+  done <<< "$BK_WHY"
   # the folder the copy is named in: with a `current` link, the one that holds it
   holder=$(dirname "$root"); hr=$(cd "$holder" 2>/dev/null && pwd -P) || return 1
   for d in "$hr" "$real" "$real/bin" "$real/lib" "$real/lib/adapters" "$real/jobs" "$real/profiles"; do
@@ -320,10 +333,11 @@ cmd_browser_key() {
         case "$l" in
           copy\ *) echo "copy: others than its owner may change ${l#copy }"; refused=1;;
           above\ *) echo "above the copy: others than its owner may rename things in ${l#above } (chmod +t or chmod go-w on it, by its owner)"; refused=1;;
+          beyond\ *) set -- ${l#beyond }; echo "note for the university: $1 (owner uid ${2:-?}) is writable by others and not sticky; it is above the lab's own folders, so the lab cannot change it (ask for chmod +t). Keys are not refused for it.";;
         esac
       done <<< "$probs"
       if [ $refused = 1 ]; then echo "HPCW-KEY check refused $root"; exit 8; fi
-      echo "HPCW-KEY check ok $root"; exit 0;;
+      case "$probs" in *beyond*) echo "HPCW-KEY check ok $root (with notes for the university above)";; *) echo "HPCW-KEY check ok $root";; esac; exit 0;;
     *) echo "hpcworker: browser-key add TYPE KEY [COMMENT|SHA256:CHECK] | browser-key remove | browser-key check" >&2; exit 2;;
   esac
 }

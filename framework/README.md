@@ -15,6 +15,9 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**Folders above the copy (framework 12).** A folder above the lab's copy that others may change is refused only when the lab owns it (`chmod +t` on it fixes that). A folder above the lab's own folders that belongs to someone else, such as the CephFS scaffold folders at Wayne State that are owned by root or by another lab's user and are writable by everyone, is reported by `browser-key check` and by `diag` as a note for the university and does not refuse a key: the lab's shared code already runs from under those folders in every version, so refusing every student's key over them would protect nobody. Ask the university for `chmod +t` on them.
+
+
 Version 10 is the cluster side of Beethoven 11.0.0 (the wire contract is
 `../docs/V11_CONTRACT.md`): one line, `hpcworker connect`, sets the account up, records the Remote
 Control answer, starts the worker and signs in to Claude; a worker says it is `queued` the moment the

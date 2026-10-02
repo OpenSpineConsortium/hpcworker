@@ -60,7 +60,7 @@
 # through the gate, and the gate only removes that line (forget, or past the site's expiry). Nothing
 # reached through the gate ever starts a Claude sign-in. Versions are integers.
 set -uo pipefail
-VERSION=11
+VERSION=12
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -1733,7 +1733,11 @@ diag_browser_key() { # framework 11: the browser key's line (its date and the co
   bad=$(printf '%s\n' "$probs" | sed -n 's/^copy //p' | tr '\n' ' '); above=$(printf '%s\n' "$probs" | sed -n 's/^above //p' | tr '\n' ' ')
   if [ -n "$bad" ]; then emit hpcw.key-copy false false false "others than its owner may change $bad in $root: browser-key add refuses"
   elif [ -n "$above" ]; then emit hpcw.key-copy false false false "others may rename things in ${above}above $root: browser-key add refuses until its owner runs chmod +t or chmod go-w on it (browser-key check)"
-  else emit hpcw.key-copy true false false "$root and every folder above it can be changed by their owners alone"; fi
+  else
+    beyond=$(printf '%s\n' "$probs" | sed -n 's/^beyond //p' | tr '\n' ';')
+    if [ -n "$beyond" ]; then emit hpcw.key-copy true false false "$root and the lab's own folders above it can be changed by their owners alone; above the lab's folders, writable by others and not sticky (a note for the university, keys are not refused): $beyond"
+    else emit hpcw.key-copy true false false "$root and every folder above it can be changed by their owners alone"; fi
+  fi
 }
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1

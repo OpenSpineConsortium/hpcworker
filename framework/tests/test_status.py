@@ -436,7 +436,7 @@ class Framework9Compat(Base):
     def test_version_says_11(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "11")
+        self.assertEqual(G.CURRENT_VERSION, "12")
 
 
 if __name__ == "__main__":
