@@ -12,9 +12,11 @@ minutes; and `hpcworker login-setup` (unproven on the grid) is the one-time key 
 whose portal terminal asks for a password. Everything the 10.0.0 extension and a framework 9 worker
 use still works: see "Version 10 and what it keeps" below.
 
-The cluster-side half of Beethoven, the browser extension. Bash plus the system `python3`, nothing
-installed, nothing running on the login node except the one `sbatch`, `squeue` or `scancel` an
-action needs. Claude Code runs inside a container on a compute node and registers itself with
+The cluster-side half of Beethoven, the browser extension. Bash, coreutils, awk, sed and grep, and
+the system `python3` for a fraction of a second at a time to read the site profile; nothing
+installed; nothing running on the login node beyond the one `sbatch`, `squeue` or `scancel` an action
+needs and, for connect's sign-in, `srun` relayed by bash (see "The login node" below: warrior's banner
+bans `python3` among others). Claude Code runs inside a container on a compute node and registers itself with
 Anthropic over outbound HTTPS (Claude Code's Remote Control); the browser extension in
 `../extension/` only starts, watches and stops that job through your Open OnDemand portal.
 
@@ -264,8 +266,18 @@ sitting's own `HPCW-LOGIN-FAILED:` line; the worker keeps its place in line), `o
 anything that would have been an `hpcworker: ...` error becomes `failed other`.
 
 **One writer, and the keepalive.** The sitting's allocation (`srun`, its own messages too) runs into
-a pipe, and `lib/relay.py` copies it to the terminal one whole line at a time; when 20 s pass with
-nothing written and no part of a line waiting, it writes `HPCW-LOGIN: still waiting`. The sitting
+a pipe, and `lib/relay.sh` copies it to the terminal one whole line at a time; when 20 s pass with
+nothing written and no part of a line waiting, it writes `HPCW-LOGIN: still waiting` (at the first
+of its once-a-second ticks within half a second of the 20 s, so the gap is 19.5 to 20.5 s). A part of
+a line left waiting five seconds is written as a line of its own (at the fifth of the relay's ticks
+after the one that brought its last byte, 5 to 6 s after it). The relay is bash and nothing else
+(the first framework 10 build relayed with `python3`, which warrior bans), and it never reads with a
+timer: bash 4.2's `read -t` can drop what it had read of a line when the timer fires (bash 4.2.46
+built from source dropped the `SIGNED` of a split `SIGNED-IN` line). So it blocks in a plain `read`,
+and connect starts `relay.sh --ticks` beside srun, writing a 6-byte tick line into the same pipe once
+a second (coreutils `sleep 1` between ticks, the only program either half starts). When the portal's
+shell is cut, srun, the ticker and the relay are all in the terminal's process group and end with its
+SIGHUP; the ticker also stops when srun's side of the pipe has ended or the relay is gone. The sitting
 writes the same line itself, under connect only, while it waits for the link and for the code. The
 portal's shell closes a connection with no activity (Open OnDemand's default is 300 s), and the wait
 for the sign-in computer alone can be ten minutes. `claude login --plain`, which the 10.0.0 extension
@@ -495,8 +507,10 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
 
 ## What the framework enforces (cluster etiquette)
 
-- Nothing runs on the login node beyond one scheduler command per action. Every subcommand that
-  would run a container or Claude Code refuses to do so outside a job and says why. `discover` stays
+- Nothing runs on the login node beyond one scheduler command per action (and connect's sign-in
+  sitting, `srun` relayed by bash), and nothing on its banned list for longer than a moment (see "The
+  login node" below). Every subcommand that would run a container or Claude Code refuses to do so
+  outside a job and says why. `discover` stays
   under a second of CPU: the module list comes from a glob of `$MODULEPATH` (the authoritative
   `module avail`, 0.76 s of CPU on Wayne State's login node, and the QoS query run only with `--full`).
 - State is read from files the job writes (`status.json`, `connection.json`, `rc.log`) under the
@@ -535,6 +549,50 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
   `BEETHOVEN_REQUEST_ID` and kin, and their older `ASHLEY_` names) or without a terminal. No subcommand
   can remove `~/.beethoven` (or `~/.ashley`, its old name), the profile, or a Claude Code configuration
   directory.
+
+## The login node: what runs there, and the banned list
+
+warrior's banner (`/etc/motd`) reads: "The following programs are banned from running on warrior and
+will be terminated on sight: bedtools, conda, CONVERGE_Studio, fastq-dump, gcc, gfortran g++, icc,
+ifort, lsdyna, make, md5sum, namd2, namd3, node, pip, python, python2, python3, python-notebook, R,
+rsync, zellij". What each line the extension types runs there (measured against the fake scheduler
+under WSL by `tests/test_login_node.py`, which puts a stand-in for every banned name first on PATH and
+fails if one is looked for; every program not named below is coreutils, `grep`, `sed` or `awk`,
+running for milliseconds):
+
+| line | python3 (`lib/profile.py`) | longer than a moment |
+|---|---|---|
+| `install --shared` | `validate`, once | nothing |
+| `claude consent --record` | none | nothing |
+| `connect` | `shellenv` once; `render` when it submits; `guide` for a new workspace | the sitting: `srun` (up to 600 s for a computer, 840 s in all), the relay (bash builtins) and its ticker (bash, `sleep 1` a second) |
+| `worker status --json` | `shellenv`, once | nothing (one `squeue` under `timeout 20`, only while in line) |
+| `worker stop` | `shellenv`, once | for a running worker, bash waits up to 45 s for its `stop.done` (`sleep 5` between looks); one `squeue`, one `scancel` |
+| `worker restrict` | `shellenv`, once | nothing |
+| `login-setup` | none | nothing (`ssh-keygen`, `ssh -G`, `getent` under `timeout 5`, `restorecon` where present) |
+| `discover` | none | nothing (one `sinfo` under `timeout 10`) |
+| `probe` | `shellenv`, once | nothing (one `squeue` for a probe on record, one `sbatch`) |
+
+Taken off python3 in this version: the relay (it was `python3` for the whole sitting, which the
+banner's "terminated on sight" would have ended mid-sign-in), the `status.json` patch that `worker
+status` makes on each poll while a worker is in line and that `worker stop` makes for a worker still
+in line (awk now, refusing any file that is not the flat queued file it patches), the six plain
+top-level profile reads on the way to a worker (`site`, `shared_install`, `shared_state_dir`,
+`submit_host`, `ood_shell_host`, `ood_base_url`: awk, with `profile.py get` only when awk cannot say),
+and `connect`'s second read of the profile.
+
+Still `python3`, each a single short process (`python3 -c pass` 0.05 s and `profile.py shellenv` 0.19 s
+of wall time, 0.1 s of CPU, under WSL with Python 3.12; not measured on warrior's 3.6.8): `shellenv`
+(the profile as shell variables), `render` (the worker's job file), `guide` (a workspace's CLAUDE.md)
+and `validate`. They are not a simple swap: they parse the site profile's JSON, merge the fields a
+site supplies and the schema's defaults, and fill the job template, and a shell copy would be a second
+implementation of the schema to keep in step with the first. Whether a `python3` process of a fraction
+of a second, one to three times per command, is acceptable on warrior is a question for C&IT; if it is
+not, the next integer version moves them off the login node (the site profile rendered to shell
+assignments when the lab publishes the shared copy, the job file submitted unrendered with its values
+in `--export`, the guide written by the job on its compute node). Off the extension's path, `python3`
+also runs for `profile show|set|validate|schema`, `install --discover`, `probe --show`, `diag`, the
+maintainer's `tools/deploy_shared.sh` (one `validate` per site profile when it publishes) and, at a
+PBS site only, the `qstat` JSON parse in `lib/adapters/pbs.sh`.
 
 ## Always on
 
@@ -656,7 +714,7 @@ the image folder).
 bin/hpcworker            the command (bash)
 lib/profile.py           site profile schema, validation, template rendering, the two-key consent reader (python3, stdlib, 3.6+)
 lib/login_plain.sh       the panel's sign-in sitting (claude auth login under a pty, a line contract on stdout)
-lib/relay.py             connect's one writer to the terminal during the sitting: whole lines and the keepalive (python3, stdlib)
+lib/relay.sh             connect's one writer to the terminal during the sitting: whole lines and the keepalive (bash builtins only), and its once-a-second ticker (--ticks)
 lib/adapters/common.sh   scheduler and runtime detection, node-local temp, the container exec line, the registration parser, needs/hint, the guarded remove
 lib/adapters/slurm.sh    Slurm (run for real on the Wayne State grid)
 lib/adapters/pbs.sh      PBS Pro / OpenPBS (documented commands; fixture-tested only)
@@ -740,14 +798,22 @@ measured on asx1 for the lab's VS Code tool; see "Slurm inside the worker").
 ## Tests
 
 ```
-bash framework/tests/run.sh                      # on the grid (system python3), or under WSL
+bash framework/tests/run.sh                      # under WSL or Linux (or in a job on a compute node)
 HPCW_PYTHON=python bash framework/tests/run.sh   # on a Windows checkout (the Store's python3 alias is a stub)
 ```
+
+Never on warrior's login node: the suite is `python3` for minutes, and the banner bans `python3` there
+(versions up to 9 ran it on the login node, when it took a second).
 
 Version 10's tests run against a scratch account and a fake scheduler on PATH (`tests/fakegrid.py`:
 sbatch, squeue, scancel and scontrol keeping their jobs in a file, and an srun that plays the sign-in
 sitting): `test_connect.py` (each HPCW-STEP order, the login modes, a job already in line, every
-failure code, the keepalive, the relay), `test_status.py` (the queued file, `worker status` and its
+failure code, the keepalive, the relay and its ticker with an empty PATH, and a cut shell: connect as
+the session leader of a pseudo-terminal that hangs up mid-sitting, after which nothing of the sitting
+is left running), `test_login_node.py` (every
+line the extension types with each banned program a failing stand-in on PATH and each `python3` call
+named and timed; the awk `status.json` patch and profile reads against `profile.py`'s answers),
+`test_status.py` (the queued file, `worker status` and its
 one scheduler call, every person-facing line, stop of a worker in line, restrict, consent --record,
 watch, and what 10.0.0 and a framework 9 worker still find), `test_job.py` (the rendered job run whole
 against a stand-in runtime and Claude Code: online then stopped, a renewal, the sign-in abandon; Linux

@@ -2,7 +2,7 @@
 the HPCW-STEP lines in each order the contract allows (a first run, a returning run, a job already in
 line, a refusal, a restricted workspace, a usage error, a setup that cannot be done), the four --login
 modes, each sign-in failure code with its exit status, the keepalive while the sign-in computer is
-awaited, the pasted code never echoed, and the relay (lib/relay.py) on its own."""
+awaited, the pasted code never echoed, and the relay (lib/relay.sh, with its ticker) on its own."""
 import json
 import os
 import re
@@ -265,35 +265,253 @@ class Keepalive(Base):
         self.assertEqual(lines[-1], "HPCW-STEP done")
 
 
-class RelayAlone(unittest.TestCase):
-    RELAY = os.path.join(G.ROOT, "lib", "relay.py")
+@unittest.skipIf(os.name == "nt", "needs a pseudo-terminal and /proc")
+class CutShell(Base):
+    """The portal's shell cut while the sitting waits for its computer: connect runs as the extension types
+    it (`exec bash <tool> connect ...`, the session leader of a pseudo-terminal), the terminal hangs up,
+    and nothing of the sitting (connect, srun, the relay, its ticker, a sleep) is left running."""
 
-    def run_relay(self, feed, every="1"):
+    def members(self, sid):
+        out = []
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % p) as fh:
+                    st = fh.read()
+                with open("/proc/%s/cmdline" % p, "rb") as fh:
+                    cmd = fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            except OSError:
+                continue
+            fields = st[st.rindex(")") + 2:].split()   # state ppid pgrp session ...
+            if int(fields[3]) == sid and fields[0] != "Z":
+                out.append((int(p), int(fields[1]), int(fields[2]), cmd))
+        return out
+
+    def test_a_cut_shell_leaves_nothing_behind(self):
+        import pty
+        import select
+        self.g.setup()
+        env = dict(os.environ)
+        env.update(self.g.env(FAKE_SRUN_DELAY="60", HPCW_KEEPALIVE_S="1", HPCW_PYTHON=G.PY))
+        env["PATH"] = G.msys(self.g.bin) + ":" + env.get("PATH", "")
+        pid, fd = pty.fork()
+        if pid == 0:  # pragma: no cover (the child)
+            os.execvpe(G.BASH, [G.BASH, "-c", "exec bash '%s' connect --profile testsite --login always" % self.g.tool], env)
+        buf = b""
+        deadline = time.time() + 60
+        while buf.count(b"still waiting") < 2 and time.time() < deadline:
+            r, _, _ = select.select([fd], [], [], 1)
+            if r:
+                try:
+                    buf += os.read(fd, 4096)
+                except OSError:
+                    break
+        self.assertGreaterEqual(buf.count(b"still waiting"), 2, buf)
+        before = self.members(pid)
+        cmds = " | ".join(c for _, _, _, c in before)
+        self.assertIn("--ticks", cmds)
+        self.assertIn("relay.sh", cmds)
+        self.assertEqual(len(set(g for _, _, g, _ in before)), 1, "one process group, the terminal's: %s" % before)
+        tickers = set(p for p, _, _, c in before if "--ticks" in c)
+        # (a child the ticker has just forked for its sleep shows the ticker's command line for a moment)
+        ticker = [(pp, c) for _, pp, _, c in before if "--ticks" in c and pp not in tickers]
+        self.assertEqual(len(ticker), 1, before)
+        self.assertEqual(int(ticker[0][1].split()[-1]), ticker[0][0], "the ticker watches connect's side of the pipe, its parent")
+        self.assertNotIn("python", cmds, "nothing of python's runs during the sitting")
+        os.close(fd)  # the portal's shell is cut: the terminal hangs up
+        deadline = time.time() + 10
+        while self.members(pid) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertEqual(self.members(pid), [], "nothing of the sitting is left")
+        os.waitpid(pid, 0)
+
+
+class RelayAlone(unittest.TestCase):
+    """lib/relay.sh on its own, run as connect runs it: the ticker (relay.sh --ticks) beside the feed,
+    which stands in for srun, both writing into the relay's pipe, and the relay with an empty PATH. On
+    the login node the relay must start no program at all (warrior's banner bans python3, which relayed
+    the sitting in the first framework 10 build), so anything but a bash builtin would fail here with
+    "command not found"; the ticker starts one, coreutils sleep, once a second."""
+    RELAY = os.path.join(G.ROOT, "lib", "relay.sh")
+    KEEPALIVE = "HPCW-LOGIN: still waiting"
+
+    def script(self, feed, every, summary, after=""):
+        r = G.posix(self.RELAY)
+        # as connect: the ticker watching this side's pid, stopped by a kill after the feed (bash 4.2 runs no EXIT trap here)
+        return ("B=$(command -v bash); { side=$BASHPID; BASH_ENV= \"$B\" '%s' --ticks \"$side\" 2>/dev/null & tk=$!; ( %s ); s=$?; kill $tk 2>/dev/null; exit $s; } "
+                "| PATH= BASH_ENV= \"$B\" '%s' %s '%s'%s") % (r, feed, r, every, G.posix(summary), after)
+
+    def run_relay(self, feed, every="1", after=""):
         with tempfile.TemporaryDirectory() as td:
             summary = os.path.join(td, "outcome")
-            rc, out, err = G.bash("{ %s; } | \"$HPCW_PYTHON\" '%s' %s '%s'" % (feed, G.posix(self.RELAY), every, G.posix(summary)))
+            rc, out, err = G.bash(self.script(feed, every, summary, after), timeout=120)
             self.assertEqual(rc, 0, err)
+            self.assertEqual(err, "", "nothing on stderr: no program was looked for")
             with open(summary, "rb") as fh:
                 return out, fh.read().decode("utf-8")
 
+    def timed(self, feed, every):
+        """[(seconds since the start, line)] as the relay wrote them, and the summary"""
+        with tempfile.TemporaryDirectory() as td:
+            summary = os.path.join(td, "outcome")
+            e = dict(os.environ, MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*")
+            t0 = time.monotonic()
+            p = subprocess.Popen([G.BASH, "-c", self.script(feed, every, summary)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, env=e)
+            got = []
+            for raw in iter(p.stdout.readline, b""):
+                got.append((time.monotonic() - t0, raw.decode("utf-8").rstrip("\n")))
+            err = p.stderr.read().decode("utf-8", "replace")
+            p.wait(60)
+            p.stdout.close()
+            p.stderr.close()
+            self.assertEqual((p.returncode, err), (0, ""))
+            with open(summary, "rb") as fh:
+                return got, fh.read().decode("utf-8")
+
+    def test_whole_lines(self):
+        # several lines in one write, carriage returns (a pty's CR LF), an empty line, each written as its own line
+        out, summary = self.run_relay("printf 'a\\r\\nb\\n\\r\\nHPCW-STEP x\\n'", every="20")
+        self.assertEqual(out, "a\nb\n\nHPCW-STEP x\n")
+        self.assertEqual(summary, "\n\n")
+
     def test_partial_line_is_held_until_its_end(self):
+        # bash 4.2's `read -t` lost the "SIGNED" here (the relay therefore never reads with a timer)
         out, summary = self.run_relay("printf 'SIGNED'; sleep 2.5; printf '%s\\r\\n' '-IN a@b.edu max'", every="1")
-        lines = out.splitlines()
-        self.assertIn("SIGNED-IN a@b.edu max", lines, "a split line arrives whole")
-        self.assertNotIn("HPCW-LOGIN: still waiting", lines, "no keepalive while part of a line waits")
+        self.assertEqual(out.splitlines(), ["SIGNED-IN a@b.edu max"], "a split line arrives whole, and no keepalive while part of a line waits")
         self.assertEqual(summary, "SIGNED-IN a@b.edu max\n\n")
+
+    def test_partial_line_alone_after_five_seconds(self):
+        # written at the fifth tick after the one that brought it: 5 to 6 s after its last byte (later on a
+        # loaded Windows checkout, where a fork for the ticker's sleep can take seconds)
+        got, _ = self.timed("printf 'part'; sleep 12; printf 'rest\\n'", every="20")
+        self.assertEqual([l for _, l in got], ["part", "rest"])
+        self.assertGreaterEqual(got[0][0], 4.9, "held five seconds")
+        self.assertLess(got[0][0], 11.9, "and written as a line of its own before the rest arrives")
+        if os.name != "nt":
+            self.assertLess(got[0][0], 7.0)
+
+    def test_partial_line_waits_in_ticks_not_on_the_clock(self):
+        # the relay kept from running (a busy login node) while the ticks queue up: the queued ticks, written a
+        # second apart, measure the wait, so a part of a line followed by its rest within the ticks' five
+        # seconds is never cut early. Stood in for by writing the queue at once: part, three ticks, the rest
+        r = G.posix(self.RELAY)
+        with tempfile.TemporaryDirectory() as td:
+            summary = os.path.join(td, "outcome")
+            rc, out, err = G.bash("B=$(command -v bash); { printf 'SIGNED\\001tick\\n'; sleep 6; printf '\\001tick\\n\\001tick\\n\\001tick\\n'; "
+                                  "printf '%%s\\n' '-IN a@b.edu max'; } | PATH= \"$B\" '%s' 20 '%s'" % (r, G.posix(summary)), timeout=60)
+            self.assertEqual((rc, err), (0, ""))
+            self.assertEqual(out, "SIGNED-IN a@b.edu max\n", "six seconds on the relay's clock, three ticks: not cut")
+            rc, out, err = G.bash("B=$(command -v bash); { printf 'part\\001tick\\n'; printf '\\001tick\\n%%.0s' 1 2 3 4 5; printf 'rest\\n'; } "
+                                  "| PATH= \"$B\" '%s' 20 ''" % r, timeout=60)
+            self.assertEqual(out, "part\nrest\n", "five ticks after the one that brought it: written alone, however fast they came")
+
+    def test_keepalive_timing(self):
+        got, _ = self.timed("echo one; sleep 3.6; echo two", every="1")
+        lines = [l for _, l in got]
+        self.assertEqual((lines[0], lines[-1]), ("one", "two"))
+        self.assertEqual(set(lines[1:-1]), {self.KEEPALIVE})
+        kas = [t for t, l in got if l == self.KEEPALIVE]
+        self.assertIn(len(kas), (2, 3, 4), got)
+        self.assertGreaterEqual(kas[0] - got[0][0], 0.5, "not before half an interval")
+        for a, b in zip(kas, kas[1:]):
+            self.assertGreaterEqual(b - a, 0.5, got)
+            self.assertLessEqual(b - a, 1.9, got)
+        # and none while the silence is shorter than the interval
+        out, _ = self.run_relay("echo one; sleep 2; echo two", every="20")
+        self.assertEqual(out, "one\ntwo\n")
 
     def test_keepalive_and_outcome(self):
         out, summary = self.run_relay("echo one; sleep 2.6; echo 'HPCW-LOGIN-FAILED: no code arrived within 2 minutes; start the sign-in again'", every="1")
         lines = out.splitlines()
         self.assertEqual(lines[0], "one")
-        self.assertGreaterEqual(lines.count("HPCW-LOGIN: still waiting"), 2, lines)
+        self.assertGreaterEqual(lines.count(self.KEEPALIVE), 2, lines)
         self.assertEqual(lines[-1], "HPCW-LOGIN-FAILED: no code arrived within 2 minutes; start the sign-in again")
         self.assertEqual(summary, "\nHPCW-LOGIN-FAILED: no code arrived within 2 minutes; start the sign-in again\n")
+
+    def test_summary_keeps_the_last_of_each(self):
+        feed = ("printf '%s\\n' 'SIGNED-IN old@b.edu pro' '  HPCW-LOGIN-FAILED: first  ' 'HPCW-LOGIN: code received, checking' "
+                "' SIGNED-IN a@b.edu max ' 'HPCW-LOGIN-FAILED: second'; printf 'x\\r\\n'")
+        out, summary = self.run_relay(feed, every="20")
+        self.assertEqual(summary, "SIGNED-IN a@b.edu max\nHPCW-LOGIN-FAILED: second\n", "the last of each, without the spaces around it")
+        self.assertIn(" SIGNED-IN a@b.edu max \n", out, "the line itself is written as it came")
+        if os.name != "nt":
+            with tempfile.TemporaryDirectory() as td:
+                summary = os.path.join(td, "outcome")
+                G.bash(self.script("echo SIGNED-IN a@b.edu max", "20", summary))
+                self.assertEqual(os.stat(summary).st_mode & 0o777, 0o600, "the outcome file is the account's alone")
 
     def test_last_line_without_newline(self):
         out, _ = self.run_relay("printf 'tail'", every="20")
         self.assertEqual(out, "tail\n")
+
+    def test_closed_reader(self):
+        # the terminal went away after the first line: the relay reads on to the end, so the writer is never
+        # blocked by a full pipe or ended by it; all three exit 0, and the outcome is still recorded
+        feed = "i=0; while [ $i -lt 20000 ]; do echo \"line $i of the sitting, long enough to fill a pipe\"; i=$((i + 1)); done; echo 'SIGNED-IN a@b.edu max'"
+        out, summary = self.run_relay(feed, every="20", after=" | head -n 1; echo \"status ${PIPESTATUS[*]}\"")
+        self.assertEqual(out, "line 0 of the sitting, long enough to fill a pipe\nstatus 0 0 0\n")
+        self.assertEqual(summary, "SIGNED-IN a@b.edu max\n\n")
+
+    def test_exit_status(self):
+        # the relay always ends 0; connect takes srun's status from PIPESTATUS[0] (the failure codes in SigninFailures)
+        out, summary = self.run_relay("echo 'HPCW-LOGIN-FAILED: x'; exit 3", every="20", after="; echo \"status ${PIPESTATUS[*]}\"")
+        self.assertEqual(out, "HPCW-LOGIN-FAILED: x\nstatus 3 0\n")
+        self.assertEqual(summary, "\nHPCW-LOGIN-FAILED: x\n")
+
+    @unittest.skipIf(os.name == "nt", "the login node is Linux; a Windows fork costs what it costs")
+    def test_little_cpu_while_waiting(self):
+        # four quiet seconds with a keepalive due every second: a blocking read woken once a second, never a spin
+        rc, out, err = G.bash("TIMEFORMAT='%%3U %%3S'; time { %s; }" % self.script("sleep 4", "1", "/dev/null"))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(out.count(self.KEEPALIVE), (3, 4), out)
+        user, sys_ = (float(x) for x in err.strip().split()[-2:])
+        self.assertLess(user + sys_, 0.5, "CPU seconds over four seconds of waiting, the ticker's sleeps included: %s" % err)
+
+    def test_ticker_ends_with_what_it_ticks_for(self):
+        # its process gone: at most a tick later the ticker is gone too (connect's side of the pipe was killed)
+        r = G.posix(self.RELAY)
+        t0 = time.monotonic()
+        rc, out, err = G.bash("sleep 2 & w=$!; bash '%s' --ticks $w | od -c | head -3" % r, timeout=30)
+        self.assertEqual(rc, 0, err)
+        self.assertLess(time.monotonic() - t0, 6, "the ticker stopped by itself")
+        self.assertIn("001   t   i   c   k  \\n", out)
+        # its reader gone: the next tick finds no one and it ends
+        t0 = time.monotonic()
+        rc, out, err = G.bash("bash '%s' --ticks $$ | head -c 6 | od -c | head -1; echo \"status ${PIPESTATUS[0]}\"" % r, timeout=30)
+        self.assertLess(time.monotonic() - t0, 6, "the ticker stopped by itself")
+        self.assertRegex(out, r"status (0|141)\n$")
+
+    @unittest.skipIf(os.name == "nt", "reads /proc")
+    def test_nothing_left_behind(self):
+        # after a sitting, no ticker, no sleep of its and no relay is still running
+        with tempfile.TemporaryDirectory() as td:
+            mark = os.path.join(td, "outcome-unique")
+            rc, out, err = G.bash(self.script("echo one; sleep 1.5; echo two", "1", mark))
+            self.assertEqual(rc, 0, err)
+            time.sleep(1.2)  # a sleep of the ticker's own ends within its second at the latest
+            left = []
+            for pid in os.listdir("/proc"):
+                if pid.isdigit():
+                    try:
+                        with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                            cmd = fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
+                    except OSError:
+                        continue
+                    if "relay.sh" in cmd and (mark in cmd or "--ticks" in cmd and G.posix(self.RELAY) in cmd):
+                        left.append(cmd)
+            self.assertEqual(left, [])
+
+    def test_relay_starts_no_program(self):
+        # the source itself, comments aside: no command substitution, no backquote, and `sleep` once (the ticker's)
+        with open(self.RELAY, encoding="utf-8") as fh:
+            code = "\n".join(re.sub(r"(^|\s)#.*$", "", l) for l in fh.read().splitlines()[1:])
+        self.assertIsNone(re.search(r"\$\((?!\()", code), "no command substitution (arithmetic is fine): it would fork")
+        self.assertNotIn("`", code, "no backquote")
+        self.assertEqual(len(re.findall(r"\bsleep\b", code)), 1, "sleep only in the ticker")
+        for banned in ("python", "python3", "node", "make", "md5sum", "rsync", "awk", "sed", "cat", "date"):
+            self.assertIsNone(re.search(r"(^|[;&|{(]|\s)%s(\s|$)" % banned, code, re.M), "%s is not run" % banned)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 #!/bin/bash
 # hpcworker: your own Claude Code, as a batch job on your university's cluster, reachable from
 # claude.ai/code and the Claude app through Claude Code's Remote Control. This is the one command;
-# it runs on the login node with bash, coreutils and the system python3 only. Nothing heavy runs
-# here: the container and Claude Code run inside jobs. An account has it one of two ways: the lab's
+# it runs on the login node with bash, coreutils, awk, sed and grep, and the system python3 only for
+# a moment at a time, to read the site profile and fill the job file (lib/profile.py; README.md, "The
+# login node"). Nothing heavy runs here, and nothing that runs here for longer than a moment is a
+# program on the login node's banned list (warrior's /etc/motd names python3, node, make, md5sum,
+# rsync and others): the one long wait, connect's sign-in sitting, is srun relayed by bash itself
+# (lib/relay.sh). The container and Claude Code run inside jobs. An account has it one of two ways: the lab's
 # shared copy (then ~/.hpcworker/bin/hpcworker is a small launcher for it) or a copy of its own.
 #
 #   hpcworker install --shared [DIR] [--profile NAME] [--force] [--no-shell-path]
@@ -87,6 +91,131 @@ step_fail() { # CODE SENTENCE EXIT: connect's last line on a failure (V11_CONTRA
 }
 need_py() { [ -n "$PY" ] || die "python3 is needed on this node (the system one is enough; nothing is installed)"; }
 prof_py() { need_py; "$PY" "$LIB/profile.py" "$@"; }
+# ---- JSON without python: the login node's banner bans python3 (README.md, "The login node") ----------
+# One awk program, two uses, each for files of a shape this tool knows, each refusing anything else:
+#   get    a top-level string of a site profile, plain (no backslash, no control character); "A" when
+#          the key is absent, "S<value>" when it is a plain string, exit 3 when awk cannot say
+#   patch  status.json while the run is in line: the queued file `worker start` writes and the patches
+#          of it, a flat object of strings, numbers, true, false and null; the guard and the new values
+#          as status_patch describes; the new file on stdout, exit 1 (nothing written) on any doubt
+# Values are passed in the environment and on stdin, never as awk operands or -v (both read escapes).
+# shellcheck disable=SC2016
+HPCW_JSON_AWK='
+function skipws() { while (pos <= len && index(" \t\r\n", substr(s, pos, 1)) > 0) pos++ }
+function scalar(   t) {
+  t = substr(s, pos)
+  if (match(t, /^"([^"\\]|\\.)*"/) || match(t, /^(true|false|null)/) || match(t, /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?/)) {
+    pos += RLENGTH
+    return substr(t, 1, RLENGTH)
+  }
+  return ""
+}
+function value(   c, op, cl, k) {
+  skipws(); c = substr(s, pos, 1)
+  if (c != "{" && c != "[") return scalar()
+  op = c; cl = (c == "{") ? "}" : "]"; pos++
+  skipws(); if (substr(s, pos, 1) == cl) { pos++; return op }
+  while (1) {
+    if (op == "{") {
+      skipws(); k = scalar(); if (substr(k, 1, 1) != "\"") return ""
+      skipws(); if (substr(s, pos, 1) != ":") return ""; pos++
+    }
+    if (value() == "") return ""
+    skipws(); c = substr(s, pos, 1); pos++
+    if (c == cl) return op
+    if (c != ",") return ""
+  }
+}
+function put(k, v) { if (k in at) val[at[k]] = v; else { n++; key[n] = k; val[n] = v; at[k] = n } }
+function top(   k, v, c) {
+  n = 0; pos = 1; len = length(s)
+  skipws(); if (substr(s, pos, 1) != "{") return 0; pos++
+  skipws(); if (substr(s, pos, 1) == "}") { pos++; skipws(); return pos > len }
+  while (1) {
+    skipws(); k = scalar(); if (substr(k, 1, 1) != "\"") return 0
+    skipws(); if (substr(s, pos, 1) != ":") return 0; pos++
+    v = value(); if (v == "") return 0
+    put(substr(k, 2, length(k) - 2), v)
+    skipws(); c = substr(s, pos, 1); pos++
+    if (c == "}") { skipws(); return pos > len }
+    if (c != ",") return 0
+  }
+}
+function plain(v) { return substr(v, 1, 1) == "\"" && index(v, "\\") == 0 && v !~ /[\001-\037]/ }
+BEGIN {
+  mode = ENVIRON["HPCW_J_MODE"]; file = ENVIRON["HPCW_J_FILE"]; s = ""; bad = 0
+  while ((getline line < file) > 0) s = s line "\n"
+  close(file)
+  if (mode == "get") {
+    if (!top()) exit 3
+    k = ENVIRON["HPCW_J_KEY"]
+    if (!(k in at)) { print "A"; exit 0 }
+    v = val[at[k]]
+    if (!plain(v)) exit 3
+    print "S" substr(v, 2, length(v) - 2); exit 0
+  }
+  # patch: an empty or absent file is "none"; anything but a flat object of scalars is refused
+  kind = ENVIRON["HPCW_J_KIND"]; job = ENVIRON["HPCW_J_JOB"]
+  present = (s !~ /^[ \t\r\n]*$/)
+  if (present) {
+    if (!top()) { bad = 1; exit 1 }
+    for (i = 1; i <= n; i++) if (val[i] == "{" || val[i] == "[" || val[i] ~ /^"/ && val[i] ~ /[\001-\037]/) { bad = 1; exit 1 }
+  }
+  if (kind == "queued" || kind == "queued-or-none") {
+    if (!present && kind == "queued") { bad = 1; exit 1 }
+    if (present) {
+      if (!("state" in at) || val[at["state"]] != "\"queued\"" || !("job" in at)) { bad = 1; exit 1 }
+      j = val[at["job"]]; if (substr(j, 1, 1) == "\"") j = substr(j, 2, length(j) - 2)
+      if (j != job) { bad = 1; exit 1 }
+    }
+  } else if (kind != "any") { bad = 1; exit 1 }
+}
+mode == "patch" && length($0) > 0 {
+  i = index($0, "="); k = substr($0, 1, i - 1); v = substr($0, i + 1)
+  if (i < 2 || k !~ /^[A-Za-z0-9_]+$/) { bad = 1; exit 1 }
+  if (!((match(v, /^"([^"\\]|\\.)*"/) && RLENGTH == length(v) && v !~ /[\001-\037]/) || v ~ /^(true|false|null)$/ || v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/)) { bad = 1; exit 1 }
+  put(k, v)
+}
+END {
+  # an exit above runs this too; an exit with no value keeps the status it set (POSIX)
+  if (mode != "patch" || bad) exit
+  out = "{"
+  for (i = 1; i <= n; i++) out = out (i > 1 ? "," : "") "\"" key[i] "\":" val[i]
+  print out "}"
+}'
+hpcw_expand_login() { # STRING -> $HOME and $USER (and ${HOME}, ${USER}) expanded, nothing else: profile.py expand()
+  # cut and joined, never ${s//pat/rep}: bash 4.2 keeps quotes in a replacement, bash 5.2 reads & in one
+  local s="$1" name v out rest tok
+  for name in HOME USER; do
+    [ -n "${!name+x}" ] || continue
+    v="${!name}"
+    out=""; rest="$s"; tok="\${$name}"
+    while [[ "$rest" == *"$tok"* ]]; do out="$out${rest%%"$tok"*}$v"; rest="${rest#*"$tok"}"; done
+    s="$out$rest"
+    out=""; rest="$s"; tok="\$$name"
+    while [[ "$rest" == *"$tok"* ]]; do
+      out="$out${rest%%"$tok"*}"; rest="${rest#*"$tok"}"
+      case "$rest" in [A-Za-z0-9_]*) out="$out$tok";; *) out="$out$v";; esac
+    done
+    s="$out$rest"
+  done
+  printf '%s' "$s"
+}
+prof_get() { # FILE KEY -> what `profile.py get FILE KEY` prints. The plain top-level strings this command
+  # reads on the way to a worker (none of them a field the site supplies, each "" when absent) are read
+  # by awk; profile.py only when awk cannot say (an escape in the value, a file that is not well formed)
+  local out
+  case "$2" in
+    site|shared_install|shared_state_dir|submit_host|ood_shell_host|ood_base_url)
+      if out=$(HPCW_J_MODE=get HPCW_J_FILE="$1" HPCW_J_KEY="$2" LC_ALL=C awk "$HPCW_JSON_AWK" < /dev/null 2>/dev/null); then
+        case "$out" in
+          A) printf '\n'; return 0;;
+          S*) printf '%s\n' "$(hpcw_expand_login "${out#S}")"; return 0;;
+        esac
+      fi;;
+  esac
+  prof_py get "$1" "$2"
+}
 # shellcheck disable=SC1090
 source "$LIB/adapters/common.sh" || die "$LIB/adapters/common.sh is missing"
 json_str() { hpcw_json_str "$1"; }
@@ -95,7 +224,10 @@ same_dir() { local a b; a=$(cd "$1" 2>/dev/null && pwd -P) && b=$(cd "$2" 2>/dev
 # this run uses the lab's shared copy: a marker, and the code is not a full copy inside this home
 shared_mode() { [ -n "$SHARED_DIR" ] && ! same_dir "$SRC_ROOT" "$HPCW_HOME"; }
 read_version() { local v=""; [ -r "$1" ] && v=$(tr -d '[:space:]' 2>/dev/null < "$1"); [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"; }
+PROFILE_LOADED=""
 load_profile() {
+  # once per command: connect loads it, then worker start inside it would read the same file again
+  [ -n "$PROFILE_LOADED" ] && [ "$PROFILE_LOADED" = "$PROFILE" ] && return 0
   [ -s "$PROFILE" ] || die "no profile at $PROFILE: run 'hpcworker install --profile wayne' (or 'hpcworker install --discover')"
   local env; env=$(prof_py shellenv "$PROFILE") || die "profile $PROFILE unreadable"
   eval "$env"
@@ -106,6 +238,7 @@ load_profile() {
   CCD="$P_claude_config_dir"
   export RUNTIME="$P_runtime" RUNTIME_BIN="$P_runtime_bin" RUNTIME_MODULE="$P_runtime_module"
   export HPCW_NODE_TMP_PATTERN="$P_node_tmp" HPCW_NODE_TMP_VAR="$P_node_tmp_var" HPCW_TMPDIR_IS_NODE_LOCAL="$([ "$P_tmpdir_is_node_local" = true ] && echo 1 || echo 0)"
+  PROFILE_LOADED="$PROFILE"
 }
 # "heavy" = a container or Claude Code itself: only inside a job, never on the login node
 refuse_heavy() { in_job || die "$1 would run a container or Claude Code on this node ($(hostname -s)); that is not allowed on a login node, so hpcworker does it inside a job for you: $2"; }
@@ -173,8 +306,8 @@ shared_problem() { # DIR -> one sentence when DIR is not a shared copy this acco
 }
 shared_default() { # NAME -> the shared copy the site profile names (this copy's profiles/NAME.json, then profile.json), else the one in use
   local v=""
-  [ -n "$1" ] && [ -s "$PROFILES/$1.json" ] && v=$(prof_py get "$PROFILES/$1.json" shared_install 2>/dev/null)
-  [ -z "$v" ] && [ -s "$PROFILE" ] && v=$(prof_py get "$PROFILE" shared_install 2>/dev/null)
+  [ -n "$1" ] && [ -s "$PROFILES/$1.json" ] && v=$(prof_get "$PROFILES/$1.json" shared_install 2>/dev/null)
+  [ -z "$v" ] && [ -s "$PROFILE" ] && v=$(prof_get "$PROFILE" shared_install 2>/dev/null)
   printf '%s' "${v:-$SHARED_DIR}"
 }
 own_copy_parts() { # the pieces of a copy of the code inside this home (the launcher is not one)
@@ -189,7 +322,7 @@ live_run() { # the first run of this account's that may still read code from thi
   # under way. Files only, no scheduler call. A running job sources lib/ again on every call into
   # the container, so its code must not move while it runs.
   [ -s "$PROFILE" ] || return 0
-  local sd d n st now; sd=$(prof_py get "$PROFILE" shared_state_dir 2>/dev/null); { [ -n "$sd" ] && [ -d "$sd" ]; } || return 0
+  local sd d n st now; sd=$(prof_get "$PROFILE" shared_state_dir 2>/dev/null); { [ -n "$sd" ] && [ -d "$sd" ]; } || return 0
   now=$(date +%s)
   for d in "$sd"/*/; do
     [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = workspaces ] && continue
@@ -293,13 +426,13 @@ install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as befor
   # the copy already there, if any: install runs again over it (the same version refreshes the
   # files, a newer one upgrades them); the profile and everything under the state directory stay
   local old; old=$(read_version "$HPCW_HOME/VERSION")
-  [ -n "$name" ] && [ -z "$SHARED_DIR" ] && [ -s "$PROFILES/$name.json" ] && hint=$(prof_py get "$PROFILES/$name.json" shared_install 2>/dev/null)
+  [ -n "$name" ] && [ -z "$SHARED_DIR" ] && [ -s "$PROFILES/$name.json" ] && hint=$(prof_get "$PROFILES/$name.json" shared_install 2>/dev/null)
   mkdir -p "$HPCW_HOME"/{bin,lib/adapters,jobs,profiles,log} || die "cannot create $HPCW_HOME"
   chmod 700 "$HPCW_HOME"
   # a link where the command goes is moved aside first: a copy onto it would write through it
   [ -L "$HPCW_HOME/bin/hpcworker" ] && { move_aside bin/hpcworker || die "could not move the link $HPCW_HOME/bin/hpcworker aside"; }
   if ! same_dir "$SRC_ROOT" "$HPCW_HOME"; then
-    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.py" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
+    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
       && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
     [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
     # copied from a shared copy (read-only there), the files would stay read-only and the next install or upload could not replace them
@@ -497,33 +630,24 @@ stop_worker_run() { # RUN_DIR NAME: the stop file, then a wait for the job's own
 # `worker stop` (stopped, for a worker that never left the line). The last two write only while the
 # file still says "queued" for that job and no node file exists, and through a temporary name of their
 # own, so they never write over the job's own first write.
-STATUS_PATCH_PY='import json, os, sys
-f, guard = sys.argv[1], sys.argv[2]
-d = os.path.dirname(os.path.abspath(f))
-try:
-    with open(f, encoding="utf-8") as fh:
-        s = json.load(fh)
-except (OSError, ValueError):
-    s = None
-kind, _, job = guard.partition("=")
-if kind in ("queued", "queued-or-none"):
-    if os.path.exists(os.path.join(d, "node")):
-        sys.exit(1)
-    if s is None and kind == "queued":
-        sys.exit(1)
-    if s is not None and (not isinstance(s, dict) or s.get("state") != "queued" or str(s.get("job")) != job):
-        sys.exit(1)
-if not isinstance(s, dict):
-    s = {}
-for kv in sys.argv[3:]:
-    k, _, v = kv.partition("=")
-    s[k] = json.loads(v)
-tmp = "%s.cli.%d" % (f, os.getpid())
-with open(tmp, "w", encoding="utf-8") as fh:
-    fh.write(json.dumps(s, ensure_ascii=False, separators=(",", ":")) + "\n")
-os.replace(tmp, f)'
-status_patch() { # FILE GUARD KEY=JSON... ; GUARD: queued=JOB (the file says queued for JOB), queued-or-none=JOB (or there is none), any
-  need_py; "$PY" -c "$STATUS_PATCH_PY" "$@"
+#
+# status_patch FILE GUARD KEY=JSON... : the keys set to the JSON values given (each a string, number,
+# true, false or null), the others kept as they are and where they are, new ones last; one line of
+# compact JSON, through FILE.cli.<pid> and a rename. GUARD: queued=JOB (the file says queued for JOB),
+# queued-or-none=JOB (or there is none, or it is empty), any; with either queued guard, never once the
+# node file exists. Exit 1 and nothing written when the guard does not hold, when a value is not one
+# JSON scalar, or when the file is not a flat object of scalars: every file this patches is the queued
+# file `worker start` writes or an earlier patch of it, and anything else is not this command's to
+# change. awk, not python (the login node's banner bans python3).
+status_patch() {
+  local f="$1" guard="$2" kind job d out
+  shift 2
+  kind="${guard%%=*}"; job="${guard#*=}"; [ "$kind" = "$guard" ] && job=""
+  case "$f" in */*) d="${f%/*}";; *) d=.;; esac
+  case "$kind" in queued|queued-or-none) [ -e "$d/node" ] && return 1;; any) ;; *) return 1;; esac
+  out=$(printf '%s\n' "$@" | HPCW_J_MODE=patch HPCW_J_FILE="$f" HPCW_J_KIND="$kind" HPCW_J_JOB="$job" LC_ALL=C awk "$HPCW_JSON_AWK") || return 1
+  [ -n "$out" ] || return 1
+  { printf '%s\n' "$out" > "$f.cli.$$" && mv -f "$f.cli.$$" "$f"; } || { rm -f "$f.cli.$$"; return 1; }
 }
 MIDDOT=$'\302\267'   # U+00B7 as UTF-8 bytes, whatever the locale
 session_title_for() { # NAME -> the session title: the profile's session_title ("Grid worker" when it names none), with " · NAME" for a worker not named worker
@@ -1007,15 +1131,19 @@ EOT
 # "HPCW-STEP failed <code> <sentence>" and ends connect with the code's exit status (usage 2, setup 3,
 # restricted 4, refused 5, signin-node 6, signin-code / signin-timeout / signin 7, other 1). Nothing
 # else is printed but the sitting's own lines (lib/login_plain.sh) and srun's, relayed whole by
-# lib/relay.py, and the keepalive "HPCW-LOGIN: still waiting" at least every 20 s from "HPCW-STEP signin"
-# until the sitting ends. Connect ends within 14 minutes: at most 600 s for the sign-in computer, then a
-# code budget of what is left of 840 s (at least two). One scheduler call to check the worker, one sbatch
-# when it submits, one srun for the sitting.
+# lib/relay.sh, and the keepalive "HPCW-LOGIN: still waiting" at least every 20 s from "HPCW-STEP
+# signin" until the sitting ends. Connect ends within 14 minutes: at most 600 s for the sign-in
+# computer, then a code budget of what is left of 840 s (at least two). One scheduler call to check the
+# worker, one sbatch when it submits, one srun for the sitting. For the sitting's whole length the login
+# node runs srun and bash only: this process and its side of the pipe, waiting; the relay (bash
+# builtins: warrior's banner bans python3, which relayed it in the first framework 10 build); and the
+# relay's ticker, with one `sleep 1` at a time. When the portal's shell is cut, all of them are in the
+# terminal's process group and end with its SIGHUP (lib/relay.sh; tests/test_connect.py, CutShell).
 CONNECT_BUDGET_S=840
 connect_usage() { step_fail usage "$1" 2; }
 connect_setup() { # SITE: the account uses the lab's shared copy the site profile names, or is made to (framework 5's install, without the ~/.bashrc block)
   local site="$1" want marker err rc
-  [ -n "$site" ] || { [ -s "$PROFILE" ] && site=$(prof_py get "$PROFILE" site 2>/dev/null); }
+  [ -n "$site" ] || { [ -s "$PROFILE" ] && site=$(prof_get "$PROFILE" site 2>/dev/null); }
   [ -n "$site" ] || step_fail setup "this account has no site profile yet; connect needs --profile SITE" 3
   want=$(shared_default "$site"); want="${want%/}"
   if [ -z "$want" ]; then
@@ -1056,8 +1184,7 @@ connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, rel
   local fresh="$1" t0="$2" self sum rc signed failed ka="${HPCW_KEEPALIVE_S:-20}" tty_saved="" em pl
   self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
   [[ "$ka" =~ ^[0-9]+$ ]] && [ "$ka" -ge 1 ] || ka=20
-  need_py
-  [ -r "$LIB/relay.py" ] || die "lib/relay.py is missing from this copy of hpcworker"
+  [ -r "$LIB/relay.sh" ] || die "lib/relay.sh is missing from this copy of hpcworker"
   say "HPCW-STEP signin"
   say "HPCW-LOGIN: requesting a compute node"
   mkdir -p "$HPCW_HOME/log" 2>/dev/null && chmod 700 "$HPCW_HOME/log" 2>/dev/null
@@ -1066,9 +1193,23 @@ connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, rel
   # off here as well as in the sitting, whatever srun makes of --pty with its output going to a pipe
   if hpcw_have_terminal; then tty_saved=$(stty -g 2>/dev/null); stty -echo 2>/dev/null; fi
   local -a extra=(--keepalive "$ka" --deadline "$(( t0 + CONNECT_BUDGET_S ))"); [ "$fresh" = fresh ] && extra+=(--fresh)
-  # one writer: srun's output and its own messages go to the relay, which writes whole lines and the keepalive
-  HPCW_ALLOC_WAIT_S=600 adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain "${extra[@]}" 2>&1 \
-    | "$PY" "$LIB/relay.py" "$ka" "$sum"
+  # one writer: srun's output and its own messages go to the relay, which writes whole lines and the
+  # keepalive; beside srun, the relay's ticker writes its once-a-second tick into the same pipe (never
+  # to the terminal). Three things end the ticker: the kill after srun, the EXIT trap (this side
+  # stopped by an error; bash 5), and the ticker's own look each second at this side's pid (bash
+  # 4.2.46 runs no EXIT trap in a pipeline's { } subshell at all: measured on a build from source). Both
+  # are this same bash, run with no BASH_ENV of the account's to read first; the ticker's standard
+  # input is /dev/null (a background command's)
+  {
+    side=$BASHPID   # read here: in the background command's own words it would be the ticker's pid
+    BASH_ENV= "${BASH:-bash}" "$LIB/relay.sh" --ticks "$side" 2>/dev/null &
+    tk=$!
+    trap 'kill "$tk" 2>/dev/null' EXIT
+    HPCW_ALLOC_WAIT_S=600 adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain "${extra[@]}" 2>&1
+    src=$?
+    kill "$tk" 2>/dev/null
+    exit "$src"
+  } | BASH_ENV= "${BASH:-bash}" "$LIB/relay.sh" "$ka" "$sum"
   rc=${PIPESTATUS[0]}
   [ -n "$tty_saved" ] && stty "$tty_saved" 2>/dev/null
   signed=$(sed -n 1p "$sum" 2>/dev/null); failed=$(sed -n 2p "$sum" 2>/dev/null); rm -f "$sum"
@@ -1188,8 +1329,8 @@ ls_host_names() { # the names the portal's Shell may give this login node: each 
   local p n s f
   if [ -s "$PROFILE" ]; then profs=("$PROFILE"); else for p in "$PROFILES"/*.json; do [ -s "$p" ] && profs+=("$p"); done; fi
   for p in ${profs[@]+"${profs[@]}"}; do
-    n=$(prof_py get "$p" submit_host 2>/dev/null); [ -n "$n" ] && out+=("$n" "$n.*")
-    n=$(prof_py get "$p" ood_shell_host 2>/dev/null); [ -n "$n" ] && out+=("$n")
+    n=$(prof_get "$p" submit_host 2>/dev/null); [ -n "$n" ] && out+=("$n" "$n.*")
+    n=$(prof_get "$p" ood_shell_host 2>/dev/null); [ -n "$n" ] && out+=("$n")
   done
   s=$(hostname -s 2>/dev/null); f=$(timeout 5 hostname -f 2>/dev/null)
   out+=("$s" "$f")
@@ -1215,7 +1356,7 @@ ls_ood_addresses() { # the addresses the profiles' portal names resolve to (a no
   local -a profs=(); local p u h a out=""
   if [ -s "$PROFILE" ]; then profs=("$PROFILE"); else for p in "$PROFILES"/*.json; do [ -s "$p" ] && profs+=("$p"); done; fi
   for p in ${profs[@]+"${profs[@]}"}; do
-    u=$(prof_py get "$p" ood_base_url 2>/dev/null); h="${u#*://}"; h="${h%%/*}"; h="${h%%:*}"
+    u=$(prof_get "$p" ood_base_url 2>/dev/null); h="${u#*://}"; h="${h%%/*}"; h="${h%%:*}"
     [[ "$h" =~ ^[A-Za-z0-9.-]+$ ]] || continue
     for a in $(timeout 5 getent ahosts "$h" 2>/dev/null | awk '{print $1}' | sort -u); do out="$out${out:+ }$a"; done
   done
@@ -1372,7 +1513,7 @@ diag_slurm_in_worker() { # Slurm inside the worker's container (framework 9): wh
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
-  local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/relay.py lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
+  local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/relay.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
   grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/*.sh "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
   if [ -n "$miss" ]; then emit hpcw.scripts false false false "missing or damaged:$miss"
   elif shared_mode && ! is_launcher "$HPCW_HOME/bin/hpcworker"; then emit hpcw.scripts true true false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); $HPCW_HOME/bin/hpcworker is not its launcher: hpcworker install"

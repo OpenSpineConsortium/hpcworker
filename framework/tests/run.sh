@@ -1,7 +1,8 @@
 #!/bin/bash
 # hpcworker test runner: shell syntax for every script, then the Python unit tests (stdlib
 # unittest: profile schema, adapter parsers against fixtures, the worker template render).
-# Runs on the login node (a few seconds of CPU) and on a Windows Git Bash checkout.
+# Runs under WSL or Linux and on a Windows Git Bash checkout; never on warrior's login node (the
+# suite is python3 for minutes, and warrior's banner bans python3; a job on a compute node is fine).
 #   bash framework/tests/run.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); ROOT=$(cd "$HERE/.." && pwd)
