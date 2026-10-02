@@ -30,6 +30,18 @@
 # host, not in the container. A piece missing on the node: the worker starts without it and says so
 # (the job log, status.json "scheduler_note"). lib/adapters/common.sh hpcw_slurm_in_container.
 #
+# Framework 10. `hpcworker worker start` leaves a "queued" status.json the moment the scheduler takes
+# the job; this job replaces it as its first act (the node file, then status.json with node and
+# got_computer_at), keeping submitted_at from it when it names this job (a chain successor asks the
+# scheduler instead, and says renewal: true), and writes started_at, ends_at (the end of its wall
+# time), online_at (its first registration) and the session title (the profile's session_title).
+# progress.log gets one plain line per event ("Got a computer", "Connecting to Claude", "Online:
+# <link>", "Waiting for your Claude sign-in", "Reconnecting", "Renewing", "Ended", "Stopped",
+# "Couldn't start: ..."), and the job output "<H:MM> Online. Open in Claude: <link>". A job still
+# waiting for the Claude sign-in LOGIN_ABANDON_S after it began waiting (from its own start when it
+# started signed out) stops itself, cancels its queued successor and says why (stop_reason
+# login_abandoned), so an abandoned first run holds no slot.
+#
 # The code: lib/ comes from HPCW_CODE, the directory the command that rendered this job ran from
 # (the lab's shared copy, by its numbered directory, or ~/.hpcworker); HPCW_HOME is the student's
 # own folder (profile, consent marker). A chain keeps the code it started with until the next start.
@@ -52,7 +64,8 @@ IPC_DIR='@IPC_DIR@'
 HPCW_NODE_TMP_PATTERN='@NODE_TMP@'; HPCW_NODE_TMP_VAR='@NODE_TMP_VAR@'; HPCW_TMPDIR_IS_NODE_LOCAL=@TMPDIR_IS_NODE_LOCAL@
 XDG_FIX=@XDG_FIX@; SCHED_IN_WORKER=@SCHED_IN_WORKER@
 PERMISSION_MODE='@PERMISSION_MODE@'; CAPACITY='@CAPACITY@'
-HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@; LOGIN_RECHECK_S=@LOGIN_RECHECK_S@
+HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@; LOGIN_RECHECK_S=@LOGIN_RECHECK_S@; AUTH_RETRY_S=@AUTH_RETRY_S@
+TITLE='@TITLE@'; HOURS=@HOURS@; LOGIN_ABANDON_S=@LOGIN_ABANDON_S@
 export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VAR HPCW_TMPDIR_IS_NODE_LOCAL
 ORIG_TMPDIR="${TMPDIR:-}"   # what a successor should inherit: not this node's per-job temp
 
@@ -72,11 +85,24 @@ say "hpcworker $HPCW_VERSION worker $RUN job $JOB on $NODE (site $SITE); image $
 
 json_str() { hpcw_json_str "$1"; }
 now_s() { date +%s; }
-STARTED_AT=$(date -u +%FT%TZ)
+# framework 10: the times status.json carries. got_computer_at is this job's start (the same instant
+# as the node file and started_at); ends_at is the end of its wall time
+JOB_START_S=$(now_s)
+STARTED_AT=$(date -u -d "@$JOB_START_S" +%FT%TZ); GOT_COMPUTER_AT="$STARTED_AT"
+ENDS_AT=$(date -u -d "@$(( JOB_START_S + HOURS * 3600 ))" +%FT%TZ)
+# the queued file `worker start` wrote names this job: its submitted_at is kept (a Slurm requeue of
+# this same job keeps it the same way, from this job's own earlier writes). A chain successor is
+# named first in next.id by the job that queued it: renewal, and no queued file to read
+prev_field() { [ -s status.json ] && tr -d '\n' < status.json | grep -o "\"$1\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$1\": *//" -e 's/^"//' -e 's/"$//'; }
+SUBMITTED_AT=""; RENEWAL=false
+if [ "$(prev_field job)" = "$JOB" ]; then SUBMITTED_AT=$(prev_field submitted_at); [ "$(prev_field renewal)" = true ] && RENEWAL=true; fi
+if [ -s next.id ]; then read -r _nid _np < next.id || true; [ "${_nid:-}" = "$JOB" ] && RENEWAL=true; fi
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
-STATE=starting; MESSAGE=""; REQUESTED_NAME="$SITE-$RUN"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
+# the session title (framework 10): the profile's session_title, "<title> · <name>" for a worker not named worker; Claude Code's --name
+STATE=starting; MESSAGE=""; REQUESTED_NAME="$TITLE"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
 AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
 NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false; SCHED_INSIDE=false; SCHED_NOTE="off in the site profile"
+ONLINE_AT=""; STOP_REASON=""; NEED_LOGIN_SINCE=0; RC_STARTS=0
 # trust for the workspace as Claude Code has it on record (the second of the two booleans read); the seed below may add it later
 hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
 consent_source() { # claude_config | marker | none : where the student's recorded answer was found
@@ -86,23 +112,46 @@ consent_source() { # claude_config | marker | none : where the student's recorde
 }
 consent_given() { [ "$(consent_source)" != none ]; }
 write_status() { # STATE MESSAGE : atomic status.json, the one file clients read (never the scheduler)
+  local prev="$STATE"
   STATE="$1"; MESSAGE="$2"
   local src; src=$(consent_source); local consent=false; [ "$src" != none ] && consent=true
   # the one thing the student must do now, and a sentence for it: what the panel shows on its one line
   local needs hint; needs=$(hpcw_needs "$STATE" "$consent"); hint=$(hpcw_hint "$STATE" "$needs" "$NEXT_JOB")
-  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"needs":%s,"hint":%s,"started_at":%s,"updated_at":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"scheduler_in_worker":%s,"scheduler_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s}\n' \
+  # framework 10: why a worker is stopped (the student's stop, or no Claude sign-in came), in that state only
+  local sr=""; [ "$STATE" = stopped ] && sr=",\"stop_reason\":$(json_str "${STOP_REASON:-request}")"
+  # every framework 9 field is kept (the 10.0.0 extension reads them); framework 10's are added
+  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":%s,"pid":%s,"state":%s,"message":%s,"needs":%s,"hint":%s,"submitted_at":%s,"got_computer_at":%s,"started_at":%s,"online_at":%s,"ends_at":%s,"renewal":%s,"updated_at":%s,"title":%s,"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"claude_login":%s,"consent":%s,"consent_source":%s,"workspace_trusted":%s,"rc_alive":%s,"resumed":%s,"tmux":%s,"restarts":%s,"chain":%s,"next_job":%s,"chain_note":%s,"scheduler_in_worker":%s,"scheduler_note":%s,"workspace":%s,"rc_log":%s,"token_path":%s%s}\n' \
     "$HPCW_VERSION" "$(json_str "$SITE")" "$(json_str "$RUN")" "$(json_str "$JOB")" "$(json_str "$NODE")" "$$" "$(json_str "$STATE")" "$(json_str "$MESSAGE")" "$(json_str "$needs")" "$(json_str "$hint")" \
-    "$(json_str "$STARTED_AT")" "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" \
+    "$(json_str "$SUBMITTED_AT")" "$(json_str "$GOT_COMPUTER_AT")" "$(json_str "$STARTED_AT")" "$(json_str "$ONLINE_AT")" "$(json_str "$ENDS_AT")" "$RENEWAL" \
+    "$(json_str "$(date -u +%FT%TZ)")" "$(json_str "$TITLE")" "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" \
     "$AUTH_JSON" "$consent" "$(json_str "$src")" "$WS_TRUSTED" "$RC_ALIVE" "$RESUMED" "$USING_TMUX" "$RESTARTS" "$([ "$CHAIN" = 1 ] && echo true || echo false)" "$(json_str "$NEXT_JOB")" "$(json_str "$CHAIN_NOTE")" \
-    "$SCHED_INSIDE" "$(json_str "$SCHED_NOTE")" "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$RUN_DIR/job.token")" > status.json.part && mv -f status.json.part status.json
+    "$SCHED_INSIDE" "$(json_str "$SCHED_NOTE")" "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$RUN_DIR/job.token")" "$sr" > status.json.part && mv -f status.json.part status.json
+  # framework 10: progress.log on a change of state, and the clock of the sign-in abandon. Waiting
+  # for the sign-in counts from this job's start when it started signed out (Remote Control never
+  # started), else from the moment it began waiting (a sign-in lost hours into a job gets the full time)
+  if [ "$prev" != "$STATE" ]; then
+    case "$STATE" in
+      need_login) hpcw_progress "$RUN_DIR" "Waiting for your Claude sign-in"
+        if [ "$RC_STARTS" = 0 ]; then NEED_LOGIN_SINCE=$JOB_START_S; else NEED_LOGIN_SINCE=$(now_s); fi;;
+      error) hpcw_progress "$RUN_DIR" "Couldn't start: $MESSAGE";;
+    esac
+  fi
+  [ "$STATE" = need_login ] || NEED_LOGIN_SINCE=0
+  return 0
 }
 write_connection() {
-  printf '{"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"node":%s,"job":%s,"pid":%s,"started_at":%s,"token_path":%s,"workspace":%s,"rc_log":%s,"permission_mode":%s,"capacity":%s,"resumed":%s,"next_job":%s}\n' \
+  printf '{"session_name":%s,"requested_name":%s,"session_url":%s,"environment_url":%s,"environment_id":%s,"node":%s,"job":%s,"pid":%s,"started_at":%s,"token_path":%s,"workspace":%s,"rc_log":%s,"permission_mode":%s,"capacity":%s,"resumed":%s,"next_job":%s,"title":%s,"online_at":%s}\n' \
     "$(json_str "$SESSION_NAME")" "$(json_str "$REQUESTED_NAME")" "$(json_str "$SESSION_URL")" "$(json_str "$ENV_URL")" "$(json_str "$ENV_ID")" "$(json_str "$NODE")" "$(json_str "$JOB")" "${RC_PID:-0}" "$(json_str "$STARTED_AT")" "$(json_str "$RUN_DIR/job.token")" \
-    "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$PERMISSION_MODE")" "$(json_str "$CAPACITY")" "$RESUMED" "$(json_str "$NEXT_JOB")" > connection.json.part && mv -f connection.json.part connection.json
+    "$(json_str "$WORKSPACE")" "$(json_str "$RUN_DIR/rc.log")" "$(json_str "$PERMISSION_MODE")" "$(json_str "$CAPACITY")" "$RESUMED" "$(json_str "$NEXT_JOB")" "$(json_str "$TITLE")" "$(json_str "$ONLINE_AT")" > connection.json.part && mv -f connection.json.part connection.json
 }
+# framework 10, the first write: this job has a computer. The node file is already there; status.json
+# says so with node and got_computer_at before anything else that can fail, replacing the queued file
+write_status starting "got a computer; checking the container and the sign-in"
+hpcw_progress "$RUN_DIR" "Got a computer"
+# a successor (or a Slurm requeue without a queued file): when the scheduler accepted it
+if [ -z "$SUBMITTED_AT" ] && [ $HAVE_ADAPTER = 1 ]; then SUBMITTED_AT=$(adapter_submit_time "$JOB" 2>/dev/null); fi
 # a stop asked for while the previous link was ending: this link ends the chain and leaves at once
-if [ -e stop ]; then rm -f stop; write_status stopped "stopped by request; the chain ended"; say "stop file present at start: chain ended"; touch stop.done; exit 0; fi
+if [ -e stop ]; then rm -f stop; STOP_REASON=request; write_status stopped "stopped by request; the chain ended"; hpcw_progress "$RUN_DIR" "Stopped"; say "stop file present at start: chain ended"; touch stop.done; exit 0; fi
 
 # ---- 1. node-local temp, IPC under /dev/shm, XDG fix ------------------------------------------
 HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP
@@ -141,6 +190,9 @@ if [ "$SCHED_IN_WORKER" = 1 ]; then
   SCHED_NOTE="${HPCW_SLURM_NOTE:-not available: only the Slurm client can be bound into the container}"
   say "scheduler inside the container: $SCHED_NOTE"
 fi
+# the one-time grid key (framework 10, login-setup) is hidden from Claude Code inside the container
+HIDE_KEY=$(hpcw_hide_login_key "$BINDS" "$HPCW_NODE_TMP")
+if [ -n "$HIDE_KEY" ]; then BINDS="$BINDS $HIDE_KEY"; export HPCW_BINDS="$BINDS"; say "the grid key made by login-setup is hidden from Claude Code in the container"; fi
 # The environment Claude Code gets: its own config dir, no other credential or endpoint (a token
 # in the environment would outrank the sign-in and switch Remote Control off), feature flags left
 # on (Remote Control needs them), no self-update under a running worker.
@@ -172,7 +224,7 @@ check_auth() { # Claude Code's own answer about its stored login; loggedIn/email
 check_auth
 # started seconds after a sign-in finished (the panel does that): Claude Code may still be writing
 # its credential, so ask three more times, 10 s apart, before saying need_login
-for _try in 1 2 3; do [ "$LOGGED_IN" = true ] && break; say "not signed in yet (try $_try of 3); asking again in 10 s"; sleep 10; check_auth; done
+for _try in 1 2 3; do [ "$LOGGED_IN" = true ] && break; say "not signed in yet (try $_try of 3); asking again in $AUTH_RETRY_S s"; sleep "$AUTH_RETRY_S"; check_auth; done
 say "claude auth status: loggedIn=$LOGGED_IN; consent: $(consent_source)"
 HELP=$(in_image 90 "$CLAUDE_BIN" remote-control --help 2>&1 || true)
 # when --help did not answer at all, assume the documented flags rather than starting bare
@@ -242,6 +294,8 @@ write_launcher() { # [extra args]: the command line claude gets, as a file; a wi
   chmod 700 launch.sh.part && mv -f launch.sh.part launch.sh
 }
 start_rc() { # [extra args]
+  RC_STARTS=$((RC_STARTS + 1))
+  [ "$RC_STARTS" = 1 ] && hpcw_progress "$RUN_DIR" "Connecting to Claude"
   pretrust
   write_launcher "$@"
   RC_OFF=$(stat -c %s rc.log 2>/dev/null || echo 0)
@@ -301,7 +355,9 @@ stop_and_leave() { # REASON: end the session, cancel the successor, write stoppe
   STOPPING=1
   rc_stop
   end_chain
+  STOP_REASON=request
   write_status stopped "stopped by request; the chain ended"
+  hpcw_progress "$RUN_DIR" "Stopped"
   # stop.done after the status, so whoever sees it may trust status.json; the stop file goes with it
   rm -f stop; touch stop.done
   say "stopped ($1)"
@@ -312,8 +368,37 @@ on_term() {
   if [ -e stop ] || [ -e stop.done ] || [ "$STOPPING" = 1 ]; then stop_and_leave "signal after a stop request"; return 0; fi
   trap - TERM INT
   rc_stop
-  if [ -n "$NEXT_JOB" ]; then write_status preempted "job $JOB ending (wall time or preemption); the next job in the chain, $NEXT_JOB, takes over and resumes the session"; say "ending: successor $NEXT_JOB takes over"
-  else write_status preempted "job $JOB ending (wall time or preemption) with no successor queued; start the worker again within seven days to resume the same session: hpcworker worker start --name $RUN"; say "preempted: left cleanly"; fi
+  if [ -n "$NEXT_JOB" ]; then write_status preempted "job $JOB ending (wall time or preemption); the next job in the chain, $NEXT_JOB, takes over and resumes the session"; hpcw_progress "$RUN_DIR" "Renewing"; say "ending: successor $NEXT_JOB takes over"
+  else write_status preempted "job $JOB ending (wall time or preemption) with no successor queued; start the worker again within four hours to resume the same session: hpcworker worker start --name $RUN"; hpcw_progress "$RUN_DIR" "Ended"; say "preempted: left cleanly"; fi
+  exit 0
+}
+# framework 10, the sign-in abandon: a job that has waited for the Claude sign-in for LOGIN_ABANDON_S
+# (0 = never) stops itself, cancels its queued successor and leaves, so a first run abandoned on
+# Anthropic's page does not hold a slot. Same guard as the stop path: a TERM landing inside it hands back.
+# A sign-in under way on the login node (`hpcworker connect` touches signin.pending in this run's folder
+# when its sitting starts and when it ends) moves the clock: a student still on Anthropic's page, or one
+# who pressed "Sign in again", is never abandoned in the middle of it.
+abandon_due() {
+  [ "$STATE" = need_login ] && [ "${LOGIN_ABANDON_S:-0}" -gt 0 ] && [ "${NEED_LOGIN_SINCE:-0}" -gt 0 ] || return 1
+  local since="$NEED_LOGIN_SINCE" p
+  p=$(stat -c %Y signin.pending 2>/dev/null) && [ -n "$p" ] && [ "$p" -gt "$since" ] && since=$p
+  [ $(( $(now_s) - since )) -ge "$LOGIN_ABANDON_S" ]
+}
+login_abandon() {
+  [ "$STOPPING" = 1 ] && return 0
+  # one last look first: a sign-in that landed since the once-a-minute check is not abandoned
+  check_auth
+  if [ "$LOGGED_IN" = true ]; then write_status starting "signed in; starting Remote Control"; say "signed in just before the sign-in wait ran out: carrying on"; return 0; fi
+  STOPPING=1
+  rc_stop
+  end_chain
+  CHAIN_NOTE="chain ended: no Claude sign-in came within $LOGIN_ABANDON_S s"
+  STOP_REASON=login_abandoned
+  write_status stopped "stopped: waiting for your Claude sign-in timed out"
+  hpcw_progress "$RUN_DIR" "Stopped: waiting for your Claude sign-in timed out"
+  # as after a stop: a later "worker stop" finds it done; the next start or connect begins afresh
+  rm -f stop; touch stop.done
+  say "stopped: no Claude sign-in within ${LOGIN_ABANDON_S}s; the chain ended"
   exit 0
 }
 trap on_term TERM INT
@@ -325,6 +410,7 @@ BACKOFF=10; NEXT_START=0; LAST_BEAT=0; ONLINE_NOTED=0
 if [ "$LOGGED_IN" != true ]; then write_status need_login "Claude Code on the cluster is not signed in; sign in from the panel (or run: hpcworker claude login). This job waits and asks again every minute."; fi
 while :; do
   if [ -e stop ]; then stop_and_leave "stop file"; fi
+  if abandon_due; then login_abandon; fi
   if rc_alive; then
     RC_ALIVE=true
     tail_txt=$(clean_tail "$RC_OFF")
@@ -347,6 +433,14 @@ while :; do
       elif printf '%s' "$tail_txt" | grep -q -i 'Workspace not trusted'; then
         [ "$STATE" = error ] || write_status error "Claude Code refused the workspace as untrusted: run hpcworker claude login once more (it records the trust answer)"
       elif [ -n "$ENV_URL" ] || printf '%s' "$tail_txt" | grep -q -E 'Connected ·|Capacity: [0-9]+/[0-9]+|claude\.ai/code'; then
+        # framework 10: this job's first registration with a link: online_at, progress.log and the
+        # job output's plain line (the node's local time), once per job
+        if [ -n "$ENV_URL" ] && [ -z "$ONLINE_AT" ]; then
+          ONLINE_AT=$(date -u +%FT%TZ)
+          hpcw_progress "$RUN_DIR" "Online: $ENV_URL"
+          printf '%s Online. Open in Claude: %s\n' "$(date +%-H:%M)" "$ENV_URL"
+          [ "$STATE" = online ] && write_status online "$MESSAGE"
+        fi
         if [ $ONLINE_NOTED = 0 ]; then ONLINE_NOTED=1; BACKOFF=10; write_connection; say "online: session $SESSION_NAME ${ENV_URL:+$ENV_URL}"; fi
         [ "$STATE" = online ] && [ -n "$ENV_URL" ] || { write_status online "Open in Claude: ${ENV_URL:-claude.ai/code} and find $SESSION_NAME (or tap Code in the Claude app). $(last_line "$tail_txt")"; [ -n "$ENV_URL" ] && write_connection; }
       elif [ $(( $(now_s) - RC_STARTED )) -gt 60 ] && [ "$STATE" = starting ]; then
@@ -358,7 +452,11 @@ while :; do
     if [ "$RC_PID" != 0 ]; then
       # it exited: back off and start again (a fresh registration joins the same environment; --continue was tried once)
       RC_PID=0; RESTARTS=$((RESTARTS + 1)); NEXT_START=$(( $(now_s) + BACKOFF )); BACKOFF=$(( BACKOFF * 2 > 300 ? 300 : BACKOFF * 2 ))
-      [ "$STATE" = need_login ] || write_status starting "Remote Control stopped; starting again in $(( NEXT_START - $(now_s) )) s. Last output: $(last_line "$(clean_tail "$RC_OFF")")"
+      if [ "$STATE" != need_login ]; then
+        write_status starting "Remote Control stopped; starting again in $(( NEXT_START - $(now_s) )) s. Last output: $(last_line "$(clean_tail "$RC_OFF")")"
+        # framework 10: it had been online in this job and starts again
+        [ -n "$ONLINE_AT" ] && hpcw_progress "$RUN_DIR" "Reconnecting"
+      fi
       say "remote-control exited; restart #$RESTARTS in ${BACKOFF}s"
     fi
     # while waiting for the sign-in, ask every minute (the panel's sign-in ends with a worker start or a wait for this)

@@ -113,12 +113,44 @@ hpcw_rm_own_tmp() { # PATH... : remove ONLY directories the framework made for o
   done
 }
 
+# a person's terminal on stdin; a function of its own so the unit tests, which run without one, can stand in for it
+hpcw_have_terminal() { [ -t 0 ]; }
 # 0 when an agent, not a person, is at the keyboard: CLAUDECODE, the request and worker a Beethoven for
 # VS Code worker sets in Claude's shell (BEETHOVEN_REQUEST_ID and kin, and the ASHLEY_ twins it still
 # sets for older readers: its names before 2026-09-30), or no terminal
 hpcw_agent_marker() {
   [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${BEETHOVEN_REQUEST_ID:-}" ] || [ -n "${BEETHOVEN_WORKER:-}" ] \
-    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || [ ! -t 0 ]
+    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || ! hpcw_have_terminal
+}
+
+# ---- framework 10: times and the run's progress log ------------------------------------------------
+hpcw_now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+hpcw_iso_epoch() { # ISO-8601 (or anything GNU date reads) -> seconds since the epoch; nothing when unreadable
+  [ -n "${1:-}" ] || return 1
+  date -u -d "$1" +%s 2>/dev/null
+}
+hpcw_local_time_utc() { # a scheduler's own time (local, no zone: Slurm's 2026-10-01T09:12:00) -> ISO-8601 UTC; nothing for N/A, Unknown, None or an unreadable value
+  local e
+  case "${1:-}" in ""|None|Unknown|N/A|"(null)") return 0;; esac
+  e=$(date -d "$1" +%s 2>/dev/null) || return 0
+  date -u -d "@$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+  return 0
+}
+# progress.log: "<YYYY-MM-DDTHH:MM:SSZ> <sentence>", one line per event, appended with one write
+# (O_APPEND), from a fixed set of sentences (the extension's contract.ts PROGRESS). Three writers
+# append to it (worker start, the job, worker status for a request the grid dropped); none reads it
+# back but the person and the extension. A sentence is one line: line breaks become spaces.
+hpcw_progress() { # RUN_DIR SENTENCE
+  local s="${2//$'\n'/ }"; s="${s//$'\r'/}"
+  printf '%s %s\n' "$(hpcw_now_iso)" "${s:0:400}" >> "$1/progress.log" 2>/dev/null
+  return 0
+}
+hpcw_progress_trim() { # RUN_DIR: keep the last 400 lines (a temporary file, then a rename); worker start runs it before it appends
+  local f="$1/progress.log" n
+  [ -s "$f" ] || return 0
+  n=$(wc -l < "$f" 2>/dev/null | tr -d ' '); [ "${n:-0}" -gt 400 ] 2>/dev/null || return 0
+  tail -n 399 "$f" > "$f.trim.$$" 2>/dev/null && mv -f "$f.trim.$$" "$f" || rm -f "$f.trim.$$"
+  return 0
 }
 
 hpcw_strip_codes() { # stdin -> stdout: a terminal transcript without escape sequences, NULs or carriage returns
@@ -168,7 +200,7 @@ PYEOF
 hpcw_needs() { # STATE CONSENT(true|false) -> login|consent|nothing : the one thing the student must do now, for the panel's one line
   # login only once the job has said so (the first checks retry for a credential still being written);
   # consent as soon as it is missing while the job is on its way, so the panel can write the marker
-  # before Claude Code asks
+  # before Claude Code asks; nothing while the job is still in line (framework 10's "queued")
   case "$1" in
     need_login) echo login;;
     need_consent) echo consent;;
@@ -183,7 +215,9 @@ hpcw_hint() { # STATE NEEDS [NEXT_JOB] -> one sentence in plain words
     consent) echo "Allow Remote Control once; your worker is waiting for that answer.";;
     *) case "$1" in
       online) echo "Your worker is online: open it in Claude.";;
-      starting) echo "Your worker is starting; this takes about a minute.";;
+      queued) echo "Your worker is in line for a computer.";;
+      # framework 10: no promise of "about a minute"; the extension tells the wait from status.json
+      starting) echo "Your worker has a computer and is connecting to Claude.";;
       running) echo "Claude Code is running; waiting for its session link.";;
       stopped) echo "Your worker is stopped; start it again when you need it.";;
       preempted) if [ -n "${3:-}" ]; then echo "This job ended; the next one takes over shortly."; else echo "This job ended; start the worker again to continue."; fi;;
@@ -232,6 +266,30 @@ hpcw_runtime_exec() {
       srun --overlap -N1 -n1 --container-image="$image" ${m:+--container-mounts="$m,$nt/tmp:/tmp"} "$@";;
     *) echo "REFUSING: unknown runtime ${RUNTIME:-}" >&2; return 99;;
   esac
+}
+
+# ---- framework 10: the one-time grid key out of Claude Code's reach --------------------------------------
+# `hpcworker login-setup` (AM2) leaves ~/.ssh/beethoven_ed25519 in the student's home: a key with no
+# passphrase that the portal's own server may use. Claude Code in the worker runs in a container that
+# sees the home, so a prompt that tricked it into printing ~/.ssh would put that key in a chat. An empty
+# file of this job's own is bound over it inside the container (a file over a file, as the Slurm binds
+# below do with /etc/passwd); the key itself is untouched on the host and still serves the portal's
+# terminal. Only when the key exists and a bind of the home (or a folder above it) makes it visible.
+#   hpcw_hide_login_key "BINDS" NODE_TMP -> the extra "-B empty:key:ro" to append, or nothing
+hpcw_hide_login_key() {
+  local binds="$1" nt="$2" key="${HOME:-}/.ssh/beethoven_ed25519" b dst seen=0 covered=0
+  [ -n "${HOME:-}" ] && [ -f "$key" ] && [ -n "$nt" ] || return 0
+  for b in $binds; do
+    if [ "$b" = -B ] || [ "$b" = --bind ]; then seen=1; continue; fi
+    [ $seen = 1 ] || continue
+    # shlex quoting from the render ('…') comes off; a bind is SRC or SRC:DST or SRC:DST:OPTS
+    seen=0; b=${b//\'/}; dst="${b#*:}"; [ "$dst" = "$b" ] && dst="$b"; dst="${dst%%:*}"; dst="${dst%/}"
+    case "$key" in "$dst"/*) covered=1;; esac
+  done
+  [ $covered = 1 ] || return 0
+  if [ ! -e "$nt/no-login-key" ]; then ( umask 077; : > "$nt/no-login-key" ) 2>/dev/null && chmod 400 "$nt/no-login-key" 2>/dev/null || return 0; fi
+  [ -f "$nt/no-login-key" ] && [ ! -s "$nt/no-login-key" ] || return 0
+  printf -- '-B %s:%s:ro' "$nt/no-login-key" "$key"
 }
 
 # ---- the host's Slurm client inside the worker's container (profile: scheduler_in_worker) ----------
@@ -343,3 +401,17 @@ adapter_node_tmp() { hpcw_node_tmp; }
 adapter_runtime_exec() { hpcw_runtime_exec "$@"; }
 # a scheduler without a one-call form answers several ids one by one (PBS, LSF); Slurm overrides this
 adapter_status_many() { local id; for id in ${1//,/ }; do printf '%s|%s\n' "$id" "$(adapter_status "$id" 2>/dev/null || echo 'UNKNOWN||')"; done; }
+# framework 10: one job in line, for `worker status` while status.json says "queued".
+#   adapter_status_one ID [FORMAT] -> STATE|REASON|START|NODE (Slurm: squeue's own %T|%r|%S|%N), exit 0;
+#   nothing and exit 0 when the scheduler no longer lists the job; exit 2 when the scheduler could not
+#   be asked (the caller then changes nothing). A scheduler without squeue's fields (PBS, LSF) answers
+#   its normalised state and node with no reason and no estimate, from its one status call.
+adapter_status_one() {
+  local s rest; s=$(adapter_status "$1" 2>/dev/null) || return 2
+  rest=${s#*|}
+  case "${s%%|*}" in PENDING|RUNNING) printf '%s|||%s\n' "${s%%|*}" "${rest%%|*}";; UNKNOWN) return 2;; esac
+  return 0
+}
+# framework 10: when the scheduler accepted a job, as ISO-8601 UTC (the job asks, inside itself, when
+# no queued status.json names it: a chain successor); nothing where the scheduler cannot say
+adapter_submit_time() { return 0; }

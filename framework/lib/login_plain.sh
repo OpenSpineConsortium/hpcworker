@@ -5,7 +5,16 @@
 # and inside the worker image, started by `hpcworker _exec login --plain`, which passes this file's
 # text to bash -c (no bind mount is assumed for it):
 #
-#   bash -c "$(cat login_plain.sh)" _ WORKSPACE CLAUDE_BIN SITTING_DIR SEED_JS BUDGET_S [live|dry]
+#   bash -c "$(cat login_plain.sh)" _ WORKSPACE CLAUDE_BIN SITTING_DIR SEED_JS BUDGET_S [live|dry] [KEEPALIVE_S] [fresh] [DEADLINE]
+#
+# The last three are framework 10's, given only by `hpcworker connect` (`claude login --plain`, which
+# the 10.0.0 extension types, gives none of them and behaves exactly as in framework 9):
+#   KEEPALIVE_S  when > 0, "HPCW-LOGIN: still waiting" once that many seconds pass with nothing
+#                printed while the sitting waits for the link and for the code (connect's relay
+#                covers the wait for the computer, before this script runs)
+#   fresh        `claude auth logout` first, so the sign-in is a new one ("Use another account")
+#   DEADLINE     seconds since the epoch by which connect must have ended: the code budget becomes
+#                min(BUDGET_S, DEADLINE - now), never under 120 s
 #
 # What it prints on stdout, one line each, and nothing else from Claude Code's screen:
 #   HPCW-LOGIN: <progress, in plain words>
@@ -17,6 +26,7 @@
 #   HPCW-LOGIN: that code was not accepted; paste it again   once per code Claude Code rejected
 #   SIGNED-IN <email> <subscriptionType>         and exit 0
 #   HPCW-LOGIN-FAILED: <one plain sentence>      and exit 3 (the caller adds nothing)
+#   HPCW-LOGIN: still waiting                    framework 10, under connect only (KEEPALIVE_S)
 #   HPCW-LOGIN-DRY: url_seen=.. prompt_seen=..   dry mode only (the unit tests; the probe job no
 #                                                longer runs it): what the flow looks like, never the link
 #
@@ -66,11 +76,16 @@ hpcw_login_rejected() { # stdin: stripped text -> 0 when it shows a rejected cod
 }
 
 hpcw_login_main() {
-  local ws="$1" claude="$2" dir="$3" seed="${4:-}" budget="${5:-600}" mode="${6:-live}"
+  local ws="$1" claude="$2" dir="$3" seed="${4:-}" budget="${5:-600}" mode="${6:-live}" keepalive="${7:-0}" fresh="${8:-}" deadline="${9:-0}"
   local fifo="$dir/stdin" log="$dir/login.log" launch="$dir/launch.sh"
   local spid=0 tty_saved="" url="" url_seen=0 url_at=0 prompt_seen=0 prompt_at=0 sent=0 sent_at=0 judged=0 invalid_n=0 enters=0 last_enter=0 stdin_eof=0 saw_select=0 tail_txt flags line out_json li em st i
+  local last_out=0 now_s left
   local -a sent_off=()   # per code sent: the transcript's size just before its Enter; the verdict on it is drawn after that point
-  out() { printf '%s\n' "$*"; }
+  [[ "$keepalive" =~ ^[0-9]+$ ]] || keepalive=0
+  [[ "$deadline" =~ ^[0-9]+$ ]] || deadline=0
+  out() { printf '%s\n' "$*"; last_out=$SECONDS; }
+  # framework 10 (connect only): a line at least every KEEPALIVE_S seconds while the sitting waits
+  still_waiting() { [ "$keepalive" -gt 0 ] && [ $(( SECONDS - last_out )) -ge "$keepalive" ] && out "HPCW-LOGIN: still waiting"; return 0; }
   cleanup() {
     # the sitting's own process group (script and Claude Code under it), then its own three files;
     # the directory itself goes with the allocation's guarded cleanup on the host side
@@ -100,6 +115,8 @@ hpcw_login_main() {
 
   if [ "$mode" != dry ]; then
     out "HPCW-LOGIN: on $(hostname -s 2>/dev/null || echo the compute node); checking whether you are signed in already"
+    # framework 10, "Use another account": Claude Code's own sign-out first; nothing of it is read
+    [ "$fresh" = fresh ] && timeout 60 "$claude" auth logout >/dev/null 2>&1
     auth_status
     if [ "$li" = true ]; then out "SIGNED-IN ${em:--} ${st:--}"; cleanup; return 0; fi
     # the three settings Claude Code's screens ask about (onboarding done, a theme, trust for this
@@ -127,8 +144,14 @@ hpcw_login_main() {
   spid=$(cat "$dir/pid" 2>/dev/null); spid=${spid:-0}
   [ "$spid" -gt 0 ] 2>/dev/null || fail "the terminal helper (script) did not start on this node"
   out "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"
-  SECONDS=0
+  # framework 10: connect ends within its own budget (14 minutes); the code budget is what is left, at least two minutes
+  if [ "$deadline" -gt 0 ]; then
+    now_s=$(date +%s); left=$(( deadline - now_s )); [ "$left" -lt 120 ] && left=120
+    [ "$left" -lt "$budget" ] && budget=$left
+  fi
+  SECONDS=0; last_out=0
   while :; do
+    still_waiting
     tail_txt=$(tail -c 12000 "$log" 2>/dev/null | hpcw_login_strip)
     if [ $url_seen = 0 ]; then
       url=$(printf '%s\n' "$tail_txt" | hpcw_login_url)
@@ -194,8 +217,8 @@ hpcw_login_main() {
     fi
   done
   # Claude Code saves its credential and leaves; give it a moment, then ask it (never the file)
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do kill -0 "$spid" 2>/dev/null || break; sleep 1; done
-  for i in 1 2 3; do auth_status; [ "$li" = true ] && break; sleep 3; done
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do kill -0 "$spid" 2>/dev/null || break; still_waiting; sleep 1; done
+  for i in 1 2 3; do auth_status; [ "$li" = true ] && break; still_waiting; sleep 3; done
   if [ "$li" = true ]; then
     out "SIGNED-IN ${em:--} ${st:--}"; cleanup; return 0
   fi

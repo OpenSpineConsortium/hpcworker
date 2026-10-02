@@ -172,7 +172,7 @@ class Consent(unittest.TestCase):
 class NeedsAndHint(unittest.TestCase):
     CASES = [("need_login", "true", "login"), ("need_consent", "true", "consent"), ("starting", "false", "consent"), ("starting", "true", "nothing"),
              ("running", "false", "consent"), ("running", "true", "nothing"), ("online", "false", "nothing"), ("stopped", "false", "nothing"),
-             ("preempted", "true", "nothing"), ("error", "false", "nothing")]
+             ("preempted", "true", "nothing"), ("error", "false", "nothing"), ("queued", "false", "nothing"), ("queued", "true", "nothing")]
 
     def test_needs_table(self):
         rc, out, err = bash(with_common("; ".join("hpcw_needs %s %s" % (s, c) for s, c, _ in self.CASES)))
@@ -191,6 +191,9 @@ class NeedsAndHint(unittest.TestCase):
         self.assertIn("start the worker again", bash(with_common("hpcw_hint preempted nothing ''"))[1])
         self.assertIn("Sign in", bash(with_common("hpcw_hint need_login login ''"))[1])
         self.assertIn("Allow Remote Control", bash(with_common("hpcw_hint starting consent ''"))[1])
+        # framework 10: the queued file's hint, and a start that no longer promises "about a minute"
+        self.assertEqual(bash(with_common("hpcw_hint queued nothing ''"))[1], "Your worker is in line for a computer.")
+        self.assertEqual(bash(with_common("hpcw_hint starting nothing ''"))[1], "Your worker has a computer and is connecting to Claude.")
 
 
 class PlainLogin(unittest.TestCase):

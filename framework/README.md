@@ -1,7 +1,16 @@
 # hpcworker
 
 Your own Claude Code, running as a batch job on your university's cluster, open in claude.ai/code
-or the Claude app on your phone. Version 9.
+or the Claude app on your phone. Version 10.
+
+Version 10 is the cluster side of Beethoven 11.0.0 (the wire contract is
+`../docs/V11_CONTRACT.md`): one line, `hpcworker connect`, sets the account up, records the Remote
+Control answer, starts the worker and signs in to Claude; a worker says it is `queued` the moment the
+scheduler takes it; every run keeps a plain-words `progress.log`; `worker status` opens with one line
+for a person and has a `--json` form; a job left waiting for the Claude sign-in stops itself after 20
+minutes; and `hpcworker login-setup` (unproven on the grid) is the one-time key step for an account
+whose portal terminal asks for a password. Everything the 10.0.0 extension and a framework 9 worker
+use still works: see "Version 10 and what it keeps" below.
 
 The cluster-side half of Beethoven, the browser extension. Bash plus the system `python3`, nothing
 installed, nothing running on the login node except the one `sbatch`, `squeue` or `scancel` an
@@ -33,7 +42,7 @@ the shared tree); `shared`, one line naming the shared directory (the marker); `
 from the shared copy's `profiles/<site>.json` and kept if one is there; and `log/`. The consent marker
 (`~/.hpcworker/consent`) stays there too, and the run directories stay under `shared_state_dir`. `DIR`
 may be left out when the profile names it (`hpcworker install --shared --profile wayne`).
-`hpcworker version` then says `9 (shared copy at DIR)`, and `hpcworker diag` names the shared
+`hpcworker version` then says `10 (shared copy at DIR)`, and `hpcworker diag` names the shared
 directory and the numbered directory it resolves to.
 
 - Run `install` again (through the launcher, or from a checkout) and it stays on the shared copy: it
@@ -113,8 +122,8 @@ pass `bash -n`. On the cluster it is file work on the login node and nothing els
 setfacl, one link; no scheduler call, no container, no temp file under `/tmp`):
 
 ```
-ROOT/v9/          one directory per framework version, read-only for everyone
-ROOT/current      a relative link to v9, switched in one rename (ln -s, then mv -T)
+ROOT/v10/         one directory per framework version, read-only for everyone
+ROOT/current      a relative link to v10, switched in one rename (ln -s, then mv -T)
 ROOT/deploy.log   one line per publish
 ```
 
@@ -139,8 +148,11 @@ which keeps the old directory as `v<N>.replaced-<time>`). Older versions are nev
    answered it before, Claude Code asks "Enable Remote Control? (y/n)": type y, wait for "Connected",
    press Ctrl+C. Claude Code records that answer itself, and your workers use it.
 4. `hpcworker worker start`. A job starts, and stays started: before it ends, each job queues the next
-   one, which picks the session up again. `hpcworker worker status` shows the state and the link to
-   open in Claude (claude.ai/code, or Code in the Claude app, where the session is listed by name).
+   one, which picks the session up again. `hpcworker worker status` says where it is in one line
+   ("Your worker is in line for a computer (6 min so far).", "Your worker is online (ready 7 min after
+   you asked).") and gives the link to open in Claude (claude.ai/code, or Code in the Claude app,
+   where the session is listed by its title, "Wayne State grid"). `worker start --wait [MIN]` and
+   `worker watch` follow it until it is online.
    The first start also puts a `CLAUDE.md` in the worker's folder: what Claude Code there needs to
    know about the cluster (see "The workspace guide"); it is yours to edit and is never replaced.
 5. `hpcworker worker stop` when you are done. That ends the chain: the running job leaves on its
@@ -212,7 +224,268 @@ and then again every minute while it waits.
 `login`, `consent`, `nothing`: the one thing the student must do now; `consent` is set as soon as no
 record exists while the job is on its way, so the panel can write the marker before Claude Code
 asks) and `hint` (one sentence in plain words for that). `connection.json` keeps `session_name` and
-`environment_url`; `hpcworker worker status` prints the environment link.
+`environment_url`; `hpcworker worker status` prints the environment link. Version 10's fields are in
+"Where a worker is" below.
+
+## The extension's line: `hpcworker connect` (version 10)
+
+```
+hpcworker connect [--name NAME] [--profile SITE] [--consent INSTALL_ID]
+                  [--login auto|always|fresh|never] [--permission-mode default|acceptEdits|plan] [--no-chain]
+```
+
+Beethoven 11.0.0 types this one line into the portal's shell with `exec` (so the shell ends when
+connect ends), naming the lab's shared copy by its full path. In order:
+
+1. **Setup.** When the account does not already run the shared copy the site profile names (no
+   marker, a marker naming another folder, no launcher, a copy of its own, or no `profile.json`), it
+   runs the shared install for that folder with `--profile SITE`, with all its guards, but without
+   the `~/.bashrc` block (the extension never needs it). `HPCW-STEP setup changed` or `setup ready`.
+2. **Consent** (with `--consent`): `~/.hpcworker/consent` becomes `yes <ISO-8601 UTC> <install id>`,
+   written atomically, mode 0600. `HPCW-STEP consent`.
+3. **Restricted.** A `.restricted` marker in the workspace, or the profile's `restricted: true` or
+   `restricted_workspaces` (names, or `"*"`): nothing is submitted.
+4. **The worker.** `worker start`'s own check (one squeue over the job and its successor): a job of
+   the run in line or running is kept, otherwise one is submitted (`HPCW-STEP queued <job> new|kept
+   <run dir>`; the running one is named when there are two).
+5. **The sign-in**, by `--login`: `auto` skips it when the newest `status.json` of any run that
+   carries Claude Code's answer says `loggedIn: true` (read before this start writes its queued file,
+   so a returning Connect after a Stop does not sign in again); `always` runs it (Claude Code answers
+   at once when it is signed in); `fresh` runs `claude auth logout` first ("Use another account");
+   `never` skips it. The sitting is framework 9's plain one (`lib/login_plain.sh`), with the lines
+   listed under "The panel's sign-in" below, on `partition_cpu`.
+6. `HPCW-STEP done`, exit 0.
+
+Each `HPCW-STEP` line appears at most once, whole, at the start of a line, in that order. A failure
+ends connect with `HPCW-STEP failed <code> <sentence>` and the code's exit status: `usage` 2 (nothing
+done), `setup` 3, `restricted` 4, `refused` 5 (sbatch's message on one line), `signin-node` 6 (no
+computer for the sitting within 600 s), `signin-code`, `signin-timeout` and `signin` 7 (after the
+sitting's own `HPCW-LOGIN-FAILED:` line; the worker keeps its place in line), `other` 1. Under connect
+anything that would have been an `hpcworker: ...` error becomes `failed other`.
+
+**One writer, and the keepalive.** The sitting's allocation (`srun`, its own messages too) runs into
+a pipe, and `lib/relay.py` copies it to the terminal one whole line at a time; when 20 s pass with
+nothing written and no part of a line waiting, it writes `HPCW-LOGIN: still waiting`. The sitting
+writes the same line itself, under connect only, while it waits for the link and for the code. The
+portal's shell closes a connection with no activity (Open OnDemand's default is 300 s), and the wait
+for the sign-in computer alone can be ten minutes. `claude login --plain`, which the 10.0.0 extension
+types, prints no keepalive and is otherwise framework 9's. The terminal's echo is turned off on the
+login node too while the sitting runs, so a pasted code is not shown whatever `srun --pty` does with
+an output that is a pipe. That last point, and `srun --pty` with its output piped at all, have not
+been run on the grid.
+
+**Time.** Connect ends within 840 s of its start: at most 600 s for the sign-in computer, then a code
+budget of `min(600, 840 - seconds already spent)`, never under 120 s. The extension cuts any shell
+sitting at 15 minutes.
+
+```
+HPCW-STEP setup changed
+HPCW-STEP consent
+HPCW-STEP queued 40501234 new /rs/rs_grp_oschome/st1234/hpcworker/worker
+HPCW-STEP signin
+HPCW-LOGIN: requesting a compute node
+HPCW-LOGIN: still waiting
+HPCW-LOGIN: on asx15; checking whether you are signed in already
+HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link
+AUTH-URL: https://claude.ai/oauth/authorize?code=true&client_id=...
+HPCW-LOGIN: paste the code from that page
+HPCW-LOGIN: code received, checking
+SIGNED-IN alex@wayne.edu max
+HPCW-STEP signed-in alex@wayne.edu max
+HPCW-STEP done
+```
+
+A returning Connect after a Stop, signed in on the grid: `setup ready`, `consent`, `queued <job> new
+<run dir>`, `signed-in <email> <plan>`, `done`, with no allocation.
+
+The other verbs the extension types: `worker status --json` (below), `worker stop` (unchanged), `worker
+restrict --name N` (writes `<state_dir>/workspaces/N/.restricted`, mode 0644, `restricted <time> by
+hpcworker worker restrict`; says `worker N: marked restricted (<path>); it will not start there until
+the marker is removed` or `worker N: already marked restricted (<path>)`; never stops a running worker),
+and `claude consent --record INSTALL_ID` (the marker as connect writes it, no question asked, no
+profile needed; a malformed id is refused with exit 2).
+
+## Where a worker is: `queued`, `progress.log`, `worker status` (version 10)
+
+**The queued file.** `worker start` writes `status.json` the moment the scheduler takes the job,
+atomically and before it prints anything: `{"version":10, ..., "state":"queued", "message":"waiting
+for a computer", "needs":"nothing", "hint":"Your worker is in line for a computer.", "submitted_at":
+..., "title":"Wayne State grid", "renewal":false, ...}` (all the keys, in order, in the contract). It
+removes the last job's `node` file before it submits, and appends "Asked the grid for a computer" to
+`progress.log`, kept to its last 400 lines. The job's first act replaces the file: the `node` file,
+then `status.json` with `node` and `got_computer_at`, keeping `submitted_at` when the queued file
+names this job; a chain successor (named first in `next.id`) says `renewal: true` and takes its
+`submitted_at` from `scontrol show job` (`SubmitTime`, read as local time). The job also writes
+`started_at` (= `got_computer_at`), `ends_at` (`got_computer_at` plus the job's hours), `online_at`
+(its first registration with a link) and `title`, and `stop_reason` (`request` or
+`login_abandoned`) when it is `stopped`. `connection.json` gains `title` and `online_at`. Every
+framework 9 field is kept.
+
+**The session title** is the profile's `session_title` ("Wayne State grid"), or "Wayne State grid ·
+NAME" for a worker not named `worker` ("Grid worker" when the profile names none); it is what Claude
+Code is asked for with `--name` (it was `<site>-<run>`), `status.json` `title` and `requested_name`.
+
+**`progress.log`** in the run folder: `<YYYY-MM-DDTHH:MM:SSZ> <sentence>`, one line per event, one
+write each: "Asked the grid for a computer" (worker start), "Got a computer", "Connecting to Claude",
+"Online: <link>", "Waiting for your Claude sign-in", "Reconnecting", "Renewing", "Ended", "Stopped",
+"Stopped: waiting for your Claude sign-in timed out", "Couldn't start: <message>" (the job, or worker
+status for a request the grid dropped). The job's output also gets `<H:MM> Online. Open in Claude:
+<link>` (the node's local time) when it first registers.
+
+**`worker status`.** While the worker is in line (status `queued`, or none yet, and no `node` file) it
+asks the scheduler ONCE (`squeue -h -j <job> -o '%T|%r|%S|%N'`) and writes the answer into the queued
+file: `scheduler_state`, `reason`, `expected_start` (only a time in the future, as UTC), `checked_at`,
+and `got_computer_at` once Slurm says RUNNING. A job the scheduler no longer lists, with no `node`
+file, becomes `error`, "the grid ended the request before it started". A scheduler that does not answer
+changes nothing. Once the job has a computer, nothing is asked: its files say where it is. It writes
+only while the file still says `queued` for that job and no `node` file exists, through a temporary
+name of its own, so it never writes over the job. The first line, for a person:
+
+| State | Line |
+|---|---|
+| queued | `Your worker is in line for a computer (6 min so far).` |
+| starting, running, need_consent | `Your worker has a computer and is connecting to Claude.` |
+| online (asked by a person) | `Your worker is online (ready 7 min after you asked).` |
+| online otherwise | `Your worker is online.` |
+| need_login | `Your worker is waiting for your Claude sign-in.` |
+| preempted, a successor queued / none | `Your worker is renewing itself; it is back in a few minutes.` / `Your worker has ended. hpcworker connect starts it again.` |
+| stopped (the sign-in abandon / otherwise) | `Your worker stopped: waiting for your Claude sign-in timed out.` / `Your worker is stopped.` |
+| error | `Your worker couldn't start: <message>.` |
+| no status yet | `Your worker has been asked for and has not reported yet.` |
+
+When it is online, `Open in Claude: <link>  Look for Wayne State grid.` follows. `--details` adds
+framework 9's lines (job, node, heartbeat, session, sign-in, chain) and the times. `--json` prints one
+object on one line: `{"v":1,"run","job","next_job","state_dir","status","connection","scheduler","line"}`
+(framework 9's `run`, `job`, `next_job`, `status` and `connection` as they were; `scheduler` is what the
+one call learned, or `null` when it did not ask). `worker start --wait [MIN]` and `worker watch
+[--minutes MIN]` read `status.json` and `progress.log` every 5 s (files only), print each new progress
+line, ask the scheduler at most once a minute and only while the worker is in line, and end online
+with the line above and the link (exit 0), stopped or failed (1), waiting for the sign-in (3) or out of
+time (2; 30 minutes unless given).
+
+`worker stop` of a worker still in line (its queued file, no `node` file) does not wait 45 s for a job
+that cannot read the stop file: it asks the scheduler at once, cancels, and writes `stopped`
+(`stop_reason` `request`) itself, unless the job reached a computer in the meantime, which then writes
+its own stop. It says `worker NAME: stopped (it was still in line for a computer; cancelled at the
+scheduler: <id>; the chain ended)`.
+
+**The sign-in abandon.** A job still in `need_login` after the profile's `login_abandon_s` (1200 s)
+stops itself: `stopped`, `stop_reason` `login_abandoned`, message "stopped: waiting for your Claude
+sign-in timed out", its queued successor cancelled, `stop.done` touched, and it leaves. So a first run
+abandoned on Anthropic's page does not hold a slot on the worker partition. The time counts from the
+job's own start when it started signed out (Remote Control never started), and otherwise from the
+moment it began waiting, so a sign-in lost hours into a job gets the full 20 minutes. `0` turns it off.
+Two things keep it from stopping a student who is signing in: before it stops, the job asks Claude
+Code once more whether it is signed in (a sign-in that landed since the once-a-minute check carries
+on to online), and `connect` touches `signin.pending` in the worker's folder when its sitting starts
+and when it ends, which moves the clock (a student still on Anthropic's page, or one who pressed
+"Sign in again", gets the full time from there). A TERM that lands inside it hands back to it, as on
+the stop path.
+
+## The one-time key step: `hpcworker login-setup` (version 10; UNPROVEN ON THE GRID)
+
+Designed from how Open OnDemand's Shell app runs ssh and tried against the mock portal and the unit
+tests only. No student without a key has run it on the real grid; until one has, it is a design.
+
+The portal's Shell app runs, as the student and on the OnDemand server, `ssh <host>` with nothing
+else, so the ssh client reads the student's `~/.ssh/config` and, when no `IdentityFile` applies to
+the host, tries its default key files. An account with a key there that authorises itself (the
+maintainer's: an `id_rsa` made on the grid in 2022) gets in; a student who never made one is asked
+for a password, which Beethoven never types. The student types the password into the grid's own
+terminal page once; then Beethoven types (or the student pastes) one line there:
+
+```
+bash /rs/rs_grp_oschome/shared/beethoven/hpcworker/current/bin/hpcworker login-setup
+```
+
+It refuses outside a session that came in through ssh (`SSH_CONNECTION` with four fields and an IP
+literal first), from this same computer, under an agent or without a terminal, as root, when the home
+folder (or the folder a home that is a link names) can be written by others (sshd would ignore any key
+in it), when `~/.ssh/config` or `~/.ssh/authorized_keys` is a link to another file (a dotfiles
+repository, say: it is left alone), and when `~/.ssh/config` holds our start line without our end line
+(nothing is guessed). Each of those refusals changes nothing; a later step that stops puts back what
+the earlier ones did (the key it made, the config file, `~/.ssh`'s mode, or `~/.ssh` itself when it
+made it). It notes, without refusing, when the terminal's address is not one the profile's portal name
+resolves to (the portal's server may sit behind another name). Then: `~/.ssh` (made 0700 if
+missing, put right if not private); the key `~/.ssh/beethoven_ed25519` and `.pub` (ed25519, no
+passphrase, comment `beethoven-login-setup <user> <date>`, 0600 and 0644), made once and reused, and
+never a file of that name it did not make; one managed block appended to `~/.ssh/config` (rewritten in
+place on a later run, the file's mode kept but never group- or other-writable):
+
+```
+# >>> beethoven login-setup (managed; "hpcworker login-setup --remove" removes this block) >>>
+Host warrior warrior.* <this node's short and full names>
+    IdentityFile ~/.ssh/beethoven_ed25519
+    IdentityFile ~/.ssh/id_rsa
+    IdentityFile ~/.ssh/id_ecdsa
+    IdentityFile ~/.ssh/id_ecdsa_sk
+    IdentityFile ~/.ssh/id_ed25519
+    IdentityFile ~/.ssh/id_ed25519_sk
+    IdentityFile ~/.ssh/id_dsa
+# <<< beethoven login-setup <<<
+```
+
+(an `IdentityFile` that applies stops the client from adding its default keys, so they are listed
+after ours and every key the student already uses keeps working; `ssh -G` must read the new file and
+name our key, for every plain name in the block, before it replaces the old one); and one line in
+`~/.ssh/authorized_keys` (0600), found again on a later run by its exact form (our options, an
+ed25519 key, our comment), so a line of the student's that merely mentions the tag is never taken
+for ours:
+
+```
+from="<address>",no-agent-forwarding,no-port-forwarding,no-X11-forwarding ssh-ed25519 <key> beethoven-login-setup <user> <date>
+```
+
+`<address>` is the client address of the terminal it runs in: the OnDemand server. The key therefore
+opens the account only from that address, never from elsewhere on the internet; a run from a new
+address adds it (at most four, the newest kept). That limits where the key is used from, not who uses
+it: the key is a file with no passphrase in the student's own account, readable by anything that runs
+as the student, and anyone who obtained it and could open a connection from the OnDemand server (every
+grid user's portal shell starts there) could use it. So the worker job hides it from Claude Code: an
+empty file of the job's own is bound over `~/.ssh/beethoven_ed25519` inside the container
+(`hpcw_hide_login_key`; tested here, not yet run under Apptainer on the grid), and the residual risk is
+for the lab lead to put to C&IT with the password-each-time question. The student's other keys and
+lines are never touched, read out or printed, and no key material is printed at all. The last line is
+exactly one of `Done. The grid will not ask again.` (exit 0) or a `Stopped: ...` sentence (exit 2 to
+7, with nothing changed: what an earlier step did is put back);
+`login-setup --remove` takes the line, the block and the two key files away (`Done. Removed
+Beethoven's grid key.` or `Nothing to remove.`). It is safe to run twice. If the OnDemand server's
+address changes, the password prompt simply returns and the step appears once more. Nothing about the
+key ever reaches the browser. Assumed and not seen: that the OnDemand server's ssh reads the same home
+folder's `~/.ssh` (the Files app and the Shell land in the same home today), and that Wayne State's
+Shell app runs plain `ssh` (an `OOD_SSH_WRAPPER` passing `-i` or `-F` would bypass the block). Where
+the site's ssh does not offer the key for any reason, the step changes nothing that matters and the
+password prompt stays.
+
+## Version 10 and what it keeps
+
+The 10.0.0 extension and a worker started by framework 9 keep working when the lab's copy moves to
+version 10. Every verb, flag, file and output line 10.0.0 uses is unchanged: `install --shared`,
+`discover`, `probe`, `worker start` (with "worker N submitted as job ID" and "worker N already has job
+ID (STATE); nothing submitted", one squeue; a scheduler that does not answer is never read as "no job
+alive": nothing is submitted then, and two starts at once wait for one lock, so a worker is never
+submitted beside one still in line), `worker stop` ("worker
+N: stopped (...)"), `claude login --plain` (every line, the 15-minute "already signed in" shortcut, no
+keepalive), every framework 9 field of `status.json` and `connection.json`, `next.id`, the consent
+marker of any content and the stop file 10.0.0 writes through Files. A framework 9 `status.json`,
+without the new fields, is read by `worker status` as it is ("Your worker is online."), with no
+scheduler call. 10.0.0 does not know `queued`: it treats such a run as not live, and its automatic
+start asks `worker start` at most once a minute, which answers "already has job ID (PENDING); nothing
+submitted"; its panel says "Starting your worker..." meanwhile. 10.0.0 never restarts a `stopped`
+worker, so the sign-in abandon cannot loop under it. Values that change and that 10.0.0 only shows:
+`requested_name` is now the title, the starting `hint` no longer says "about a minute", the resume
+window is four hours, `VERSION` is 10.
+
+## The site profile's keys for the extension (version 10)
+
+`ood_base_url` (the portal the welcome page offers), `ood_auth` (`http-basic` at Wayne State: a hint
+for Details; the extension tests the channel itself), `vpn_portal` (`protect.wayne.edu`), `vpn_app`
+(`GlobalProtect`), `vpn_help_url` and `grid_account_help_url` (https addresses; the latter, Wayne
+State's KB 20199 in TeamDynamix's standard form, was not fetched), `session_title` (`Wayne State
+grid`), `login_abandon_s` (1200; 0 or at least 300), `restricted` and `restricted_workspaces`. Each is
+optional and checked by `profile validate`. An account's `profile.json` copied before version 10 takes
+these from the site profile of the same name in the copy it runs from (`FIELDS_FROM_SITE`), until the
+account sets its own. The worker partition is not changed (the lab lead's choice).
 
 What you should know before step 4, and the command tells you: files the worker reads and every
 command's output go to Anthropic; while you are connected the transcript is also stored on
@@ -252,7 +525,12 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
   to do.
 - Nothing is ever deleted outside the run directories under the state directory and a job's own
   node-local temp and `/dev/shm` directory, and those go through one helper that refuses any path not
-  named `hpcworker_<id>`, `hpcw_<id>` or `hpcw_probe_<id>`. The one subcommand that replaces a file
+  named `hpcworker_<id>`, `hpcw_<id>` or `hpcw_probe_<id>`. Version 10 adds two exceptions, each for
+  a file of the tool's own: `connect` removes its outcome file under `~/.hpcworker/log`, and
+  `login-setup --remove` (or a `login-setup` that stops after making its key) removes the key pair
+  whose public half says `login-setup` made it, with its own config block and authorized_keys line;
+  `login-setup` is also the only subcommand that writes under `~/.ssh`, and it refuses to run under
+  an agent or without a terminal. The one subcommand that replaces a file
   of yours, `install --force` (profile.json), refuses to run under an agent (`CLAUDECODE`,
   `BEETHOVEN_REQUEST_ID` and kin, and their older `ASHLEY_` names) or without a terminal. No subcommand
   can remove `~/.beethoven` (or `~/.ashley`, its old name), the profile, or a Claude Code configuration
@@ -265,7 +543,8 @@ sign-in status, it submits the same file again with a dependency on itself (`aft
 `afterok`, plus `singleton` so two links never run at once) and records the successor in `next.id`:
 one successor per link, once, also across a Slurm requeue of the same job. When the wall time or a
 preemption ends a link, the scheduler starts the successor, which runs `claude remote-control
---continue` in the same directory when `connection.json` is younger than seven days (tried once per
+--continue` in the same directory when `connection.json` is younger than four hours (version 10;
+Anthropic says a session can be resumed "for about four hours"; it was seven days) (tried once per
 link) and otherwise registers afresh; the environment id is stable per machine, so a fresh
 registration from the same login joins the same environment. `--no-chain` starts a single job. The
 chain is armed only after the container check passes, so a broken setup never loops through
@@ -377,6 +656,7 @@ the image folder).
 bin/hpcworker            the command (bash)
 lib/profile.py           site profile schema, validation, template rendering, the two-key consent reader (python3, stdlib, 3.6+)
 lib/login_plain.sh       the panel's sign-in sitting (claude auth login under a pty, a line contract on stdout)
+lib/relay.py             connect's one writer to the terminal during the sitting: whole lines and the keepalive (python3, stdlib)
 lib/adapters/common.sh   scheduler and runtime detection, node-local temp, the container exec line, the registration parser, needs/hint, the guarded remove
 lib/adapters/slurm.sh    Slurm (run for real on the Wayne State grid)
 lib/adapters/pbs.sh      PBS Pro / OpenPBS (documented commands; fixture-tested only)
@@ -401,7 +681,8 @@ Site profiles and job templates are also where a later workflow engine's cluster
 (one file per site, one template per kind of job); nothing of that is built.
 
 Run directory (`<shared_state_dir>/<name>/`): `job.sbatch`, `job.id`, `next.id` (successor id and
-the id that queued it), `chain.log`, `node`, `status.json` (state `starting`, `need_login`,
+the id that queued it), `chain.log`, `node`, `progress.log` (version 10), `status.json` (state `queued`
+(version 10), `starting`, `need_login`,
 `need_consent`, `running`, `online`, `stopped`, `preempted`, `error`; `needs` and `hint` for the
 panel; heartbeat every 30 s;
 `claude_login` carries `loggedIn`, `email`, `subscriptionType` and nothing else; `session_name`,
@@ -459,11 +740,29 @@ measured on asx1 for the lab's VS Code tool; see "Slurm inside the worker").
 ## Tests
 
 ```
-bash framework/tests/run.sh                      # on the grid (system python3)
+bash framework/tests/run.sh                      # on the grid (system python3), or under WSL
 HPCW_PYTHON=python bash framework/tests/run.sh   # on a Windows checkout (the Store's python3 alias is a stub)
 ```
 
+Version 10's tests run against a scratch account and a fake scheduler on PATH (`tests/fakegrid.py`:
+sbatch, squeue, scancel and scontrol keeping their jobs in a file, and an srun that plays the sign-in
+sitting): `test_connect.py` (each HPCW-STEP order, the login modes, a job already in line, every
+failure code, the keepalive, the relay), `test_status.py` (the queued file, `worker status` and its
+one scheduler call, every person-facing line, stop of a worker in line, restrict, consent --record,
+watch, and what 10.0.0 and a framework 9 worker still find), `test_job.py` (the rendered job run whole
+against a stand-in runtime and Claude Code: online then stopped, a renewal, the sign-in abandon; Linux
+only) and `test_login_setup.py` (in a scratch HOME; Linux only, it needs POSIX file modes). On a
+Windows checkout the Linux-only ones are skipped; run the suite under WSL for all of them.
+
 ## What was run on the Wayne State grid
+
+2026-10-01 (version 10): nothing. No version 10 code has run on the grid or against the portal, and
+the shared copy was not published (`tools/deploy_shared.sh` was not run). Not measured there: `connect`
+end to end; `srun --pty` with its output piped to the relay, and the echo of a pasted code under it;
+Open OnDemand's idle limit against the keepalive; `squeue -j` with `%r|%S` and `scontrol`'s SubmitTime
+on Wayne State's Slurm; a worker writing the queued file's successor fields, `ends_at` and
+`progress.log` on a compute node; the sign-in abandon on `reqp`; and `login-setup` for a student
+without a key (the key step is unproven until such a student has run it).
 
 2026-09-28 (first build, user go2432): `install --profile wayne`; `discover`; `diag`; the unit tests
 on the login node's python; three probe jobs on `secp/secondary`, each starting within a minute on

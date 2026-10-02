@@ -61,11 +61,48 @@ adapter_status() { # ID -> STATE|NODE|RAW ; one squeue, then one sacct; never ca
 }
 
 adapter_status_many() { # ID[,ID...] -> ID|STATE|NODE|RAW per line, ONE squeue; ids squeue no longer knows come back as UNKNOWN (ended)
-  local ids="$1" out id seen
-  out=$(squeue -h -j "$ids" -o '%i|%T|%N' 2>/dev/null) || out=""
+  # exit 2, and nothing printed, when squeue itself failed (a busy controller, a timeout): the caller
+  # must then decide nothing, because "no job alive" read from a scheduler that did not answer would
+  # submit a second worker beside one still in line. "Invalid job id" is an answer: the jobs are gone.
+  local ids="$1" out rc id seen
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 20 squeue -h -j "$ids" -o '%i|%T|%N' 2>&1); rc=$?; else out=$(LC_ALL=C squeue -h -j "$ids" -o '%i|%T|%N' 2>&1); rc=$?; fi
+  [ $rc = 124 ] && return 2
+  if [ $rc != 0 ]; then
+    case "$out" in *"Invalid job id"*) out="";; *) return 2;; esac
+  fi
+  # squeue's own warnings start with "squeue:" or "slurm_"; only the job lines are read
+  out=$(printf '%s\n' "$out" | tr -d '\r' | grep -v -E '^(squeue|slurm_[a-z_]*)[: ]')
   seen=$(printf '%s\n' "$out" | slurm_parse_squeue_many)
   [ -n "$seen" ] && printf '%s\n' "$seen"
   for id in ${ids//,/ }; do printf '%s\n' "$seen" | grep -q "^$id|" || printf '%s|UNKNOWN||ended or unknown\n' "$id"; done
+}
+
+adapter_status_one() { # ID [FORMAT] -> squeue's own line for ID in FORMAT (default %T|%N; framework 10's queue form is %T|%r|%S|%N), exit 0
+  # ONE squeue. Nothing and exit 0 when Slurm no longer knows the job ("Invalid job id specified");
+  # exit 2 when squeue itself failed (the controller did not answer): the caller then changes nothing,
+  # so a busy controller is never read as a job that ended
+  local id="$1" fmt="${2:-%T|%N}" out rc line
+  # bounded: a controller that hangs must not hold `worker status` (and the panel's line) for minutes
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 20 squeue -h -j "$id" -o "$fmt" 2>&1); rc=$?; else out=$(LC_ALL=C squeue -h -j "$id" -o "$fmt" 2>&1); rc=$?; fi
+  [ $rc = 124 ] && return 2
+  if [ $rc = 0 ]; then
+    # squeue's own warnings start with "squeue:" or "slurm_"; the job's line is the first other one
+    out=$(printf '%s\n' "$out" | tr -d '\r' | grep -v -E '^(squeue|slurm_[a-z_]*)[: ]' | grep -v '^[[:space:]]*$')
+    # a line that starts with a state word is the job's; a notice the site prints first is passed over
+    line=$(printf '%s\n' "$out" | grep -E '^[A-Z][A-Z_]*(\||$)' | head -1)
+    [ -n "$line" ] || line=$(printf '%s\n' "$out" | head -1)
+    [ -n "$line" ] && printf '%s\n' "$line"
+    return 0
+  fi
+  case "$out" in *"Invalid job id"*) return 0;; esac
+  return 2
+}
+
+adapter_submit_time() { # ID -> SubmitTime as ISO-8601 UTC, nothing when Slurm cannot say; ONE scontrol, run inside the job on the host side
+  # (the host's scontrol, not the container's: the image cannot load it). Slurm prints local time with no zone.
+  local t; t=$(timeout 20 scontrol show job "$1" -o 2>/dev/null | grep -o 'SubmitTime=[^ ]*' | head -1 | cut -d= -f2)
+  hpcw_local_time_utc "$t"
+  return 0
 }
 
 adapter_cancel() { [ $# -gt 0 ] && scancel "$@" 2>/dev/null; return 0; }   # one call for every id; idempotent

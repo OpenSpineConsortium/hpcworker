@@ -321,7 +321,11 @@ class SchedulerInWorker(unittest.TestCase):
             self.assertIs(P.load(self.older_copy(td, site="elsewhere"))["scheduler_in_worker"], False)
             self.assertEqual(P.site_values("elsewhere"), {})
             self.assertEqual(P.site_values("../wayne"), {})
-            self.assertEqual(P.site_values("wayne"), {"scheduler_in_worker": True})
+            # framework 10 adds the extension's keys to what a site supplies
+            self.assertEqual(P.site_values("wayne"), {"scheduler_in_worker": True, "session_title": "Wayne State grid", "login_abandon_s": 1200,
+                                                      "ood_auth": "http-basic", "vpn_portal": "protect.wayne.edu", "vpn_app": "GlobalProtect",
+                                                      "vpn_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/Article/20314/Wayne-State-VPN-and-the-Global-Protect-client",
+                                                      "grid_account_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/ArticleDet?ID=20199"})
 
     def test_set_never_writes_the_site_value_into_the_account_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -334,6 +338,87 @@ class SchedulerInWorker(unittest.TestCase):
             with open(path) as fh:
                 self.assertIs(json.load(fh)["scheduler_in_worker"], False)
             self.assertIs(P.load(path)["scheduler_in_worker"], False)
+
+
+class Framework10Keys(unittest.TestCase):
+    """The keys the 11.0.0 extension and framework 10's job read (V11_CONTRACT.md 13): Wayne State's
+    values, their checks, an account profile from before framework 10 taking the site's values, the
+    session title in the render mapping, the 4-hour resume window, and a render that does not depend
+    on the login shell's locale."""
+
+    def test_wayne_values(self):
+        prof = P.load(WAYNE)
+        self.assertEqual(prof["ood_base_url"], "https://ondemand.grid.wayne.edu")
+        self.assertEqual(prof["vpn_portal"], "protect.wayne.edu")
+        self.assertEqual(prof["vpn_app"], "GlobalProtect")
+        self.assertEqual(prof["vpn_help_url"], "https://services.wayne.edu/TDClient/277/Portal/KB/Article/20314/Wayne-State-VPN-and-the-Global-Protect-client")
+        self.assertTrue(prof["grid_account_help_url"].startswith("https://services.wayne.edu/") and "20199" in prof["grid_account_help_url"])
+        self.assertEqual(prof["ood_auth"], "http-basic")
+        self.assertEqual(prof["session_title"], "Wayne State grid")
+        self.assertEqual(prof["login_abandon_s"], 1200)
+        self.assertEqual((prof["restricted"], prof["restricted_workspaces"]), (False, []))
+        self.assertEqual(prof["worker_defaults"]["capacity"], 4)
+        self.assertEqual(P.unknown_fields(prof), [])
+        # absent keys are no error: a site without them still validates
+        for k in ("vpn_portal", "vpn_app", "vpn_help_url", "grid_account_help_url", "ood_auth", "session_title", "login_abandon_s"):
+            p = P.load(WAYNE)
+            del p[k]
+            self.assertEqual(P.validate(p), [], k)
+
+    def test_checks(self):
+        bad = [("session_title", "Wayne's grid"), ("session_title", "x" * 65), ("session_title", "a\nb"), ("session_title", "$HOME"),
+               ("vpn_help_url", "http://example.edu"), ("grid_account_help_url", "javascript:alert(1)"), ("vpn_portal", "protect wayne"),
+               ("login_abandon_s", 30), ("login_abandon_s", "1200"), ("ood_auth", "saml"), ("restricted", "yes"), ("restricted_workspaces", ["a b"])]
+        for key, value in bad:
+            p = P.load(WAYNE)
+            p[key] = value
+            self.assertNotEqual(P.validate(p), [], (key, value))
+        for key, value in [("login_abandon_s", 0), ("login_abandon_s", 300), ("ood_auth", "cookie"), ("ood_auth", ""), ("restricted_workspaces", ["*", "gpu"]),
+                           ("session_title", "Grid · lab"), ("vpn_help_url", "")]:
+            p = P.load(WAYNE)
+            p[key] = value
+            self.assertEqual(P.validate(p), [], (key, value))
+
+    def test_an_account_profile_from_framework_9_takes_the_site_values(self):
+        with open(WAYNE) as fh:
+            old = json.load(fh)
+        for k in ("session_title", "login_abandon_s", "ood_auth", "vpn_portal", "vpn_app", "vpn_help_url", "grid_account_help_url"):
+            old.pop(k)
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "profile.json")
+            with open(path, "w") as fh:
+                json.dump(old, fh)
+            prof = P.load(path)
+            self.assertEqual((prof["session_title"], prof["login_abandon_s"], prof["vpn_portal"]), ("Wayne State grid", 1200, "protect.wayne.edu"))
+            self.assertIn("P_session_title='Wayne State grid'", P.shellenv(prof))
+
+    def test_mapping(self):
+        os.environ.update(ENV)
+        try:
+            prof = P.load(WAYNE)
+            m = P.mapping(prof, {"RUN": "worker"})
+            self.assertEqual((m["TITLE"], m["LOGIN_ABANDON_S"], m["RESUME_WINDOW_S"], m["AUTH_RETRY_S"], m["HOURS"]), ("Wayne State grid", "1200", "14400", "10", "8"))
+            self.assertEqual(P.mapping(prof, {"RUN": "gpu"})["TITLE"], "Wayne State grid · gpu")
+            self.assertEqual(P.mapping(prof, {"RUN": "worker", "LOGIN_ABANDON_S": "5"})["LOGIN_ABANDON_S"], "5")
+            prof["session_title"] = ""
+            self.assertEqual(P.mapping(prof, {"RUN": "worker"})["TITLE"], "Grid worker", "the extension's sessionTitleFor says the same")
+            self.assertEqual(P.mapping(prof, {"RUN": "lab"})["TITLE"], "Grid worker · lab")
+        finally:
+            for k in ENV:
+                os.environ.pop(k, None)
+
+    @unittest.skipIf(os.name == "nt", "a POSIX locale")
+    def test_render_whatever_the_locale(self):
+        # a plain ssh leaves LANG unset; python 3.6 then writes stdout as ASCII. The title of a worker not
+        # named worker carries a middle dot: render writes UTF-8 bytes all the same
+        import subprocess
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("LC_", "LANG", "PYTHONIOENCODING", "PYTHONUTF8"))}
+        # as python 3.6 on the login node would be: no C-locale coercion and no UTF-8 mode (3.7+ do both by themselves)
+        env.update(ENV, LC_ALL="C", PYTHONCOERCECLOCALE="0", PYTHONUTF8="0")
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "lib", "profile.py"), "render", os.path.join(ROOT, "jobs", "worker.sbatch.tpl"), WAYNE, "RUN=gpu"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("TITLE='Wayne State grid · gpu'".encode("utf-8"), p.stdout)
 
 
 class SetAndSave(unittest.TestCase):

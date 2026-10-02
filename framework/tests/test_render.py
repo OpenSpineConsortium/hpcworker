@@ -104,9 +104,31 @@ class Render(RenderBase):
         # what the panel reads (needs, hint), the retries for a credential still being written, the
         # one-minute recheck while waiting for the sign-in, and the consent prompt's own words
         text = self.rendered()
-        for s in ('"needs":%s,"hint":%s', 'hpcw_needs "$STATE" "$consent"', 'hpcw_hint "$STATE" "$needs" "$NEXT_JOB"', "LOGIN_RECHECK_S=60", "asking again in 10 s", 'if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$LOGIN_RECHECK_S" ]', "Enable Remote Control"):
+        for s in ('"needs":%s,"hint":%s', 'hpcw_needs "$STATE" "$consent"', 'hpcw_hint "$STATE" "$needs" "$NEXT_JOB"', "LOGIN_RECHECK_S=60", "AUTH_RETRY_S=10",
+                  'asking again in $AUTH_RETRY_S s"; sleep "$AUTH_RETRY_S"', 'if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$LOGIN_RECHECK_S" ]', "Enable Remote Control"):
             self.assertIn(s, text)
         self.assertIn("LOGIN_RECHECK_S=45", self.rendered(LOGIN_RECHECK_S="45"))
+
+    def test_framework_10_values(self):
+        # the session title from the profile (was "<site>-<run>"), the job's hours for ends_at, the
+        # sign-in abandon, the 4-hour resume window, and the new status.json and connection.json fields
+        text = self.rendered()
+        self.assertIn("TITLE='Wayne State grid'; HOURS=8; LOGIN_ABANDON_S=1200", text)
+        self.assertIn("RESUME_WINDOW_S=14400", text)
+        self.assertIn('REQUESTED_NAME="$TITLE"', text)
+        self.assertNotIn('REQUESTED_NAME="$SITE-$RUN"', text)
+        self.assertIn("TITLE='Wayne State grid · gpu'", self.rendered(RUN="gpu"))
+        for key in ("submitted_at", "got_computer_at", "online_at", "ends_at", "renewal", "title"):
+            self.assertIn('"%s":%%s' % key, text, key)
+        self.assertIn('"title":%s,"online_at":%s}', text, "connection.json")
+        self.assertIn('stop_reason', text)
+        for line in ("Got a computer", "Connecting to Claude", "Online: $ENV_URL", "Waiting for your Claude sign-in", "Reconnecting", "Renewing", "Ended", "Stopped",
+                     "Stopped: waiting for your Claude sign-in timed out", "Couldn't start: $MESSAGE"):
+            self.assertIn('hpcw_progress "$RUN_DIR" "%s"' % line, text, line)
+        self.assertIn("printf '%s Online. Open in Claude: %s\\n' \"$(date +%-H:%M)\" \"$ENV_URL\"", text)
+        self.assertIn("if abandon_due; then login_abandon; fi", text)
+        self.assertIn("within four hours", text)
+        self.assertNotIn("seven days", text)
         # a stop that went through stays "stopped" when the CLI's scancel lands during the job's exit:
         # the trap stays armed and hands back to the stop path (StopPath below runs it)
         self.assertIn('if [ -e stop ] || [ -e stop.done ] || [ "$STOPPING" = 1 ]; then stop_and_leave', text)
@@ -200,14 +222,17 @@ class StopPath(RenderBase):
     HARNESS = r"""#!/bin/bash
 set -u
 cd "$1" || exit 9
+RUN_DIR="$1"
 LOG="$1/log"
 log() { printf '%s\n' "$*" >> "$LOG"; }
 say() { log "say $*"; }
 write_status() { STATE="$1"; MESSAGE="$2"; log "status $1"; }
+hpcw_progress() { log "progress $2"; }
 adapter_cancel() { log "scancel $*"; }
 cleanup() { log cleanup; }
 rc_stop() { log rc_stop; local i; for i in 1 2 3 4 5 6; do sleep 1; done; log rc_stop-done; }
-JOB=40500019; RUN=worker; NODE=asx1; NEXT_JOB=""; CHAIN_NOTE=""; HAVE_ADAPTER=1; STATE=online; MESSAGE=""
+check_auth() { log check_auth; LOGGED_IN="${HARNESS_LOGGED_IN:-false}"; }
+JOB=40500019; RUN=worker; NODE=asx1; NEXT_JOB=""; CHAIN_NOTE=""; HAVE_ADAPTER=1; STATE=online; MESSAGE=""; LOGGED_IN=false
 @FUNCTIONS@
 # the real on_term, wrapped so the log shows when the signal landed and what the path's state was
 eval "$(declare -f on_term | sed '1s/^on_term/on_term_real/')"
@@ -222,8 +247,9 @@ log unreachable
         text = self.rendered()
         block = re.search(r"\nSTOPPING=0\nstop_and_leave\(\) \{.*?\n\}\non_term\(\) \{.*?\n\}\n", text, re.S)
         end_chain = re.search(r"\nend_chain\(\) \{.*?\n\}\n", text, re.S)
-        self.assertTrue(block and end_chain, "the stop path is not in the rendered job in the expected shape")
-        return end_chain.group(0) + block.group(0)
+        abandon = re.search(r"\nabandon_due\(\) \{.*?\n\}\nlogin_abandon\(\) \{.*?\n\}\n", text, re.S)
+        self.assertTrue(block and end_chain and abandon, "the stop path is not in the rendered job in the expected shape")
+        return end_chain.group(0) + block.group(0) + abandon.group(0)
 
     def drive(self, body, kill_after, files=(), next_job=""):
         """Run the harness with BODY as its main part; send TERM after each delay in KILL_AFTER; return (rc, log lines, run dir listing)."""
@@ -268,6 +294,7 @@ log unreachable
         self.assertIn("scancel 40500052", log)
         statuses = [l for l in log if l.startswith("status ")]
         self.assertEqual(statuses, ["status stopped"], log)
+        self.assertEqual([l for l in log if l.startswith("progress ")], ["progress Stopped"], "progress.log says it once")
         self.assertLess(log.index("term-seen STOPPING=1"), log.index("status stopped"))
         self.assertLess(log.index("rc_stop-done"), log.index("status stopped"))
         self.assertLess(log.index("scancel 40500052"), log.index("status stopped"))
@@ -299,11 +326,56 @@ log unreachable
         rc, log, files, err = self.drive("sleep 5; sleep 5", kill_after=(1.5,), files=(("next.id", "40500052 40500019\n"),), next_job="40500052")
         self.assertEqual(rc, 0, (log, err))
         self.assertEqual([l for l in log if l.startswith("status ")], ["status preempted"], log)
+        self.assertEqual([l for l in log if l.startswith("progress ")], ["progress Renewing"], log)
         self.assertIn("say ending: successor 40500052 takes over", log)
         self.assertNotIn("scancel 40500052", log, "a preemption keeps the successor")
         self.assertNotIn("stop.done", files)
         self.assertIn("next.id", files)
         self.assertEqual(log[-1], "cleanup")
+
+    def test_term_inside_the_sign_in_abandon_leaves_it_abandoned(self):
+        # framework 10: a job waiting for the Claude sign-in past LOGIN_ABANDON_S stops itself; a TERM
+        # landing inside that path (rc_stop takes 6 s) hands back to it like the stop path: the state is
+        # stopped with stop_reason login_abandoned, the successor is cancelled, stop.done is the last act
+        body = ('write_status() { STATE="$1"; MESSAGE="$2"; log "status $1 reason=${STOP_REASON:-}"; }; now_s() { date +%s; }; '
+                'STATE=need_login; LOGIN_ABANDON_S=5; NEED_LOGIN_SINCE=$(( $(date +%s) - 10 )); '
+                'while :; do if abandon_due; then login_abandon; fi; sleep 1; done')
+        rc, log, files, err = self.drive(body, kill_after=(2,), files=(("next.id", "40500052 40500019\n"),), next_job="40500052")
+        self.assertEqual(rc, 0, (log, err))
+        self.assertIn("term-seen STOPPING=1", log)
+        self.assertEqual([l for l in log if l.startswith("status ")], ["status stopped reason=login_abandoned"], log)
+        self.assertEqual([l for l in log if l.startswith("progress ")], ["progress Stopped: waiting for your Claude sign-in timed out"], log)
+        self.assertIn("scancel 40500052", log)
+        self.assertIn("stop.done", files)
+        self.assertNotIn("next.id", files)
+        self.assertEqual(log[-1], "cleanup")
+
+    def test_abandon_looks_once_more_and_carries_on_when_signed_in(self):
+        # framework 10 review: a sign-in that landed since the once-a-minute check is not abandoned
+        body = ('write_status() { STATE="$1"; MESSAGE="$2"; log "status $1"; }; now_s() { date +%s; }; HARNESS_LOGGED_IN=true; '
+                'STATE=need_login; LOGIN_ABANDON_S=5; NEED_LOGIN_SINCE=$(( $(date +%s) - 10 )); '
+                'if abandon_due; then login_abandon; fi; log "after state=$STATE"; exit 0')
+        rc, log, files, err = self.drive(body, kill_after=())
+        self.assertEqual(rc, 0, (log, err))
+        self.assertIn("check_auth", log)
+        self.assertEqual([l for l in log if l.startswith("status ")], ["status starting"], log)
+        self.assertIn("after state=starting", log)
+        self.assertNotIn("stop.done", files)
+        self.assertFalse(any(l.startswith("scancel") for l in log), log)
+
+    def test_a_sitting_under_way_moves_the_abandon(self):
+        # connect touches signin.pending when its sitting starts: the wait counts from there
+        body = ('now_s() { date +%s; }; cd "$RUN_DIR"; STATE=need_login; LOGIN_ABANDON_S=5; NEED_LOGIN_SINCE=$(( $(date +%s) - 10 )); '
+                'touch signin.pending; if abandon_due; then log due; else log not; fi; exit 0')
+        rc, log, files, err = self.drive(body, kill_after=())
+        self.assertEqual((rc, [l for l in log if l in ("due", "not")]), (0, ["not"]), (log, err))
+
+    def test_abandon_waits_its_time_and_never_when_zero(self):
+        for since_ago, limit, want in ((10, 5, "due"), (2, 5, "not"), (10, 0, "not")):
+            body = ('now_s() { date +%%s; }; STATE=need_login; LOGIN_ABANDON_S=%d; NEED_LOGIN_SINCE=$(( $(date +%%s) - %d )); '
+                    'if abandon_due; then log due; else log not; fi; exit 0' % (limit, since_ago))
+            rc, log, files, err = self.drive(body, kill_after=())
+            self.assertEqual((rc, [l for l in log if l in ("due", "not")]), (0, [want]), (since_ago, limit, log, err))
 
 
 if __name__ == "__main__":

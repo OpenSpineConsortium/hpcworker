@@ -90,7 +90,16 @@ SCHEMA = [
     ("ood_base_url", str, False, "", "Open OnDemand portal URL"),
     ("ood_shell_host", str, False, "", "host the portal's Shell app opens"),
     ("ood_rnode_enabled", "bool_or_none", False, None, "probed: is the /rnode/ reverse proxy on"),
+    ("ood_auth", ("", "http-basic", "cookie"), False, "", "how the portal signs in (a hint for the extension's Details; the extension tests the channel itself)"),
     ("vpn_required", bool, False, False, "portal and login node need the VPN"),
+    ("vpn_portal", str, False, "", "the VPN portal address a student types into the VPN app (protect.wayne.edu)"),
+    ("vpn_app", str, False, "", "the VPN app's name (GlobalProtect)"),
+    ("vpn_help_url", str, False, "", "the university's page on setting up the VPN (https)"),
+    ("grid_account_help_url", str, False, "", "the university's page on getting a cluster account (https)"),
+    ("session_title", str, False, "", "the Remote Control session title a worker asks for (\"Wayne State grid\"; \"<title> · <name>\" for a worker not named worker); empty = \"Grid worker\""),
+    ("login_abandon_s", int, False, 1200, "seconds a worker job waits for the Claude sign-in before it stops itself and queues no successor (0 = never)"),
+    ("restricted", bool, False, False, "no worker may start on this site's accounts (hpcworker connect refuses)"),
+    ("restricted_workspaces", "list", False, [], "worker names that may not start (\"*\" for all); hpcworker connect refuses them"),
     ("login_node_rules", "dict", True, {"max_processes": 20, "poll_floor_seconds": 60}, "{max_processes, poll_floor_seconds}"),
     ("xdg_runtime_fix", bool, False, True, "point XDG_RUNTIME_DIR at ipc_dir/$USER/xdg for Claude Code's bash tool"),
     ("scheduler_in_worker", bool, False, False, "bind the host's scheduler client into the worker's container so Claude Code there can submit and watch jobs (Slurm with apptainer or singularity only; the binds were measured at Wayne State)"),
@@ -222,6 +231,25 @@ def validate(prof):
     si = prof.get("shared_install")
     if isinstance(si, str) and si and (not si.startswith("/") or re.search(r"[\s'\"]", si)):
         errs.append("shared_install must be an absolute directory without spaces or quotes (or empty)")
+    # framework 10: the session title goes into the job file inside single quotes and onto Claude Code's command line
+    st = prof.get("session_title")
+    if isinstance(st, str) and (len(st) > 64 or re.search(r"['\"`$\\\x00-\x1f\x7f]", st)):
+        errs.append("session_title must be at most 64 characters without quotes, backslashes, $ or control characters")
+    for key in ("vpn_help_url", "grid_account_help_url"):
+        v = prof.get(key)
+        if isinstance(v, str) and v and not re.match(r"^https://[^\s'\"]+$", v):
+            errs.append("%s must be an https address (or empty)" % key)
+    vp = prof.get("vpn_portal")
+    if isinstance(vp, str) and vp and not re.match(r"^[A-Za-z0-9.-]{1,253}$", vp):
+        errs.append("vpn_portal must be a host name (letters, digits, dots and dashes)")
+    la = prof.get("login_abandon_s")
+    if isinstance(la, int) and not isinstance(la, bool) and la != 0 and la < 300:
+        errs.append("login_abandon_s must be 0 (never) or at least 300 seconds")
+    rw = prof.get("restricted_workspaces")
+    if isinstance(rw, list):
+        for w in rw:
+            if not isinstance(w, str) or not re.match(r"^(\*|[A-Za-z0-9_-]{1,32})$", w):
+                errs.append("restricted_workspaces entries must be worker names or \"*\" (got %r)" % (w,))
     # bind specs travel through a job file as one space-separated string
     for b in prof.get("binds", []) or []:
         if not isinstance(b, str) or re.search(r"\s", b) or not b:
@@ -251,7 +279,16 @@ def _walk(obj, prefix=""):
 # its own value, such a field takes the value of the site profile of the same name in this copy of
 # the framework (profiles/<site>.json beside lib/), so a site switches it on for every account by
 # publishing a new version, and `hpcworker profile set` still overrides it per account.
-FIELDS_FROM_SITE = ("scheduler_in_worker",)
+FIELDS_FROM_SITE = ("scheduler_in_worker", "session_title", "login_abandon_s", "ood_auth", "vpn_portal", "vpn_app",
+                    "vpn_help_url", "grid_account_help_url", "restricted", "restricted_workspaces")
+
+
+def session_title(prof, run):
+    """The Remote Control session title a worker asks for (framework 10): the profile's session_title
+    ("Grid worker" when it names none), with " · <name>" for a worker not named "worker". The same rule
+    as the extension's contract.ts sessionTitleFor, so both sides look for the same name."""
+    base = prof.get("session_title") or "Grid worker"
+    return base if run == "worker" else "%s · %s" % (base, run)
 
 
 def site_values(site):
@@ -259,7 +296,7 @@ def site_values(site):
     if not isinstance(site, str) or not re.match(r"^[a-z0-9][a-z0-9-]{0,31}$", site):
         return {}
     try:
-        with open(os.path.join(code_root(), "profiles", site + ".json"), "r") as fh:
+        with open(os.path.join(code_root(), "profiles", site + ".json"), "r", encoding="utf-8") as fh:
             sp = json.load(fh)
     except (IOError, OSError, ValueError):
         return {}
@@ -270,7 +307,7 @@ def site_values(site):
 
 def load(path):
     """The profile at PATH over the site's values for FIELDS_FROM_SITE, over the schema's defaults."""
-    with open(path, "r") as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         prof = json.load(fh)
     merged = defaults()
     if isinstance(prof, dict):
@@ -303,7 +340,7 @@ def set_key(prof, dotted, value):
 
 def save(prof, path):
     tmp = path + ".part"
-    with open(tmp, "w") as fh:
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(prof, fh, indent=1, sort_keys=True)
         fh.write("\n")
     os.replace(tmp, path)
@@ -511,7 +548,14 @@ def mapping(prof, overrides=None):
         "AUTH_EVERY_S": str(o.get("AUTH_EVERY_S", 300)),
         # how often a job waiting in need_login asks `claude auth status` again (the panel signs in, then starts or waits)
         "LOGIN_RECHECK_S": str(o.get("LOGIN_RECHECK_S", 60)),
-        "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 7 * 24 * 3600)),
+        # the three retries of the first `claude auth status`, this far apart (a credential still being written)
+        "AUTH_RETRY_S": str(o.get("AUTH_RETRY_S", 10)),
+        # framework 10: Anthropic says a session can be resumed "for about four hours" (was seven days)
+        "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 4 * 3600)),
+        # framework 10: a job still waiting for the Claude sign-in this long stops itself and queues no successor
+        "LOGIN_ABANDON_S": str(o.get("LOGIN_ABANDON_S", prof.get("login_abandon_s", 1200))),
+        # framework 10: the session title (status.json "title", Claude Code's --name)
+        "TITLE": session_title(prof, run),
         "HPCW_HOME": hpcw_home,
         "HPCW_CODE": hpcw_code,
     }
@@ -785,10 +829,22 @@ def _kv_args(args):
     return out
 
 
+def _utf8_stdout():
+    """Text on stdout as UTF-8, whatever the locale: a plain ssh leaves LANG unset, and python 3.6
+    would then refuse any character outside ASCII (framework 10's session title for a worker not
+    named "worker" carries a middle dot). Newlines stay LF."""
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+    if enc != "utf8" and hasattr(sys.stdout, "buffer"):
+        import io
+        sys.stdout.flush()
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
+
+
 def main(argv):
     if len(argv) < 2:
         sys.stderr.write(__doc__)
         return 2
+    _utf8_stdout()
     cmd = argv[1]
     if cmd == "schema":
         for key, typ, req, default, desc in SCHEMA:
@@ -796,7 +852,7 @@ def main(argv):
             print("%-22s %-28s %s%s" % (key, want, "required. " if req else "", desc))
         return 0
     if cmd == "from-discovery":
-        with open(argv[2]) as fh:
+        with open(argv[2], encoding="utf-8") as fh:
             d = json.load(fh)
         prof = from_discovery(d, argv[3] if len(argv) > 3 else "mysite")
         json.dump(prof, sys.stdout, indent=1, sort_keys=True)
@@ -807,7 +863,8 @@ def main(argv):
         print("remote_dialog_seen=%s workspace_trusted=%s" % (str(seen).lower(), str(trusted).lower()))
         return 0
     if cmd == "render":
-        with open(argv[2]) as fh:
+        # the template carries a few non-ASCII marks ("Connected ·"); read as UTF-8 whatever the locale
+        with open(argv[2], encoding="utf-8") as fh:
             tpl = fh.read()
         prof = load(argv[3])
         errs = validate(prof)
@@ -879,7 +936,7 @@ def main(argv):
             return 1
         # a field the site supplies stays out of the account's file (neither the site's value nor the
         # schema's default is written there) until the account sets it: a later publish still reaches it
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             own = json.load(fh)
         for key in FIELDS_FROM_SITE:
             if key != top and isinstance(own, dict) and key not in own:

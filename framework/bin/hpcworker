@@ -13,11 +13,20 @@
 #   hpcworker profile show|path|validate|set KEY VALUE|schema   the site profile
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
-#   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain]
-#   hpcworker worker stop|status|list|log [--name N] [--json] [--lines N]
+#   hpcworker connect [--name N] [--profile SITE] [--consent INSTALL_ID] [--login auto|always|fresh|never]
+#                     [--permission-mode M] [--no-chain]
+#                     the extension's one line (framework 10): set the account up if needed, record the
+#                     Remote Control answer, start the worker (or keep the one in line or running), and
+#                     sign in to Claude unless already signed in; "HPCW-STEP ..." lines say how far it got
+#   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain] [--wait [MIN]]
+#   hpcworker worker status [--name N] [--json] [--details]       one line for a person ("Your worker is in line for a computer (6 min so far).")
+#   hpcworker worker watch [--name N] [--minutes MIN]            follow it until it is online (files every 5 s; the scheduler at most once a minute)
+#   hpcworker worker stop|list|log|restrict [--name N] [--lines N]   restrict: mark the workspace so no worker starts there
 #   hpcworker worker guide [--name N]                             print the CLAUDE.md a new workspace gets (writes nothing)
 #   hpcworker claude login [--plain] | status [--alloc]           your Claude sign-in, in one sitting (--plain: the panel's line contract)
-#   hpcworker claude consent                                     the Remote Control answer alone, when login did not cover it
+#   hpcworker claude consent [--record INSTALL_ID]               the Remote Control answer alone (--record: the extension's, no question asked)
+#   hpcworker login-setup [--remove]                             once, in the grid's own terminal, when the portal's terminal asks
+#                                                                for a password: a key only the portal's own server may use (UNPROVEN on the grid)
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker version                                            the number; "(shared copy at DIR)" on the lab's copy
 #
@@ -25,12 +34,17 @@
 # its own; the framework reads `claude auth status`, and two booleans Claude Code writes into its
 # .claude.json: remoteDialogSeen and the workspace's hasTrustDialogAccepted); no token ever goes on
 # a command line or into a job file; the login node gets one sbatch/squeue/scancel per action and
-# never a loop; state is read from files the job writes; nothing is ever deleted outside the run
-# directories under the state directory and a job's own node-local temp; the one subcommand that
-# replaces a file of yours (install --force) runs only for a person at a terminal; the workspace guide
-# (CLAUDE.md) is written only where there is none, never over a file of yours. Versions are integers.
+# never a loop (connect: one squeue, one sbatch, one srun; worker status: one squeue, only while the
+# worker is in line; worker watch: at most one a minute); state is read from files the job writes;
+# nothing is ever deleted outside the run directories under the state directory and a job's own
+# node-local temp, except connect's own outcome file under ~/.hpcworker/log and, for login-setup
+# --remove (or a login-setup that stops after making its key), the key pair whose public half says
+# login-setup made it; the one subcommand that replaces a file of yours (install --force) runs only for
+# a person at a terminal; the workspace guide (CLAUDE.md) is written only where there is none, never
+# over a file of yours; login-setup alone writes under ~/.ssh, only its own key, its own config block
+# and its own authorized_keys line, and only for a person in the grid's own terminal. Versions are integers.
 set -uo pipefail
-VERSION=9
+VERSION=10
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -59,8 +73,18 @@ PROFILE="${HPCW_PROFILE:-$HPCW_HOME/profile.json}"
 SHARED_DIR=""; [ -s "$HPCW_HOME/shared" ] && { IFS= read -r SHARED_DIR < "$HPCW_HOME/shared" || true; }
 LAUNCHER_TAG='# hpcworker launcher for a shared copy (managed: "hpcworker install" rewrites this file)'
 PY="${HPCW_PYTHON:-}"; [ -n "$PY" ] || for p in python3 /usr/bin/python3 /usr/libexec/platform-python; do command -v "$p" >/dev/null 2>&1 && { PY=$(command -v "$p"); break; }; done
-die() { echo "hpcworker: $*" >&2; exit 1; }
+# Under `connect` (CONNECT_MODE=1) every way out ends with one HPCW-STEP line on stdout, which is all
+# the extension reads; a die anywhere on that path becomes "HPCW-STEP failed other <sentence>".
+CONNECT_MODE=0
+die() {
+  if [ "$CONNECT_MODE" = 1 ]; then local s="$*"; printf 'HPCW-STEP failed other %s\n' "${s//$'\n'/ }"; exit 1; fi
+  echo "hpcworker: $*" >&2; exit 1
+}
 say() { echo "$*"; }
+step_fail() { # CODE SENTENCE EXIT: connect's last line on a failure (V11_CONTRACT.md 5.3), then the exit status that goes with the code
+  local s="$2"; s="${s//$'\r'/}"; s="${s//$'\n'/ }"
+  printf 'HPCW-STEP failed %s %s\n' "$1" "$s"; exit "$3"
+}
 need_py() { [ -n "$PY" ] || die "python3 is needed on this node (the system one is enough; nothing is installed)"; }
 prof_py() { need_py; "$PY" "$LIB/profile.py" "$@"; }
 # shellcheck disable=SC1090
@@ -176,6 +200,8 @@ live_run() { # the first run of this account's that may still read code from thi
     [ -s "$d/next.id" ] && { echo "$n (job $(next_job_of "$d") is queued to take over)"; return 0; }
     if [ -s "$d/status.json" ]; then
       st=$(read_field "$d/status.json" state)
+      # framework 10: in line for a computer, however long; it reads lib/ when it starts
+      [ "$st" = queued ] && [ ! -e "$d/stop.done" ] && { echo "$n (job $(read_field "$d/status.json" job), in line for a computer)"; return 0; }
       [ "$st" != stopped ] && [ $(( now - $(stat -c %Y "$d/status.json") )) -lt 180 ] && { echo "$n (job $(read_field "$d/status.json" job), $st)"; return 0; }
     fi
     [ -s "$d/job.id" ] && [ ! -e "$d/stop" ] && [ ! -e "$d/stop.done" ] && { [ ! -e "$d/status.json" ] || [ "$d/job.id" -nt "$d/status.json" ]; } \
@@ -273,7 +299,7 @@ install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as befor
   # a link where the command goes is moved aside first: a copy onto it would write through it
   [ -L "$HPCW_HOME/bin/hpcworker" ] && { move_aside bin/hpcworker || die "could not move the link $HPCW_HOME/bin/hpcworker aside"; }
   if ! same_dir "$SRC_ROOT" "$HPCW_HOME"; then
-    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
+    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.py" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
       && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
     [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
     # copied from a shared copy (read-only there), the files would stay read-only and the next install or upload could not replace them
@@ -281,7 +307,7 @@ install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as befor
     [ -f "$HPCW_HOME/README.md" ] && chmod u+w "$HPCW_HOME/README.md"
   fi
   # files uploaded from a Windows checkout may carry CR line endings, which break bash and sbatch
-  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/profile.py "$HPCW_HOME"/lib/*.sh "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
+  local f; for f in "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/lib/*.py "$HPCW_HOME"/lib/*.sh "$HPCW_HOME"/lib/adapters/*.sh "$HPCW_HOME"/jobs/* "$HPCW_HOME"/profiles/*.json; do [ -f "$f" ] && sed -i 's/\r$//' "$f"; done
   chmod +x "$HPCW_HOME"/bin/hpcworker "$HPCW_HOME"/jobs/*.sbatch 2>/dev/null
   # this home has its own copy now: a shared copy's marker is moved aside with the rest, so nothing takes it for the copy in use
   local left="$SHARED_DIR"
@@ -429,41 +455,234 @@ stop_worker_run() { # RUN_DIR NAME: the stop file, then a wait for the job's own
   # sent on a guess: measured on job 40501099, an scancel sent 15 s in overwrote a stop with "preempted".
   local rd="$1" name="$2" wait_s="${HPCW_STOP_WAIT_S:-45}" poll_s="${HPCW_STOP_POLL_S:-5}"
   local jid nid; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd")
-  local ids="$jid${jid:+${nid:+,}}$nid" waited=0 left=false already=false
+  local ids="$jid${jid:+${nid:+,}}$nid" waited=0 left=false already=false in_line=false
   # a stop that went through before (stopped on record, its stop.done still there, no successor): no wait
   [ -e "$rd/stop.done" ] && [ -z "$nid" ] && [ "$(read_field "$rd/status.json" state 2>/dev/null)" = stopped ] && already=true
+  # framework 10: a worker still in line for a computer (its queued file, no node file) has no job
+  # running to read the stop file, so there is nothing to wait for: the scheduler is asked at once
+  if [ $already = false ] && [ -n "$jid" ] && [ ! -e "$rd/node" ] && [ "$(read_field "$rd/status.json" state 2>/dev/null)" = queued ] \
+     && [ "$(read_field "$rd/status.json" job 2>/dev/null)" = "$jid" ]; then in_line=true; fi
   # a worker already stopped keeps its stop.done, so a second "worker stop" is the same no-op
   if [ $already = false ]; then rm -f "$rd/stop.done"; touch "$rd/stop"; fi
-  if [ -n "$ids" ] && [ $already = false ]; then
+  if [ -n "$ids" ] && [ $already = false ] && [ $in_line = false ]; then
     while [ ! -e "$rd/stop.done" ] && [ "$waited" -lt "$wait_s" ]; do sleep "$poll_s"; waited=$((waited + poll_s)); done
   fi
   [ -e "$rd/stop.done" ] && left=true
-  local alive="" line id st raw
+  local alive="" line id st raw st_out st_rc=0
   if [ -n "$ids" ]; then
+    st_out=$(adapter_status_many "$ids" 2>/dev/null); st_rc=$?
     while IFS= read -r line; do
       [ -n "$line" ] || continue; id=${line%%|*}; st=$(printf '%s' "$line" | cut -d'|' -f2); raw=$(printf '%s' "$line" | cut -d'|' -f4)
       case "$st:$raw" in RUNNING:COMPLETING|RUNNING:CG|RUNNING:E) ;; PENDING:*|RUNNING:*) alive="$alive${alive:+ }$id";; esac   # leaving already: not cancelled again
-    done < <(adapter_status_many "$ids" 2>/dev/null)
+    done < <([ "$st_rc" = 0 ] && printf '%s\n' "$st_out")
+    # the scheduler did not answer: a worker still in line has no job to read the stop file, so its ids
+    # are cancelled as they stand (scancel of a job that is not there is harmless); a running one leaves
+    # through the stop file it was given above
+    [ "$st_rc" != 0 ] && [ $in_line = true ] && alive="$(printf '%s' "$ids" | tr ',' ' ')"
   fi
   [ -n "$alive" ] && adapter_cancel $alive
   rm -f "$rd/next.id"
-  local how; if [ $already = true ]; then how="it had stopped before"; elif [ $left = true ]; then how="the job left on its own within ${waited}s"; elif [ -z "$ids" ]; then how="no job on record"; else how="no word from job ${jid} within ${wait_s}s"; fi
+  local how; if [ $already = true ]; then how="it had stopped before"; elif [ $left = true ]; then how="the job left on its own within ${waited}s"; elif [ -z "$ids" ]; then how="no job on record"; elif [ $in_line = true ]; then how="it was still in line for a computer"; else how="no word from job ${jid} within ${wait_s}s"; fi
+  # the job never ran, so nobody else will say "stopped": this command does, unless the job reached a
+  # computer in the meantime (its node file, or its own status), which then writes its own stop
+  if [ $in_line = true ] && status_patch "$rd/status.json" "queued=$jid" state='"stopped"' message='"stopped by request before it started; the chain ended"' \
+       needs='"nothing"' hint="$(json_str "$(hpcw_hint stopped nothing)")" stop_reason='"request"' updated_at="$(json_str "$(hpcw_now_iso)")" 2>/dev/null; then
+    hpcw_progress "$rd" "Stopped"; touch "$rd/stop.done"
+  fi
   say "worker $name: stopped ($how${alive:+; cancelled at the scheduler: $alive}; the chain ended)"
+}
+# ---- framework 10: status.json from the login node (V11_CONTRACT.md 9) ---------------------------------
+# Three writers besides the job, each a whole-file rename: `worker start` (the queued file), `worker
+# status` (the scheduler's fields while queued, and the error when the grid dropped the request) and
+# `worker stop` (stopped, for a worker that never left the line). The last two write only while the
+# file still says "queued" for that job and no node file exists, and through a temporary name of their
+# own, so they never write over the job's own first write.
+STATUS_PATCH_PY='import json, os, sys
+f, guard = sys.argv[1], sys.argv[2]
+d = os.path.dirname(os.path.abspath(f))
+try:
+    with open(f, encoding="utf-8") as fh:
+        s = json.load(fh)
+except (OSError, ValueError):
+    s = None
+kind, _, job = guard.partition("=")
+if kind in ("queued", "queued-or-none"):
+    if os.path.exists(os.path.join(d, "node")):
+        sys.exit(1)
+    if s is None and kind == "queued":
+        sys.exit(1)
+    if s is not None and (not isinstance(s, dict) or s.get("state") != "queued" or str(s.get("job")) != job):
+        sys.exit(1)
+if not isinstance(s, dict):
+    s = {}
+for kv in sys.argv[3:]:
+    k, _, v = kv.partition("=")
+    s[k] = json.loads(v)
+tmp = "%s.cli.%d" % (f, os.getpid())
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(s, ensure_ascii=False, separators=(",", ":")) + "\n")
+os.replace(tmp, f)'
+status_patch() { # FILE GUARD KEY=JSON... ; GUARD: queued=JOB (the file says queued for JOB), queued-or-none=JOB (or there is none), any
+  need_py; "$PY" -c "$STATUS_PATCH_PY" "$@"
+}
+MIDDOT=$'\302\267'   # U+00B7 as UTF-8 bytes, whatever the locale
+session_title_for() { # NAME -> the session title: the profile's session_title ("Grid worker" when it names none), with " · NAME" for a worker not named worker
+  local base="${P_session_title:-}"; [ -n "$base" ] || base="Grid worker"
+  if [ "$1" = worker ]; then printf '%s' "$base"; else printf '%s %s %s' "$base" "$MIDDOT" "$1"; fi
+}
+write_queued_status() { # RUN_DIR NAME JOB CHAIN(0|1): the queued file, right after the scheduler took the job, keys in the contract's order
+  local rd="$1" name="$2" job="$3" chain="$4" now title src consent=false tmp="$1/status.json.start.$$"
+  [ -e "$rd/node" ] && return 0   # the job already started and wrote its own (it writes the node file first)
+  now=$(hpcw_now_iso); title=$(session_title_for "$name"); src=$(consent_source); [ "$src" != none ] && consent=true
+  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":"","state":"queued","message":"waiting for a computer","needs":"nothing","hint":%s,"submitted_at":%s,"updated_at":%s,"title":%s,"requested_name":%s,"renewal":false,"chain":%s,"next_job":"","consent":%s,"consent_source":%s,"scheduler_state":"","reason":"","expected_start":"","checked_at":""}\n' \
+    "$VERSION" "$(json_str "$P_site")" "$(json_str "$name")" "$(json_str "$job")" "$(json_str "$(hpcw_hint queued nothing)")" "$(json_str "$now")" "$(json_str "$now")" "$(json_str "$title")" "$(json_str "$title")" \
+    "$([ "$chain" = 1 ] && echo true || echo false)" "$consent" "$(json_str "$src")" > "$tmp" && mv -f "$tmp" "$rd/status.json"
+}
+SCHED_JSON=null
+status_refresh() { # RUN_DIR: while the run is in line (status.json "queued", or none yet, and no node file), ONE scheduler call for its job.
+  # A job in line: its fields go into the queued file (got_computer_at too once Slurm says RUNNING). A job
+  # the scheduler no longer lists: the request ended before it started (state error). A scheduler that
+  # could not be asked: nothing is changed or said. SCHED_JSON: what was learned, or null.
+  local rd="$1" sj="$1/status.json" jid line tstate reason start node now exp="" norm gca
+  SCHED_JSON=null
+  jid=$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)
+  [ -n "$jid" ] && [ ! -e "$rd/node" ] || return 0
+  if [ -s "$sj" ]; then
+    [ "$(read_field "$sj" state)" = queued ] && [ "$(read_field "$sj" job)" = "$jid" ] || return 0
+  fi
+  line=$(adapter_status_one "$jid" '%T|%r|%S|%N') || return 0
+  now=$(hpcw_now_iso)
+  if [ -n "$line" ]; then
+    # STATE|REASON|START|NODE, split without a here-string (bash 4.2 would put one in a temp file)
+    local rest; tstate=${line%%|*}; rest=${line#*|}; reason=${rest%%|*}; rest=${rest#*|}; start=${rest%%|*}; node=${rest#*|}
+    norm=$(hpcw_normalise_state slurm "$tstate")
+  else
+    norm=GONE
+  fi
+  case "$norm" in
+    PENDING|RUNNING)
+      exp=$(hpcw_local_time_utc "$start")
+      if [ -n "$exp" ] && [ "$(hpcw_iso_epoch "$exp")" -le "$(date +%s)" ] 2>/dev/null; then exp=""; fi   # Slurm's estimate is often in the past: only a future time counts
+      SCHED_JSON=$(printf '{"state":%s,"reason":%s,"expected_start":%s,"node":%s,"checked_at":%s}' "$(json_str "$tstate")" "$(json_str "$reason")" "$(json_str "$exp")" "$(json_str "$node")" "$(json_str "$now")")
+      local -a kv=(scheduler_state="$(json_str "$tstate")" reason="$(json_str "$reason")" expected_start="$(json_str "$exp")" checked_at="$(json_str "$now")")
+      gca=$(read_field "$sj" got_computer_at 2>/dev/null)
+      [ "$norm" = RUNNING ] && [ -z "$gca" ] && kv+=(got_computer_at="$(json_str "$now")")
+      [ -s "$sj" ] && status_patch "$sj" "queued=$jid" "${kv[@]}" 2>/dev/null
+      ;;
+    UNKNOWN)
+      # a state word this tool does not know, or a line that is not the job's: the scheduler's answer is
+      # not understood, so nothing is changed or said (a job still in line is never read as gone)
+      SCHED_JSON=null
+      ;;
+    *)
+      # the scheduler no longer lists the job (nothing printed, or "Invalid job id"), or lists it ended
+      SCHED_JSON=$(printf '{"state":"GONE","reason":"","expected_start":"","node":"","checked_at":%s}' "$(json_str "$now")")
+      local msg="the grid ended the request before it started"
+      if status_patch "$sj" "queued-or-none=$jid" version="$VERSION" site="$(json_str "${P_site:-}")" run="$(json_str "$(basename "$rd")")" job="$(json_str "$jid")" node='""' \
+           state='"error"' message="$(json_str "$msg")" needs='"nothing"' hint="$(json_str "$(hpcw_hint error nothing)")" scheduler_state='"GONE"' checked_at="$(json_str "$now")" updated_at="$(json_str "$now")" 2>/dev/null; then
+        hpcw_progress "$rd" "Couldn't start: $msg"
+      fi
+      ;;
+  esac
+  return 0
+}
+status_line() { # RUN_DIR -> the one line for a person (the first line of `worker status`, and --json's "line")
+  local rd="$1" sj="$1/status.json" st sub onl n nid msg
+  if [ ! -s "$sj" ]; then echo "Your worker has been asked for and has not reported yet."; return 0; fi
+  st=$(read_field "$sj" state)
+  # a live state whose job has not written for three minutes: what it last said, and that it may have ended
+  local page; page=$(( $(date +%s) - $(stat -c %Y "$sj" 2>/dev/null || date +%s) ))
+  case "$st" in starting|running|online|need_login|need_consent)
+    if [ "$page" -gt 180 ]; then
+      local said; case "$st" in online) said=online;; need_login) said="waiting for your Claude sign-in";; *) said="connecting to Claude";; esac
+      echo "Your worker last reported $(( page / 60 )) min ago (it said: $said); it may have ended."; return 0
+    fi;;
+  esac
+  case "$st" in
+    queued)
+      sub=$(hpcw_iso_epoch "$(read_field "$sj" submitted_at)")
+      if [ -n "$sub" ]; then n=$(( ( $(date +%s) - sub ) / 60 )); [ "$n" -lt 0 ] && n=0; echo "Your worker is in line for a computer ($n min so far)."
+      else echo "Your worker is in line for a computer."; fi;;
+    starting|running|need_consent) echo "Your worker has a computer and is connecting to Claude.";;
+    online)
+      sub=$(hpcw_iso_epoch "$(read_field "$sj" submitted_at)"); onl=$(hpcw_iso_epoch "$(read_field "$sj" online_at)")
+      if [ "$(read_field "$sj" renewal)" != true ] && [ -n "$sub" ] && [ -n "$onl" ] && [ "$onl" -ge "$sub" ]; then
+        n=$(( (onl - sub + 30) / 60 )); [ "$n" -lt 1 ] && n=1; echo "Your worker is online (ready $n min after you asked)."
+      else echo "Your worker is online."; fi;;
+    need_login) echo "Your worker is waiting for your Claude sign-in.";;
+    preempted)
+      nid=$(read_field "$sj" next_job); [ -n "$nid" ] || nid=$(next_job_of "$rd")
+      if [ -n "$nid" ]; then echo "Your worker is renewing itself; it is back in a few minutes."; else echo "Your worker has ended. hpcworker connect starts it again."; fi;;
+    stopped)
+      if [ "$(read_field "$sj" stop_reason)" = login_abandoned ]; then echo "Your worker stopped: waiting for your Claude sign-in timed out."; else echo "Your worker is stopped."; fi;;
+    error) msg=$(read_field "$sj" message); msg="${msg%.}"; echo "Your worker couldn't start: ${msg:-no reason was recorded}.";;
+    *) echo "Your worker has been asked for and has not reported yet.";;
+  esac
+}
+log_lines() { local n=0; [ -f "$1/progress.log" ] && n=$(wc -l < "$1/progress.log" | tr -d ' '); printf '%s' "${n:-0}"; }   # RUN_DIR -> lines in its progress.log (0 when none)
+watch_run() { # RUN_DIR NAME MINUTES SEEN [ASKED_AT]: follow a worker until it is online. status.json and progress.log every 5 s (files
+  # only); the scheduler at most once a minute and only while the worker is in line. New progress.log lines are printed as they
+  # come. Ends 0 online (the line and "Open in Claude: <link>  Look for <title>."), 1 stopped or failed, 3 waiting for the
+  # Claude sign-in, 2 out of time. SEEN: progress.log lines already shown; ASKED_AT: the last scheduler call (seconds)
+  local rd="$1" name="$2" mins="$3" seen="$4" last_sched="${5:-0}" deadline st n url title now ts rest
+  deadline=$(( $(date +%s) + mins * 60 ))
+  while :; do
+    if [ -s "$rd/progress.log" ]; then
+      n=$(log_lines "$rd")
+      [ "$n" -lt "$seen" ] && seen=0   # trimmed by a start: show what is new from the top
+      if [ "$n" -gt "$seen" ]; then
+        while read -r ts rest; do printf '%s %s\n' "$(date -d "$ts" +%-H:%M 2>/dev/null || printf '%s' "$ts")" "$rest"; done < <(tail -n +"$((seen + 1))" "$rd/progress.log" | head -n "$((n - seen))")
+        seen=$n
+      fi
+    fi
+    st=$(read_field "$rd/status.json" state 2>/dev/null)
+    case "$st" in
+      online)
+        url=$(read_field "$rd/status.json" environment_url); title=$(read_field "$rd/status.json" title)
+        if [ -n "$url" ]; then say "$(status_line "$rd")"; say "Open in Claude: $url  Look for ${title:-$(session_title_for "$name")}."; return 0; fi;;
+      stopped|error) say "$(status_line "$rd")"; return 1;;
+      preempted) [ -z "$(read_field "$rd/status.json" next_job)" ] && [ -z "$(next_job_of "$rd")" ] && { say "$(status_line "$rd")"; return 1; };;
+      need_login) say "$(status_line "$rd")"; say "Sign in once with: hpcworker claude login (the worker carries on by itself)"; return 3;;
+    esac
+    now=$(date +%s)
+    if { [ "$st" = queued ] || [ -z "$st" ]; } && [ $(( now - last_sched )) -ge 60 ]; then status_refresh "$rd"; last_sched=$now; continue; fi
+    if [ "$now" -ge "$deadline" ]; then say "$(status_line "$rd")"; say "(still not online after $mins min; hpcworker worker watch --name $name follows it again)"; return 2; fi
+    sleep "${HPCW_WATCH_POLL_S:-5}"
+  done
 }
 read_field() { # FILE KEY -> string value (python-free; strings and simple scalars)
   [ -s "$1" ] || return 1
   tr -d '\n' < "$1" | grep -o "\"$2\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$2\": *//" -e 's/^"//' -e 's/"$//'
 }
 next_job_of() { [ -s "$1/next.id" ] && awk '{print $1; exit}' "$1/next.id"; return 0; }
+# framework 10: one `worker start` at a time per worker. mkdir is atomic on every file system the state
+# directory may live on (NFS, Lustre, CephFS); a lock older than five minutes belongs to a start that was
+# killed, and goes. The lock holds only the scheduler check, the render and the submit (seconds).
+start_lock() { # RUN_DIR -> 0 when this process holds the lock
+  local l="$1/.start.lock" age i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if mkdir "$l" 2>/dev/null; then echo "$$" > "$l/pid" 2>/dev/null; return 0; fi
+    age=$(( $(date +%s) - $(stat -c %Y "$l" 2>/dev/null || date +%s) ))
+    if [ "$age" -gt 300 ]; then rm -f "$l/pid" 2>/dev/null; rmdir "$l" 2>/dev/null; continue; fi
+    sleep 1
+  done
+  return 1
+}
+start_unlock() { rm -f "$1/.start.lock/pid" 2>/dev/null; rmdir "$1/.start.lock" 2>/dev/null; return 0; }
 cmd_worker() {
   load_profile
   local sub="${1:-list}"; shift || true
   local name="worker" hours="$P_worker_defaults_hours" cpus="$P_worker_defaults_cpus" mem="$P_worker_defaults_mem" part="" qos="" pm="$P_worker_defaults_permission_mode" cap="$P_worker_defaults_capacity" as_json=0 lines=60 requeue="" chain=1
+  local wait_min=0 details=0 minutes=30
   while [ $# -gt 0 ]; do case "$1" in
     --name) name="$2"; shift 2;; --hours) hours="$2"; shift 2;; --cpus) cpus="$2"; shift 2;; --mem) mem="$2"; shift 2;;
     --partition) part="$2"; shift 2;; --qos) qos="$2"; shift 2;; --permission-mode) pm="$2"; shift 2;; --capacity) cap="$2"; shift 2;;
-    --requeue) requeue=1; shift;; --no-requeue) requeue=0; shift;; --no-chain) chain=0; shift;; --chain) chain=1; shift;; --json) as_json=1; shift;; --lines) lines="$2"; shift 2;; *) die "worker: unknown option $1";; esac; done
+    --requeue) requeue=1; shift;; --no-requeue) requeue=0; shift;; --no-chain) chain=0; shift;; --chain) chain=1; shift;; --json) as_json=1; shift;; --lines) lines="$2"; shift 2;;
+    --wait) if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then wait_min="$2"; shift 2; else wait_min=30; shift; fi;;
+    --details) details=1; shift;; --minutes) minutes="$2"; shift 2;;
+    *) die "worker: unknown option $1";; esac; done
   [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "worker name must be letters, digits, _ or -"
+  [[ "$minutes" =~ ^[0-9]+$ ]] || die "--minutes must be a whole number"
   local rd; rd=$(run_dir "$name")
   case "$sub" in
     start)
@@ -472,19 +691,40 @@ cmd_worker() {
       chmod 700 "$rd" 2>/dev/null
       # the workspace guide first, so a workspace made before version 8 gets one at its next start too
       local guide; guide=$(write_workspace_guide "$WORKSPACES/$name" "$name")
-      case "$guide" in
+      # under connect only HPCW-STEP lines are printed: the guide, the notice and the sentences below are for a terminal
+      if [ "$CONNECT_MODE" != 1 ]; then case "$guide" in
         written) say "wrote $WORKSPACES/$name/CLAUDE.md, the guide Claude Code reads there (yours to edit; hpcworker never replaces it)";;
         skipped:*) say "note: no workspace guide written (${guide#skipped: }); the worker starts without it";;
-      esac
-      # the running link and its queued successor, in ONE scheduler call: either alive means nothing to submit
-      local jid nid ids line; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd"); ids="$jid${jid:+${nid:+,}}$nid"
+      esac; fi
+      # the running link and its queued successor, in ONE scheduler call: either alive means nothing to
+      # submit. The sentence below is the one the 10.0.0 extension reads; under connect the job is
+      # named in HPCW-STEP queued <job> kept, the running one when there is one
+      # one check-and-submit at a time for this worker (two connects, or a terminal and the panel, at
+      # once would otherwise both see no job and both submit); a lock left by a killed start goes after 5 min.
+      # The job ids are read inside the lock: a start that waited for it sees the job the other submitted
+      start_lock "$rd" || { [ "$CONNECT_MODE" = 1 ] && step_fail refused "another start of this worker is under way; nothing was submitted" 5; die "another start of worker $name is under way (its lock is $rd/.start.lock); nothing submitted"; }
+      local jid nid ids line kept="" kept_line="" st_out st_rc; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd"); ids="$jid${jid:+${nid:+,}}$nid"
       if [ -n "$ids" ]; then
-        while IFS= read -r line; do [ -n "$line" ] || continue; case "$(echo "$line" | cut -d'|' -f2)" in PENDING|RUNNING)
-          say "worker $name already has job ${line%%|*} ($(fmt_job_state "${line#*|}")); nothing submitted"; return 0;; esac; done < <(adapter_status_many "$ids" 2>/dev/null)
+        # a scheduler that did not answer is not "no job alive": nothing is submitted beside a worker that may still be in line
+        st_out=$(adapter_status_many "$ids" 2>/dev/null); st_rc=$?
+        if [ "$st_rc" != 0 ]; then
+          start_unlock "$rd"
+          [ "$CONNECT_MODE" = 1 ] && step_fail refused "the scheduler did not answer, so nothing was submitted; try again in a minute" 5
+          die "the scheduler did not answer about job(s) $ids, so nothing was submitted (a second worker could start beside the first otherwise); try again in a minute"
+        fi
+        while IFS= read -r line; do [ -n "$line" ] || continue; case "$(echo "$line" | cut -d'|' -f2)" in
+          RUNNING) kept="${line%%|*}"; kept_line="$line"; break;;
+          PENDING) [ -n "$kept" ] || { kept="${line%%|*}"; kept_line="$line"; };; esac; done < <(printf '%s\n' "$st_out")
+      fi
+      [ -n "$kept" ] && start_unlock "$rd"
+      if [ -n "$kept" ]; then
+        if [ "$CONNECT_MODE" = 1 ]; then say "HPCW-STEP queued $kept kept $rd"; else say "worker $name already has job $kept ($(fmt_job_state "${kept_line#*|}")); nothing submitted"; fi
+        if [ "$wait_min" -gt 0 ] && [ "$CONNECT_MODE" != 1 ]; then watch_run "$rd" "$name" "$wait_min" "$(log_lines "$rd")" "$(date +%s)"; return $?; fi
+        return 0
       fi
       rm -f "$rd/stop" "$rd/stop.done" "$rd/next.id"
       # first-time notice, in plain words (the report's disclosure text, shortened for a terminal)
-      if [ ! -e "$rd/.notice-shown" ]; then
+      if [ ! -e "$rd/.notice-shown" ] && [ "$CONNECT_MODE" != 1 ]; then
         cat <<'EOT'
 Before your first worker starts, know this: files the worker reads and every command's output go to
 Anthropic; while you are connected through claude.ai or the app the transcript is also stored on
@@ -494,25 +734,66 @@ material out of the worker's directory; and Remote Control draws from your plan'
 EOT
         touch "$rd/.notice-shown"
       fi
-      consent_given || say "note: Claude Code has not recorded your Remote Control answer yet (hpcworker claude login does that in one sitting); the job will start and wait for it"
+      [ "$CONNECT_MODE" = 1 ] || consent_given || say "note: Claude Code has not recorded your Remote Control answer yet (hpcworker claude login does that in one sitting); the job will start and wait for it"
       # HPCW_CODE: the job sources lib/ from where this command's code is; on a shared copy that is the
       # numbered directory, so a chain keeps the version it started on until the next worker start
       local kv=(RUN="$name" HOURS="$hours" CPUS="$cpus" MEM="$mem" PERMISSION_MODE="$pm" CAPACITY="$cap" HPCW_HOME="$HPCW_HOME" HPCW_CODE="$SRC_ROOT" CHAIN="$chain")
       [ -n "$part" ] && kv+=(PARTITION="$part"); [ -n "$qos" ] && kv+=(QOS="$qos"); [ -n "$requeue" ] && kv+=(REQUEUE="$requeue")
-      prof_py render "$JOBS/worker.sbatch.tpl" "$PROFILE" "${kv[@]}" > "$rd/job.sbatch.part" || die "could not render the job (see the message above)"
-      mv -f "$rd/job.sbatch.part" "$rd/job.sbatch"
+      prof_py render "$JOBS/worker.sbatch.tpl" "$PROFILE" "${kv[@]}" > "$rd/job.sbatch.part.$$" || { rm -f "$rd/job.sbatch.part.$$"; start_unlock "$rd"; die "could not render the job (see the message above)"; }
+      mv -f "$rd/job.sbatch.part.$$" "$rd/job.sbatch"
       printf '%s\n' "${kv[@]}" > "$rd/params"
-      local out; out=$(cd "$rd" && adapter_submit "$rd/job.sbatch" -D "$rd" 2>&1) || die "the scheduler refused the job: $out"
-      echo "$out" > "$rd/job.id"; rm -f "$rd/node"
+      # framework 10: the node file names the job that has a computer, so the last job's goes before this one is asked for
+      rm -f "$rd/node"
+      local out; out=$(cd "$rd" && adapter_submit "$rd/job.sbatch" -D "$rd" 2>&1) || {
+        start_unlock "$rd"
+        [ "$CONNECT_MODE" = 1 ] && step_fail refused "$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')" 5
+        die "the scheduler refused the job: $out"; }
+      echo "$out" > "$rd/job.id"
+      # framework 10, before anything is printed: status.json says "queued" with the moment the
+      # scheduler took the job, and progress.log says so (kept to its last 400 lines)
+      write_queued_status "$rd" "$name" "$out" "$chain"
+      start_unlock "$rd"
+      hpcw_progress_trim "$rd"; local seen; seen=$(log_lines "$rd")
+      hpcw_progress "$rd" "Asked the grid for a computer"
+      if [ "$CONNECT_MODE" = 1 ]; then say "HPCW-STEP queued $out new $rd"; return 0; fi
       say "worker $name submitted as job $out ($(grep -m1 -o -- '--partition=[^ ]*' "$rd/job.sbatch" | cut -d= -f2)${qos:+/$qos}, ${hours} h$([ "$chain" = 1 ] && echo ', always on: each job queues the next before it ends')). When it runs, open the link in 'hpcworker worker status --name $name' (or claude.ai/code, or Code in the Claude app)."
-      say "watch it with: hpcworker worker status --name $name   (reads $rd/status.json; no scheduler polling)";;
+      if [ "$wait_min" -gt 0 ]; then watch_run "$rd" "$name" "$wait_min" "$seen" "$(date +%s)"; return $?; fi
+      say "watch it with: hpcworker worker watch --name $name   (reads $rd/status.json; asks the scheduler at most once a minute while it is in line)";;
     stop)
       [ -d "$rd" ] || die "no worker named $name"
       stop_worker_run "$rd" "$name";;
+    watch)
+      [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
+      say "$(status_line "$rd")"
+      watch_run "$rd" "$name" "$minutes" "$(log_lines "$rd")" 0; return $?;;
+    restrict)
+      # framework 10: the restricted marker, written by the tool (the 11.0.0 extension writes nothing through Files);
+      # it does not stop a running worker: the next connect refuses to start one there
+      local wd="$WORKSPACES/$name" m="$WORKSPACES/$name/.restricted"
+      mkdir -p "$wd" || die "cannot create $wd (is shared_state_dir right and writable?)"
+      if [ -e "$m" ]; then say "worker $name: already marked restricted ($m)"; return 0; fi
+      { printf 'restricted %s by hpcworker worker restrict\n' "$(hpcw_now_iso)" > "$m.part" && chmod 644 "$m.part" && mv -f "$m.part" "$m"; } || { rm -f "$m.part"; die "could not write $m"; }
+      say "worker $name: marked restricted ($m); it will not start there until the marker is removed";;
     status)
       [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
       local sj="$rd/status.json" cj="$rd/connection.json"
-      if [ $as_json = 1 ]; then printf '{"run":%s,"job":%s,"next_job":%s,"status":%s,"connection":%s}\n' "$(json_str "$name")" "$(json_str "$(cat "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)"; return 0; fi
+      # framework 10: ONE scheduler call, only while the worker is in line (status.json says so, or has not been written yet)
+      status_refresh "$rd"
+      if [ $as_json = 1 ]; then
+        # v 1 (framework 10); framework 9's run, job, next_job, status and connection are kept as they were
+        printf '{"v":1,"run":%s,"job":%s,"next_job":%s,"state_dir":%s,"status":%s,"connection":%s,"scheduler":%s,"line":%s}\n' "$(json_str "$name")" "$(json_str "$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" \
+          "$(json_str "$STATE_DIR")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)" "$SCHED_JSON" "$(json_str "$(status_line "$rd")")"
+        return 0
+      fi
+      say "$(status_line "$rd")"
+      if [ -s "$sj" ]; then
+        local pst purl ptitle page; pst=$(read_field "$sj" state)
+        if [ "$pst" = online ] && purl=$(read_field "$sj" environment_url) && [ -n "$purl" ]; then ptitle=$(read_field "$sj" title); say "Open in Claude: $purl  Look for ${ptitle:-$(session_title_for "$name")}."; fi
+        page=$(( $(date +%s) - $(stat -c %Y "$sj") ))
+        case "$pst" in starting|running|online|need_login|need_consent) [ "$page" -gt 180 ] && say "(hpcworker worker status --details says more.)";; esac
+      fi
+      [ $details = 1 ] || return 0
+      # framework 9's lines, for whoever needs the job, the node and the heartbeat
       local jid; jid=$(cat "$rd/job.id" 2>/dev/null || true)
       if [ ! -s "$sj" ]; then say "worker $name: job ${jid:-none} submitted, no status yet (queued, or not started); slurm output: $(ls -t "$rd"/slurm_*.out 2>/dev/null | head -1)"; return 0; fi
       local st upd age nid; st=$(read_field "$sj" state); upd=$(read_field "$sj" updated_at); nid=$(next_job_of "$rd")
@@ -524,7 +805,11 @@ EOT
       say "  always on: $(read_field "$sj" chain); next job: ${nid:-none} $(read_field "$sj" chain_note)"
       local sn; sn=$(read_field "$sj" scheduler_note)
       [ -n "$sn" ] && say "  scheduler inside the worker: $sn"
-      [ "$age" -gt 120 ] && case "$st" in stopped) ;; preempted) [ -n "$nid" ] && say "  (this job ended; job $nid is queued to take over)" || say "  (this job ended with no successor; hpcworker worker start --name $name starts it again)";; *) say "  (no heartbeat for ${age}s: the job may have ended; ${nid:+job $nid is queued to take over; }hpcworker worker start --name $name starts it again if not)";; esac
+      # framework 10's times and the scheduler's word while it was in line
+      local tt; for tt in submitted_at got_computer_at online_at ends_at; do local tv; tv=$(read_field "$sj" "$tt"); [ -n "$tv" ] && say "  $tt: $tv"; done
+      if [ "$st" = queued ]; then local xs; xs=$(read_field "$sj" expected_start); say "  scheduler: $(read_field "$sj" scheduler_state) reason $(read_field "$sj" reason) expected start ${xs:-unknown} (asked at $(read_field "$sj" checked_at))"; fi
+      [ -n "$(read_field "$sj" stop_reason)" ] && say "  stop reason: $(read_field "$sj" stop_reason)"
+      [ "$age" -gt 120 ] && case "$st" in stopped|queued|error) ;; preempted) [ -n "$nid" ] && say "  (this job ended; job $nid is queued to take over)" || say "  (this job ended with no successor; hpcworker worker start --name $name starts it again)";; *) say "  (no heartbeat for ${age}s: the job may have ended; ${nid:+job $nid is queued to take over; }hpcworker worker start --name $name starts it again if not)";; esac
       return 0;;
     list)
       local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/job.id" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
@@ -539,7 +824,7 @@ EOT
       # what write_workspace_guide would write for this worker, on stdout; nothing is written
       [ -s "$GUIDE_TPL" ] || die "no workspace guide template at $GUIDE_TPL"
       prof_py guide "$GUIDE_TPL" "$PROFILE" RUN="$name";;
-    *) die "worker: start|stop|status|list|log|guide";;
+    *) die "worker: start|stop|status|watch|list|log|guide|restrict";;
   esac
 }
 
@@ -585,12 +870,18 @@ in_job_exec() { # MODE [args]: inside an allocation, run claude inside the image
       mkdir -p "$CCD" && chmod 700 "$CCD" 2>/dev/null
       if [ "$mode" = login ] && [ "${1:-}" = "--plain" ]; then
         # the panel's sitting (lib/login_plain.sh): Claude Code under a pty inside the image, a line
-        # contract on stdout, the transcript under /dev/shm for this sitting only, removed with it
+        # contract on stdout, the transcript under /dev/shm for this sitting only, removed with it.
+        # Framework 10's flags come only from connect: --keepalive S, --fresh, --deadline EPOCH; without
+        # them (`claude login --plain`, the 10.0.0 extension's line) the sitting is framework 9's
+        shift
+        local ka=0 fresh="" dl=0
+        while [ $# -gt 0 ]; do case "$1" in
+          --keepalive) ka="${2:-0}"; shift 2;; --fresh) fresh=fresh; shift;; --deadline) dl="${2:-0}"; shift 2;; *) shift;; esac; done
         local lp="$LIB/login_plain.sh" sd="$P_ipc_dir/$USER/hpcw_login_$(hpcw_job_id)"
         [ -s "$lp" ] || { echo "HPCW-LOGIN-FAILED: the sign-in helper is missing from the installed copy; run hpcworker install again"; return 3; }
         mkdir -p "$sd" && chmod 700 "$sd" || { echo "HPCW-LOGIN-FAILED: this compute node has no writable $P_ipc_dir for the sitting"; return 3; }
         trap "hpcw_rm_own_tmp '$HPCW_NODE_TMP' '$sd'" EXIT
-        hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$(cat "$lp")" _ "$ws" "$P_claude_bin" "$sd" "$SEED" 600
+        hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$(cat "$lp")" _ "$ws" "$P_claude_bin" "$sd" "$SEED" 600 live "$ka" "$fresh" "$dl"
         return $?
       fi
       hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$LOGIN_SITTING" _ "$ws" "$P_claude_bin" "$SEED" "$mode" "$(consent_markers | paste -sd: -)";;
@@ -628,7 +919,19 @@ plain_login_outcome() { # the sitting's exit: 0 signed in; 3 it already printed 
     *) say "HPCW-LOGIN-FAILED: the cluster did not give a compute node in time, or the session ended early; try again in a minute"; return 1;;
   esac
 }
+write_consent_marker() { # INSTALL_ID: ~/.hpcworker/consent = "yes <ISO-8601 UTC> <id>", written atomically, 0600 (the worker job answers Remote Control's question from it)
+  local f="$HPCW_HOME/consent"
+  mkdir -p "$HPCW_HOME" 2>/dev/null || return 1
+  ( umask 077; printf 'yes %s %s\n' "$(hpcw_now_iso)" "$1" > "$f.part" ) 2>/dev/null && chmod 600 "$f.part" 2>/dev/null && mv -f "$f.part" "$f" 2>/dev/null || { rm -f "$f.part"; return 1; }
+}
 cmd_claude() {
+  # framework 10: the Remote Control answer from the extension, no question asked and no profile needed
+  if [ "${1:-}" = consent ] && [ "${2:-}" = --record ]; then
+    [[ "${3:-}" =~ ^[0-9a-f]{32}$ ]] || { echo "hpcworker: claude consent --record needs this installation's 32-character id" >&2; exit 2; }
+    write_consent_marker "$3" || die "could not write $HPCW_HOME/consent"
+    say "recorded in $HPCW_HOME/consent (fallback marker): your workers may now host Remote Control"
+    return 0
+  fi
   load_profile
   local sub="${1:-status}"; shift || true
   local self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
@@ -695,6 +998,360 @@ EOT
   esac
 }
 
+# ---- connect: the extension's one line (framework 10; docs/V11_CONTRACT.md section 5) ------------------
+# Typed by the extension into the portal's shell with `exec`, so the shell ends when connect ends.
+# In order: set the account up for the lab's shared copy when it is not yet, record the Remote Control
+# answer (--consent), refuse a restricted workspace, start the worker unless a job of it is already in
+# line or running, then the Claude sign-in sitting unless --login says otherwise. Every step prints one
+# "HPCW-STEP" line, whole and at the start of a line, in that order and at most once; a failure prints
+# "HPCW-STEP failed <code> <sentence>" and ends connect with the code's exit status (usage 2, setup 3,
+# restricted 4, refused 5, signin-node 6, signin-code / signin-timeout / signin 7, other 1). Nothing
+# else is printed but the sitting's own lines (lib/login_plain.sh) and srun's, relayed whole by
+# lib/relay.py, and the keepalive "HPCW-LOGIN: still waiting" at least every 20 s from "HPCW-STEP signin"
+# until the sitting ends. Connect ends within 14 minutes: at most 600 s for the sign-in computer, then a
+# code budget of what is left of 840 s (at least two). One scheduler call to check the worker, one sbatch
+# when it submits, one srun for the sitting.
+CONNECT_BUDGET_S=840
+connect_usage() { step_fail usage "$1" 2; }
+connect_setup() { # SITE: the account uses the lab's shared copy the site profile names, or is made to (framework 5's install, without the ~/.bashrc block)
+  local site="$1" want marker err rc
+  [ -n "$site" ] || { [ -s "$PROFILE" ] && site=$(prof_py get "$PROFILE" site 2>/dev/null); }
+  [ -n "$site" ] || step_fail setup "this account has no site profile yet; connect needs --profile SITE" 3
+  want=$(shared_default "$site"); want="${want%/}"
+  if [ -z "$want" ]; then
+    # a site without a shared copy: an account set up with a copy of its own is ready as it is
+    if [ -s "$PROFILE" ] && [ -e "$HPCW_HOME/bin/hpcworker" ]; then say "HPCW-STEP setup ready"; return 0; fi
+    step_fail setup "the site profile names no shared copy and this account is not set up (hpcworker install --profile $site)" 3
+  fi
+  marker=""; [ -s "$HPCW_HOME/shared" ] && { IFS= read -r marker < "$HPCW_HOME/shared" || true; }; marker="${marker%/}"
+  if [ -s "$PROFILE" ] && is_launcher "$HPCW_HOME/bin/hpcworker" && [ -z "$(own_copy_parts)" ] && { [ "$marker" = "$want" ] || same_copy_spelled "$marker" "$want"; }; then
+    say "HPCW-STEP setup ready"; return 0
+  fi
+  # the install's own sentences go nowhere; its refusal (stderr) becomes the step's sentence
+  err=$( ( CONNECT_MODE=0; install_shared "$want" "$site" 0 0 ) 2>&1 >/dev/null ); rc=$?
+  if [ $rc != 0 ]; then
+    err=$(printf '%s\n' "$err" | grep -v '^[[:space:]]*$' | tail -1); err="${err#hpcworker: }"
+    [ -n "$err" ] || err="this account could not be set up for the lab's copy"
+    step_fail setup "$err" 3
+  fi
+  SHARED_DIR=""; [ -s "$HPCW_HOME/shared" ] && { IFS= read -r SHARED_DIR < "$HPCW_HOME/shared" || true; }
+  say "HPCW-STEP setup changed"
+}
+connect_last_login() { # -> "LOGGEDIN|EMAIL|PLAN" from the newest status.json of any run that carries Claude Code's answer (a queued file carries none); nothing when none does
+  local d f m bt=0 best="" t li em pl
+  for d in "$STATE_DIR"/*/; do
+    f="$d/status.json"; [ -s "$f" ] || continue
+    grep -q '"claude_login": *{' "$f" 2>/dev/null || continue
+    m=$(stat -c %Y "$f" 2>/dev/null || echo 0); [ "$m" -gt "$bt" ] && { bt=$m; best="$f"; }
+  done
+  [ -n "$best" ] || return 0
+  t=$(tr -d '\n' < "$best")
+  li=$(printf '%s' "$t" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false')
+  em=$(printf '%s' "$t" | grep -o '"email": *"[^"]*"' | head -1 | cut -d'"' -f4)
+  pl=$(printf '%s' "$t" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4)
+  printf '%s|%s|%s\n' "${li:-false}" "$em" "$pl"
+}
+one_token() { local v="${1:-}"; v="${v//[[:space:]]/}"; printf '%s' "${v:--}"; }   # an e-mail or a plan as one field, "-" when Claude Code did not say
+connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, relayed whole; ends with signed-in, or fails with its code
+  local fresh="$1" t0="$2" self sum rc signed failed ka="${HPCW_KEEPALIVE_S:-20}" tty_saved="" em pl
+  self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
+  [[ "$ka" =~ ^[0-9]+$ ]] && [ "$ka" -ge 1 ] || ka=20
+  need_py
+  [ -r "$LIB/relay.py" ] || die "lib/relay.py is missing from this copy of hpcworker"
+  say "HPCW-STEP signin"
+  say "HPCW-LOGIN: requesting a compute node"
+  mkdir -p "$HPCW_HOME/log" 2>/dev/null && chmod 700 "$HPCW_HOME/log" 2>/dev/null
+  sum="$HPCW_HOME/log/connect.$$.outcome"; rm -f "$sum"
+  # the code the student pastes travels from this terminal to the sitting and is never shown: echo
+  # off here as well as in the sitting, whatever srun makes of --pty with its output going to a pipe
+  if hpcw_have_terminal; then tty_saved=$(stty -g 2>/dev/null); stty -echo 2>/dev/null; fi
+  local -a extra=(--keepalive "$ka" --deadline "$(( t0 + CONNECT_BUDGET_S ))"); [ "$fresh" = fresh ] && extra+=(--fresh)
+  # one writer: srun's output and its own messages go to the relay, which writes whole lines and the keepalive
+  HPCW_ALLOC_WAIT_S=600 adapter_interactive "$P_partition_cpu" "$P_qos_cpu" 00:20:00 hpcw_claude 2G -- "$self" _exec login --plain "${extra[@]}" 2>&1 \
+    | "$PY" "$LIB/relay.py" "$ka" "$sum"
+  rc=${PIPESTATUS[0]}
+  [ -n "$tty_saved" ] && stty "$tty_saved" 2>/dev/null
+  signed=$(sed -n 1p "$sum" 2>/dev/null); failed=$(sed -n 2p "$sum" 2>/dev/null); rm -f "$sum"
+  if [ -n "$failed" ]; then
+    local why="${failed#HPCW-LOGIN-FAILED}"; why="${why#:}"; why="${why# }"
+    case "$failed" in
+      *"did not accept the code"*) step_fail signin-code "$why" 7;;
+      *"no code arrived within"*|*"did not finish within"*) step_fail signin-timeout "$why" 7;;
+      *) step_fail signin "$why" 7;;
+    esac
+  fi
+  if [ "$rc" = 0 ] && [ -n "$signed" ]; then
+    signed="${signed#SIGNED-IN}"; signed="${signed# }"; em="${signed%% *}"; pl="${signed#* }"; [ "$pl" = "$signed" ] && pl=""
+    say "HPCW-STEP signed-in $(one_token "$em") $(one_token "$pl")"
+    return 0
+  fi
+  if [ "$rc" = 0 ]; then
+    say "HPCW-LOGIN-FAILED: the sign-in ended without an answer from Claude Code; start it again"
+    step_fail signin "the sign-in ended without an answer from Claude Code" 7
+  fi
+  say "HPCW-LOGIN-FAILED: the cluster did not give a compute node in time, or the session ended early; try again in a minute"
+  step_fail signin-node "the cluster did not give a compute node for the sign-in in time, or the session ended early" 6
+}
+cmd_connect() {
+  CONNECT_MODE=1
+  local t0 name=worker site="" cid="" login=auto pm="" chain=1
+  t0=$(date +%s)
+  while [ $# -gt 0 ]; do case "$1" in
+    --name|--profile|--consent|--login|--permission-mode) [ $# -ge 2 ] || connect_usage "$1 needs a value"
+      case "$1" in --name) name="$2";; --profile) site="$2";; --consent) cid="$2";; --login) login="$2";; --permission-mode) pm="$2";; esac; shift 2;;
+    --no-chain) chain=0; shift;;
+    *) connect_usage "unknown option $1";;
+  esac; done
+  [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || connect_usage "the worker name must be 1 to 32 letters, digits, _ or -"
+  [ -z "$site" ] || [[ "$site" =~ ^[a-z0-9-]{1,32}$ ]] || connect_usage "the site profile name must be lower-case letters, digits or -"
+  [ -z "$cid" ] || [[ "$cid" =~ ^[0-9a-f]{32}$ ]] || connect_usage "--consent needs this installation's 32-character id"
+  case "$login" in auto|always|fresh|never) ;; *) connect_usage "--login must be auto, always, fresh or never";; esac
+  case "$pm" in ""|default|acceptEdits|plan) ;; *) connect_usage "--permission-mode must be default, acceptEdits or plan";; esac
+  # 2. the account
+  connect_setup "$site"
+  load_profile
+  # 3. the Remote Control answer
+  if [ -n "$cid" ]; then write_consent_marker "$cid" || step_fail other "could not write the Remote Control answer" 1; say "HPCW-STEP consent"; fi
+  # 4. a restricted workspace: nothing is submitted
+  local ws="$WORKSPACES/$name"
+  if [ -e "$ws/.restricted" ] || [ "${P_restricted:-false}" = true ] || case " ${P_restricted_workspaces:-} " in *" $name "*|*" * "*) true;; *) false;; esac; then
+    step_fail restricted "the workspace $ws is marked restricted" 4
+  fi
+  # what the account's last word on the Claude sign-in was, read before this start replaces the run's status.json with its queued file
+  local last=""; [ "$login" = auto ] && last=$(connect_last_login)
+  # 5. the worker (worker start prints "HPCW-STEP queued <job> new|kept <run dir>", or fails with refused)
+  local -a wa=(start --name "$name"); [ -n "$pm" ] && wa+=(--permission-mode "$pm"); [ "$chain" = 0 ] && wa+=(--no-chain)
+  cmd_worker "${wa[@]}"
+  # 6. the sign-in. signin.pending tells a job of this worker that waits for the sign-in that one is
+  # under way (its 20-minute abandon counts from here, and from the end of the sitting)
+  local rdp; rdp=$(run_dir "$name")
+  case "$login" in always|fresh|auto) [ -d "$rdp" ] && touch "$rdp/signin.pending" 2>/dev/null;; esac
+  case "$login" in
+    never) ;;
+    auto)
+      if [ "${last%%|*}" = true ]; then
+        local rest="${last#*|}"; say "HPCW-STEP signed-in $(one_token "${rest%%|*}") $(one_token "${rest#*|}")"
+      else connect_signin "" "$t0"; fi;;
+    always) connect_signin "" "$t0";;
+    fresh) connect_signin fresh "$t0";;
+  esac
+  [ -d "$rdp" ] && [ -e "$rdp/signin.pending" ] && touch "$rdp/signin.pending" 2>/dev/null
+  say "HPCW-STEP done"
+  exit 0
+}
+
+# ---- login-setup: the one-time key for the portal's own terminal (framework 10, AM2) ------------------
+# UNPROVEN ON THE GRID: designed from how Open OnDemand's Shell app runs ssh, tried only against the
+# mock portal and these unit tests, never by a student without a key on the real grid.
+#
+# The portal's Shell app runs, as the student and on the OnDemand server, `ssh <host>` with nothing
+# else on the command line, so the ssh client reads the student's ~/.ssh/config and, when no
+# IdentityFile applies to the host, tries its default key files. A student who never made a key there
+# is asked for a password, which Beethoven never types. This makes the key in the student's own
+# account, in a file of its own name, typed once into that same terminal after the student signed in
+# there:
+#   ~/.ssh/beethoven_ed25519 (+ .pub)  ed25519, no passphrase, comment "beethoven-login-setup <user> <date>"
+#   ~/.ssh/config                      one managed block for this login node's names: our key first,
+#                                      then the client's default key files (an IdentityFile that applies
+#                                      stops the client from adding its defaults; listing them keeps
+#                                      every key the student already uses working, in the same order)
+#   ~/.ssh/authorized_keys             one line: from="<address of the machine this terminal came from>"
+#                                      (at most four, newest kept), no agent, port or X11 forwarding
+# so the key opens the account only from the portal's own server, never from the internet. It never
+# touches or prints any other key, never prints a private key, runs again without change, and
+# `login-setup --remove` takes all three away. Nothing about the key ever reaches the browser.
+LS_TAG=beethoven-login-setup
+LS_BEGIN='# >>> beethoven login-setup (managed; "hpcworker login-setup --remove" removes this block) >>>'
+LS_END='# <<< beethoven login-setup <<<'
+LS_DEFAULT_KEYS="id_rsa id_ecdsa id_ecdsa_sk id_ed25519 id_ed25519_sk id_dsa"
+ls_stop() { echo "$2"; exit "$1"; }   # EXIT SENTENCE: the last line (V11_CONTRACT.md 8.3)
+ls_ip_literal() { # ADDRESS -> 0 for an IPv4 or IPv6 literal: nothing that could carry a quote, a comma or a pattern into from=""
+  local a="$1" o
+  if [[ "$a" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    for o in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do [ $((10#$o)) -le 255 ] || return 1; done
+    return 0
+  fi
+  [[ "$a" =~ ^[0-9A-Fa-f:.]{2,45}$ ]] && [[ "$a" == *:* ]]
+}
+ls_same_computer() { # CLIENT SERVER -> 0 when the terminal came from this computer itself (loopback, or its own address)
+  local c="$1" s="$2" own a
+  case "$c" in 127.*|::1|0:0:0:0:0:0:0:1|::ffff:127.*|0.0.0.0|::) return 0;; esac
+  [ "$c" = "$s" ] && return 0
+  own=$(hostname -I 2>/dev/null) || own=""
+  for a in $own; do [ "$a" = "$c" ] && return 0; done
+  return 1
+}
+ls_is_ours() { [ -f "$1" ] && [ "$(awk 'NR == 1 { print $3; exit }' "$1" 2>/dev/null)" = "$LS_TAG" ]; }   # PUB: its comment names this tool
+ls_mode() { stat -c %a "$1" 2>/dev/null; }
+ls_host_names() { # the names the portal's Shell may give this login node: each profile's submit_host and submit_host.*, its ood_shell_host, and this node's own two names
+  local -a profs=() out=() seen=()
+  local p n s f
+  if [ -s "$PROFILE" ]; then profs=("$PROFILE"); else for p in "$PROFILES"/*.json; do [ -s "$p" ] && profs+=("$p"); done; fi
+  for p in ${profs[@]+"${profs[@]}"}; do
+    n=$(prof_py get "$p" submit_host 2>/dev/null); [ -n "$n" ] && out+=("$n" "$n.*")
+    n=$(prof_py get "$p" ood_shell_host 2>/dev/null); [ -n "$n" ] && out+=("$n")
+  done
+  s=$(hostname -s 2>/dev/null); f=$(timeout 5 hostname -f 2>/dev/null)
+  out+=("$s" "$f")
+  for n in ${out[@]+"${out[@]}"}; do
+    [[ "$n" =~ ^[A-Za-z0-9*][A-Za-z0-9.*-]*$ ]] || continue
+    case "$n" in localhost|localhost.*) continue;; esac
+    case " ${seen[*]+${seen[*]}} " in *" $n "*) continue;; esac
+    seen+=("$n")
+  done
+  printf '%s' "${seen[*]+${seen[*]}}"
+}
+ls_block() { # NAMES -> the managed config block
+  local k
+  printf '%s\n' "$LS_BEGIN" "Host $1" "    IdentityFile ~/.ssh/beethoven_ed25519"
+  for k in $LS_DEFAULT_KEYS; do printf '    IdentityFile ~/.ssh/%s\n' "$k"; done
+  printf '%s\n' "$LS_END"
+}
+ls_without_block() { awk -v b="$LS_BEGIN" -v e="$LS_END" '$0 == b { skip = 1; next } skip && $0 == e { skip = 0; next } !skip { print }' "$1"; }   # FILE -> FILE without our block
+# our authorized_keys line, exactly: the options this tool writes, an ed25519 key, and our comment. A line
+# of the student's own that merely mentions the tag is never taken for ours.
+LS_LINE_RE='^from="[0-9A-Fa-f:.,]*",no-agent-forwarding,no-port-forwarding,no-X11-forwarding ssh-ed25519 [A-Za-z0-9+/=]+ beethoven-login-setup( |$)'
+ls_ood_addresses() { # the addresses the profiles' portal names resolve to (a note only: the portal's server may sit behind another name)
+  local -a profs=(); local p u h a out=""
+  if [ -s "$PROFILE" ]; then profs=("$PROFILE"); else for p in "$PROFILES"/*.json; do [ -s "$p" ] && profs+=("$p"); done; fi
+  for p in ${profs[@]+"${profs[@]}"}; do
+    u=$(prof_py get "$p" ood_base_url 2>/dev/null); h="${u#*://}"; h="${h%%/*}"; h="${h%%:*}"
+    [[ "$h" =~ ^[A-Za-z0-9.-]+$ ]] || continue
+    for a in $(timeout 5 getent ahosts "$h" 2>/dev/null | awk '{print $1}' | sort -u); do out="$out${out:+ }$a"; done
+  done
+  printf '%s' "$out"
+}
+cmd_login_setup() {
+  local remove=0 a
+  for a in "$@"; do case "$a" in --remove) remove=1;; *) echo "hpcworker: login-setup takes --remove or nothing" >&2; exit 2;; esac; done
+  local user="${USER:-$(id -un 2>/dev/null)}" sd="$HOME/.ssh"
+  local key="$HOME/.ssh/beethoven_ed25519" pub="$HOME/.ssh/beethoven_ed25519.pub" cfg="$HOME/.ssh/config" ak="$HOME/.ssh/authorized_keys"
+  # files this tool rewrites must be files of their own: a link (a dotfiles repository, say) is left alone,
+  # and a block whose end line has gone is not guessed at
+  local cfg_ok=1 ak_ok=1
+  [ -L "$cfg" ] && cfg_ok=0
+  [ -L "$ak" ] && ak_ok=0
+  if [ -f "$cfg" ] && grep -qxF "$LS_BEGIN" "$cfg" && ! grep -qxF "$LS_END" "$cfg"; then cfg_ok=0; fi
+  if [ $remove = 1 ]; then
+    hpcw_agent_marker && ls_stop 2 "Stopped: this changes how your account signs in, so it runs only in the grid's own terminal, not under Claude Code or another program."
+    [ $cfg_ok = 1 ] || ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."
+    [ $ak_ok = 1 ] || ls_stop 7 "Stopped: ~/.ssh/authorized_keys could not be updated; nothing was changed."
+    local did=0 tmp m
+    if [ -f "$ak" ] && grep -q -E "$LS_LINE_RE" "$ak"; then
+      tmp="$ak.beethoven.$$"; grep -v -E "$LS_LINE_RE" "$ak" > "$tmp"; chmod 600 "$tmp" && mv -f "$tmp" "$ak" && did=1 || { rm -f "$tmp"; ls_stop 7 "Stopped: ~/.ssh/authorized_keys could not be updated; nothing was changed."; }
+    fi
+    if [ -f "$cfg" ] && grep -qxF "$LS_BEGIN" "$cfg"; then
+      tmp="$cfg.beethoven.$$"; m=$(ls_mode "$cfg")
+      ls_without_block "$cfg" > "$tmp" && chmod "${m:-600}" "$tmp" && chmod go-w "$tmp" && mv -f "$tmp" "$cfg" && did=1 || { rm -f "$tmp"; ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."; }
+    fi
+    # the two key files only when the public half says this tool made them
+    if ls_is_ours "$pub"; then rm -f "$key" "$pub" && did=1; fi
+    [ $did = 1 ] && ls_stop 0 "Done. Removed Beethoven's grid key."
+    ls_stop 0 "Nothing to remove."
+  fi
+  # 1. the machine this terminal came from: the portal's own server
+  local addr p2 p3 p4 extra
+  read -r addr p2 p3 p4 extra < <(printf '%s\n' "${SSH_CONNECTION:-}")
+  { [ -n "${p4:-}" ] && [ -z "${extra:-}" ] && ls_ip_literal "$addr"; } \
+    || ls_stop 2 "Stopped: this is not a session that came in through ssh, so there is no address to allow."
+  ls_same_computer "$addr" "$p3" && ls_stop 2 "Stopped: this session came from this same computer, not from the grid's website."
+  # 2. a person in the grid's own terminal, as their own account, never an agent, a pipeline or root
+  hpcw_agent_marker && ls_stop 2 "Stopped: this changes how your account signs in, so it runs only in the grid's own terminal, not under Claude Code or another program."
+  [ "$(id -u 2>/dev/null)" = 0 ] && ls_stop 2 "Stopped: this runs as your own account, never as root."
+  # 3. sshd ignores every key of an account whose home others may write to (StrictModes); a home that
+  # is a link is judged by the folder it names
+  local hm; hm=$(stat -L -c %a "$HOME" 2>/dev/null)
+  { [ -n "$hm" ] && [ $(( 8#$hm & 8#022 )) = 0 ]; } || ls_stop 3 "Stopped: your home folder can be written by others, so the grid would ignore any key in it."
+  # the files this tool would rewrite, and a key of that name it did not make: refused before anything is touched
+  [ $cfg_ok = 1 ] || ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."
+  [ $ak_ok = 1 ] || ls_stop 7 "Stopped: ~/.ssh/authorized_keys could not be updated; nothing was changed."
+  if [ -e "$key" ] || [ -L "$key" ] || [ -e "$pub" ] || [ -L "$pub" ]; then
+    if [ -e "$key" ] || [ -L "$key" ]; then ls_is_ours "$pub" || ls_stop 6 "Stopped: ~/.ssh/beethoven_ed25519 is there but was not made by this tool; nothing was changed."
+    else ls_is_ours "$pub" || ls_stop 6 "Stopped: ~/.ssh/beethoven_ed25519 is there but was not made by this tool; nothing was changed."; fi
+  fi
+  say "This terminal came from $addr, the grid's website; the key will work only from there."
+  local oods; oods=$(ls_ood_addresses)
+  if [ -n "$oods" ]; then case " $oods " in *" $addr "*) ;; *) say "Note: the portal's own name points at $oods, not at $addr; if the grid asks again, ask your lab lead.";; esac; fi
+  # 4. ~/.ssh, private (what it was before is put back if a later step stops)
+  local sd_made=0 sd_mode=""
+  if [ -d "$sd" ]; then sd_mode=$(ls_mode "$sd"); else { ( umask 077; mkdir "$sd" ); } 2>/dev/null && sd_made=1; fi
+  chmod 700 "$sd" 2>/dev/null
+  undo_sd() { if [ $sd_made = 1 ]; then rmdir "$sd" 2>/dev/null; elif [ -n "$sd_mode" ]; then chmod "$sd_mode" "$sd" 2>/dev/null; fi; return 0; }
+  { [ -d "$sd" ] && [ ! -L "$sd" ] && [ $(( 8#$(ls_mode "$sd") & 8#077 )) = 0 ]; } 2>/dev/null || { undo_sd; ls_stop 4 "Stopped: ~/.ssh could not be made private."; }
+  # 5. the key: made once, reused after
+  local made=0
+  if [ -e "$key" ]; then
+    say "Kept the key made before: ~/.ssh/beethoven_ed25519."
+  else
+    command -v ssh-keygen >/dev/null 2>&1 || { undo_sd; ls_stop 5 "Stopped: ssh-keygen is not available here."; }
+    rm -f "$pub"   # a public half of ours whose private half is gone: made again below
+    ssh-keygen -q -t ed25519 -N '' -C "$LS_TAG $user $(date -u +%Y-%m-%d)" -f "$key" </dev/null >/dev/null 2>&1 && [ -s "$key" ] && [ -s "$pub" ] \
+      || { rm -f "$key" "$pub"; undo_sd; ls_stop 5 "Stopped: the key could not be made."; }
+    made=1
+    say "Made a key for it: ~/.ssh/beethoven_ed25519 (no passphrase; it never leaves this account)."
+  fi
+  chmod 600 "$key" 2>/dev/null; chmod 644 "$pub" 2>/dev/null
+  undo_key() { [ $made = 1 ] && rm -f "$key" "$pub"; undo_sd; return 0; }
+  # 6. ~/.ssh/config: our block, in place on a second run, appended at the end the first time
+  local names first tmp prev="" m blk n
+  names=$(ls_host_names); first="${names%% *}"
+  [ -n "$first" ] || { undo_key; ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."; }
+  tmp="$cfg.beethoven.$$"; blk=$(ls_block "$names")
+  if [ -f "$cfg" ]; then
+    m=$(ls_mode "$cfg")
+    if grep -qxF "$LS_BEGIN" "$cfg"; then
+      awk -v b="$LS_BEGIN" -v e="$LS_END" -v blk="$blk" '$0 == b { if (!done) print blk; done = 1; skip = 1; next } skip && $0 == e { skip = 0; next } !skip { print }' "$cfg" > "$tmp"
+    else
+      { cat "$cfg"; [ -s "$cfg" ] && [ -n "$(tail -c1 "$cfg")" ] && echo; printf '%s\n' "$blk"; } > "$tmp"
+    fi
+  else
+    m=600; printf '%s\n' "$blk" > "$tmp"
+  fi
+  # the mode it had (600 for a new file), never writable by group or others: ssh refuses such a file
+  { [ -s "$tmp" ] && chmod "${m:-600}" "$tmp" && chmod go-w "$tmp"; } 2>/dev/null || { rm -f "$tmp"; undo_key; ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."; }
+  # ssh itself must read the new file and name our key, for every plain name in the block, before it
+  # replaces the old one (the portal's Shell may use any of them)
+  if command -v ssh >/dev/null 2>&1; then
+    for n in $names; do
+      case "$n" in *'*'*) continue;; esac
+      if ! ssh -G -F "$tmp" "$n" 2>/dev/null | grep -qi '^identityfile .*beethoven_ed25519$'; then
+        rm -f "$tmp"; undo_key; ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."
+      fi
+    done
+  fi
+  if [ -f "$cfg" ]; then prev="$cfg.beethoven-prev.$$"; cp -p "$cfg" "$prev" 2>/dev/null || { rm -f "$tmp"; undo_key; ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."; }; fi
+  mv -f "$tmp" "$cfg" || { rm -f "$tmp" "$prev"; undo_key; ls_stop 7 "Stopped: ~/.ssh/config could not be updated safely; nothing was changed."; }
+  say "ssh on the grid's website now offers it first for: $names (~/.ssh/config)."
+  # 7. ~/.ssh/authorized_keys: one line for our key, only from the addresses it came from (at most four, newest kept)
+  local olds list="" x keyline
+  olds=$(grep -E "$LS_LINE_RE" "$ak" 2>/dev/null | head -1 | sed -n 's/^from="\([^"]*\)".*/\1/p' | tr ',' ' ')
+  local -a addrs=()
+  for x in $olds; do [ "$x" = "$addr" ] || { ls_ip_literal "$x" && addrs+=("$x"); }; done
+  addrs+=("$addr")
+  while [ ${#addrs[@]} -gt 4 ]; do addrs=("${addrs[@]:1}"); done
+  list=$(IFS=,; printf '%s' "${addrs[*]}")
+  keyline="from=\"$list\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding $(head -n 1 "$pub")"
+  tmp="$ak.beethoven.$$"
+  if [ -f "$ak" ] && grep -q -E "$LS_LINE_RE" "$ak"; then
+    # our line replaced in place (the first of ours; a second of ours, should one exist, goes)
+    awk -v re="$LS_LINE_RE" -v line="$keyline" '$0 ~ re { if (!done) print line; done = 1; next } { print }' "$ak" > "$tmp"
+  elif [ -f "$ak" ]; then
+    { cat "$ak"; [ -s "$ak" ] && [ -n "$(tail -c1 "$ak")" ] && echo; printf '%s\n' "$keyline"; } > "$tmp"
+  else
+    printf '%s\n' "$keyline" > "$tmp"
+  fi
+  if ! { [ -s "$tmp" ] && chmod 600 "$tmp" && mv -f "$tmp" "$ak"; } 2>/dev/null; then
+    rm -f "$tmp"; if [ -n "$prev" ]; then mv -f "$prev" "$cfg"; else rm -f "$cfg"; fi; prev=""; undo_key
+    ls_stop 7 "Stopped: ~/.ssh/authorized_keys could not be updated; nothing was changed."
+  fi
+  [ -n "$prev" ] && rm -f "$prev"
+  chmod 600 "$ak" 2>/dev/null
+  # where SELinux labels home folders, a ~/.ssh made by a program needs sshd's label to be read
+  command -v restorecon >/dev/null 2>&1 && restorecon -R "$sd" >/dev/null 2>&1
+  say "It may be used only from: $list (~/.ssh/authorized_keys)."
+  ls_stop 0 "Done. The grid will not ask again."
+}
+
 # ---- diag: every assumption as one line ------------------------------------------------------------
 DIAG_FIRST=1; DIAG_JSON=0
 emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
@@ -715,7 +1372,7 @@ diag_slurm_in_worker() { # Slurm inside the worker's container (framework 9): wh
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
-  local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
+  local miss="" f; for f in bin/hpcworker lib/profile.py lib/login_plain.sh lib/relay.py lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
   grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/*.sh "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
   if [ -n "$miss" ]; then emit hpcw.scripts false false false "missing or damaged:$miss"
   elif shared_mode && ! is_launcher "$HPCW_HOME/bin/hpcworker"; then emit hpcw.scripts true true false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); $HPCW_HOME/bin/hpcworker is not its launcher: hpcworker install"
@@ -767,7 +1424,8 @@ cmd_diag() {
       online) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true false false "online: job $(read_field "$d/status.json" job) on $(read_field "$d/status.json" node), session $(read_field "$d/status.json" session_name) $(read_field "$d/status.json" environment_url)${nid:+; next job $nid queued}" || emit "hpcw.worker.$n" false false false "last said online ${age}s ago; the job has probably ended (${nid:+job $nid is queued to take over; }hpcworker worker start --name $n)";;
       starting|running) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true true false "$st: $(read_field "$d/status.json" message)" || emit "hpcw.worker.$n" false false false "stale ($st, ${age}s): $(read_field "$d/status.json" message)";;
       need_consent|need_login) emit "hpcw.worker.$n" false false false "$st: $(read_field "$d/status.json" message)";;
-      stopped) emit "hpcw.worker.$n" true false true "$st ${age}s ago";;
+      queued) emit "hpcw.worker.$n" true true false "in line for a computer: job $(read_field "$d/status.json" job), asked at $(read_field "$d/status.json" submitted_at)${nid:+; next job $nid queued}";;
+      stopped) emit "hpcw.worker.$n" true false true "$st ${age}s ago$([ "$(read_field "$d/status.json" stop_reason)" = login_abandoned ] && echo ': no Claude sign-in came in time')";;
       preempted) emit "hpcw.worker.$n" true "$([ -n "$nid" ] && echo true || echo false)" "$([ -n "$nid" ] && echo false || echo true)" "$st ${age}s ago${nid:+; job $nid is queued to take over}";;
       *) emit "hpcw.worker.$n" false false false "$st: $(read_field "$d/status.json" message)";;
     esac; done
@@ -784,6 +1442,8 @@ case "${1:-help}" in
   discover) shift; cmd_discover "$@";;
   probe) shift; cmd_probe "$@";;
   worker) shift; cmd_worker "$@";;
+  connect) shift; cmd_connect "$@";;
+  login-setup) shift; cmd_login_setup "$@";;
   claude) shift; cmd_claude "$@";;
   diag) shift; cmd_diag "$@";;
   _exec) shift; in_job_exec "$@";;
