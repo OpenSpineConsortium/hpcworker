@@ -154,6 +154,8 @@ name and identifier carry no university name.
 
 ## Layout and streams
 
+(Pre-split text: the `extension/` pieces below live in the sibling repository `OpenSpineConsortium/beethoven-extension`; see the split section at the end.)
+
 - `framework/`: bash 4.2 plus Python 3.6 standard library only (the Wayne State login node is CentOS
   7). `lib/profile.py` (site profile schema and CLI), `lib/adapters/{common,slurm,pbs,lsf}.sh` (the
   eight-call adapter interface), `profiles/<site>.json`, the job template and probe job,
@@ -181,6 +183,8 @@ name and identifier carry no university name.
   the login node only tar, chmod, setfacl and one link; older versions are kept).
 
 ## Building and testing
+
+(Pre-split text: the `extension/` pieces below live in the sibling repository `OpenSpineConsortium/beethoven-extension`; see the split section at the end.)
 
 Windows: Node 22 is at `/c/Users/grego/tools/node22`; python is `python -X utf8`; inline shell heredocs
 eat backslashes, so write scripts with the Write tool and run them by path; line endings LF.
@@ -273,3 +277,27 @@ plausible. Check against something outside the computation: the report's cited b
 actual response, a render of the panel, the raw line in `rc.log`. When a tidy explanation presents
 itself, test it before believing it. Say plainly what is not known; "not yet measured" is the preferred
 form.
+
+## This repository (the split, 2026-10-03)
+
+This is the **server half** of the split of `OpenSpineConsortium/beethoven`: `framework/` (hpcworker,
+the cluster side), `tools/` (the maintainer's deploy, access and grid-CI scripts) and the shared
+documents. The **client half** — the browser extension, the bridge helper and the store releases —
+lives in `OpenSpineConsortium/beethoven-extension`. The original repository remains as the history
+up to the split; new work goes here.
+
+The seam between the two is the contract, not an import: this side writes `status.json`,
+`connection.json`, `progress.log` and the `HPCW-STEP`/`HPCW-KEY`/`HPCW-LOGIN` lines, and the client
+reads them (its `extension/src/core/contract.ts` mirrors `docs/V11_CONTRACT.md` here). Change a file
+format or a line and you change it in both repositories together, against the same contract text.
+The site profiles under `framework/profiles/` are canonical HERE; the client repository vendors them
+as data (`framework/profiles/pull.sh` there refreshes its copy).
+
+CI runs in three lanes, none holding a secret:
+- `.github/workflows/ci.yml`: the suite on ubuntu, and in a `centos:7` container — python 3.6.8,
+  bash 4.2.46, util-linux 2.23, the login node's own stack (`.github/centos7-suite.sh`).
+- `tools/grid_ci.sh`, run on the cluster by a person or their worker: the suite and (with
+  `--container`) the Slurm-in-container check as real jobs on compute nodes, the verdict posted to
+  the commit as the statuses `grid/framework-suite-py36` and `grid/slurm-in-container`. GitHub's
+  runners never reach the grid (VPN, one-time code) and no token enters this repository, a job file
+  or an argv; the script uses the account's own `gh` sign-in and GitHub sees pass or fail only.

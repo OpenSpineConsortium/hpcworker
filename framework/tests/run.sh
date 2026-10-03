@@ -17,6 +17,11 @@ export PYTHONIOENCODING=utf-8
 if [ -z "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" ]; then
   for l in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do locale -a 2>/dev/null | grep -qx "$l" && { export LANG="$l"; break; }; done
 fi
+# and the suite's temporary folders must not sit under a setgid directory: on such a parent (Wayne
+# State's CephFS $TMPDIR, mode 2755; measured 2026-10-03) every directory a test makes inherits g+s,
+# and the gate's mode checks read 2700 where the tool made 700. /tmp is clean on every machine the
+# suite runs on (a laptop, a runner, a compute node).
+if [ -d "${TMPDIR:-/tmp}" ] && [ -g "${TMPDIR:-/tmp}" ]; then export TMPDIR=/tmp; fi
 fail=0
 echo "== bash -n"
 for f in "$ROOT"/bin/hpcworker "$ROOT"/lib/*.sh "$ROOT"/lib/adapters/*.sh "$ROOT"/jobs/*.sbatch "$ROOT"/tests/run.sh "$ROOT"/tests/e2e_sshd.sh "$ROOT"/tests/grid/*; do

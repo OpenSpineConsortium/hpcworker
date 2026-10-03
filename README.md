@@ -1,5 +1,12 @@
 # Beethoven
 
+> **This repository** is the **server half** of the 2026-10-03 split of
+> `OpenSpineConsortium/beethoven`: `framework/` (hpcworker, the cluster side), `tools/` (the
+> maintainer's deploy, access and grid-CI scripts) and the shared documents. The browser extension,
+> the bridge helper and the store releases live in the sibling repository,
+> `OpenSpineConsortium/beethoven-extension`. The text below predates the split and describes the
+> whole product; where it names `extension/`, read the sibling repository.
+
 The public name is **Beethoven** (decided 2026-09-29): the extension, its private store listing, its
 pages at `https://openspineconsortium.com/beethoven/`, its texts and every screen a student or a
 reviewer sees say Beethoven, and it is not an Anthropic product. The repository is

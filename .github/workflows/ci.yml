@@ -1,0 +1,35 @@
+name: ci
+# The framework's suite in the two environments it must pass in. Neither job holds a secret and
+# neither reaches the grid: GitHub's runners cannot (VPN and a one-time code stand between), and
+# tokens never enter a repository (CLAUDE.md). The grid itself is the third lane: tools/grid_ci.sh,
+# run on the cluster by a person or their worker, posts its verdict here as a commit status
+# (contexts grid/framework-suite-py36 and grid/slurm-in-container).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite-linux:
+    # a current Linux: the suite as a laptop or a worker's container runs it
+    name: suite (ubuntu, current python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: run the suite
+        run: HPCW_PYTHON=python3 bash framework/tests/run.sh
+
+  suite-centos7:
+    # the login node's own stack: CentOS 7, python 3.6.8, bash 4.2.46, util-linux 2.23. The
+    # checkout runs on the host (node20 actions cannot run inside centos:7), and the suite runs
+    # in the container over a bind mount.
+    name: suite (centos 7, python 3.6, bash 4.2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: run the suite in centos:7
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" docker.io/library/centos:7 bash /src/.github/centos7-suite.sh
