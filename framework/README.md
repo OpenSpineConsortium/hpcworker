@@ -15,6 +15,31 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**A chain whose next job is gone (framework 13).** A job that ends at its wall time, is preempted or is
+cancelled writes `preempted` into `status.json`, naming the successor it queued in `next_job`. Until
+framework 13 nobody asked whether that successor still existed, so a successor cancelled on its own left
+the record saying "renewing" for good: on 2026-10-02 go2432's successor was cancelled at 20:42:10 and the
+job at 20:42:16, and the panel showed the worker coming back, with no button, for an hour. Now `worker
+status` (the gate's `status`) and `worker watch` (the gate's `watch`, and the text watch) ask the
+scheduler about the job and that successor in one call (`squeue -h -j JOB,NEXT -o '%i|%T|%N'`, the call
+`worker start` makes), under the same floor as a job in line (`checked_at`; the gate's 60 s). The job itself
+still listed, in any state but ended (PENDING, REQUEUED, CONFIGURING, RUNNING, COMPLETING: a job preempted
+under `--qos=requeue` is listed again under its own id and writes its own `status.json` when it starts
+again), leaves the record alone, whatever the successor's state: nothing is written, not even `checked_at`,
+since `job.id` cannot tell the job's own next write from the old one, so while the job is listed each
+`worker status` asks once (the panel asks once a minute, a watch at most once a minute). The job gone or
+ended and the successor in line or running, the record stays as it is with the scheduler's word on the
+successor (`scheduler_state`, `checked_at`; `reason` and `expected_start`, which that call does not carry,
+as they were). Only the job gone or ended and the successor gone or ended (not listed, or listed as
+cancelled, failed, completed) make the record `stopped`, with `stop_reason` `successor_gone`, `next_job` "", the
+message "the next job in the chain was cancelled or never started; press Connect to start again" and a
+new `updated_at`; `progress.log` says "Ended", and a `next.id` that names that successor is removed, so the
+panel offers Connect and `connect` starts the worker again. The write goes through `status_patch`'s new
+`preempted=JOB,NEXT` guard: the file must still say `preempted` for that job and successor and `job.id`
+must still name the job (a successor that started writes `job.id` first), and the job's own fields are kept
+as written, `claude_login` included. A scheduler that does not answer changes nothing. `VERSION` is 13;
+nothing else changed (partitions, profiles, the gate's verbs and caps, every other line and field).
+
 **Folders above the copy (framework 12).** A folder above the lab's copy that others may change is refused only when the lab owns it (`chmod +t` on it fixes that). A folder above the lab's own folders that belongs to someone else, such as the CephFS scaffold folders at Wayne State that are owned by root or by another lab's user and are writable by everyone, is reported by `browser-key check` and by `diag` as a note for the university and does not refuse a key: the lab's shared code already runs from under those folders in every version, so refusing every student's key over them would protect nobody. Ask the university for `chmod +t` on them.
 
 
@@ -371,9 +396,14 @@ asks the scheduler ONCE (`squeue -h -j <job> -o '%T|%r|%S|%N'`) and writes the a
 file: `scheduler_state`, `reason`, `expected_start` (only a time in the future, as UTC), `checked_at`,
 and `got_computer_at` once Slurm says RUNNING. A job the scheduler no longer lists, with no `node`
 file, becomes `error`, "the grid ended the request before it started". A scheduler that does not answer
-changes nothing. Once the job has a computer, nothing is asked: its files say where it is. It writes
-only while the file still says `queued` for that job and no `node` file exists, through a temporary
-name of its own, so it never writes over the job. The first line, for a person:
+changes nothing. Once the job has a computer, nothing is asked: its files say where it is, with one
+exception from framework 13: a job that ended naming its successor (`preempted` with a next job) has the
+job and the successor asked about in one call, and the job gone or ended with the successor gone or ended
+stops the record (`stop_reason` `successor_gone`), while the job itself listed again leaves it alone (see
+"A chain whose next job is gone" at the top). It writes only while the file still says `queued` for that
+job and no `node` file exists (or, framework 13, `preempted` for that job and successor while `job.id`
+still names the job), through a temporary name of its own, so it never writes over the job. The first
+line, for a person:
 
 | State | Line |
 |---|---|
@@ -384,6 +414,7 @@ name of its own, so it never writes over the job. The first line, for a person:
 | need_login | `Your worker is waiting for your Claude sign-in.` |
 | preempted, a successor queued / none | `Your worker is renewing itself; it is back in a few minutes.` / `Your worker has ended. hpcworker connect starts it again.` |
 | stopped (the sign-in abandon / otherwise) | `Your worker stopped: waiting for your Claude sign-in timed out.` / `Your worker is stopped.` |
+| stopped, the successor gone (framework 13) | `Your worker stopped: the next job in the chain was cancelled or never started. hpcworker connect starts it again.` |
 | error | `Your worker couldn't start: <message>.` |
 | no status yet | `Your worker has been asked for and has not reported yet.` |
 
@@ -393,7 +424,8 @@ object on one line: `{"v":1,"run","job","next_job","state_dir","status","connect
 (framework 9's `run`, `job`, `next_job`, `status` and `connection` as they were; `scheduler` is what the
 one call learned, or `null` when it did not ask). `worker start --wait [MIN]` and `worker watch
 [--minutes MIN]` read `status.json` and `progress.log` every 5 s (files only), print each new progress
-line, ask the scheduler at most once a minute and only while the worker is in line, and end online
+line, ask the scheduler at most once a minute and only while the worker is in line (framework 13: or
+ended naming a successor), and end online
 with the line above and the link (exit 0), stopped or failed (1), waiting for the sign-in (3) or out of
 time (2; 30 minutes unless given).
 
@@ -1153,6 +1185,16 @@ hang-up giving back the slot), `PlainExec` in `test_connect.py` (connect and `cl
 with no terminal: no `--pty`, the code from standard input and never written back; the setup of an
 account never set up; no sign-in under the gate), the gate's verbs and `browser-key add` in the
 login-node audit, and the new profile keys in `test_profile.py`.
+
+Version 13 adds `SuccessorOfAnEndedJob` in `test_status.py` (a job that ended naming a successor, asked
+about with the job in one call: a successor the fake scheduler no longer lists, one listed as ended, one
+still PENDING or RUNNING and left alone with the floor respected, the job itself listed again (PENDING,
+REQUEUED, CONFIGURING, RUNNING, COMPLETING) with its successor gone, ended or in line and the record left
+alone byte for byte, the job listed as ended with its successor gone, a scheduler that does not answer, a
+successor that started and is never written over, a successor named by `next.id` alone, the text watch),
+the `preempted=JOB,NEXT` guard and `top_field` in `test_login_node.py`'s `StatusPatch`, the JSON watch
+ending "stopped", going on while the job is listed again, and the floor in `test_watch_json.py`, and the
+gate's `status` and `watch` in `test_browser_key.py`'s `GateReal` (Linux), the job listed again included.
 
 Under bash 4.2 (EL7's, the version warrior runs): put a bash 4.2.46 built from source first on PATH and
 run the suite the same way; `tests/run.sh` hands that bash to every test.

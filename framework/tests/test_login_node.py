@@ -281,6 +281,50 @@ class StatusPatch(unittest.TestCase):
         self.write('{"state":"queued","job":"40501234"')
         self.assertEqual(self.patch("queued=40501234", 'state="stopped"'), 1, "not well formed")
 
+    def test_preempted_guard(self):
+        # framework 13: the job's own last file, objects and all, for that job and its successor, while job.id names the job
+        ended = '{"version":12,"job":"40501234","state":"preempted","claude_login":{"loggedIn":true,"email":"a@b.edu","checked_at":"2026-10-03T00:40:00Z"},"tags":[1, "x"],"next_job":"40501300","updated_at":"2026-10-03T00:42:21Z"}\n'
+        with open(os.path.join(self.rd, "job.id"), "w", newline="\n") as fh:
+            fh.write("40501234\n")
+        for guard, why in (("preempted=40501234", "no successor named in the guard"), ("preempted=40509999,40501300", "another job"),
+                           ("preempted=40501234,40509999", "another successor"), ("queued=40501234", "the queued guard never takes an object")):
+            self.write(ended)
+            self.assertEqual(self.patch(guard, 'state="stopped"'), 1, why)
+            self.assertEqual(self.text(), ended, why)
+        self.write(ended.replace('"preempted"', '"online"'))
+        self.assertEqual(self.patch("preempted=40501234,40501300", 'state="stopped"'), 1, "the job is not the one that ended")
+        # a successor that started writes job.id first: never written over
+        with open(os.path.join(self.rd, "job.id"), "w", newline="\n") as fh:
+            fh.write("40501300\n")
+        self.write(ended)
+        self.assertEqual(self.patch("preempted=40501234,40501300", 'state="stopped"'), 1, "job.id names the successor")
+        with open(os.path.join(self.rd, "job.id"), "w", newline="\n") as fh:
+            fh.write("40501234\n")
+        self.assertEqual(self.patch("preempted=40501234,40501300", 'state="stopped"', 'next_job=""', 'stop_reason="successor_gone"'), 0)
+        got = self.read()
+        self.assertEqual([k for k, _ in got], ["version", "job", "state", "claude_login", "tags", "next_job", "updated_at", "stop_reason"])
+        d = json.loads(self.text())
+        self.assertEqual((d["state"], d["next_job"], d["stop_reason"]), ("stopped", "", "successor_gone"))
+        self.assertEqual(d["claude_login"], {"loggedIn": True, "email": "a@b.edu", "checked_at": "2026-10-03T00:40:00Z"}, "kept as written")
+        self.assertEqual(d["tags"], [1, "x"])
+        self.assertIn('"claude_login":{"loggedIn":true,"email":"a@b.edu","checked_at":"2026-10-03T00:40:00Z"}', self.text(), "the object's own text")
+        # a file that names no successor itself (next.id did) is the job's too; one printed over lines is kept on one
+        self.write('{"job": "40501234", "state": "preempted",\n "claude_login": {\n  "loggedIn": false\n }\n}\n')
+        self.assertEqual(self.patch("preempted=40501234,40501300", 'state="stopped"'), 0)
+        self.assertEqual(json.loads(self.text()), {"job": "40501234", "state": "stopped", "claude_login": {"loggedIn": False}})
+        self.read()
+
+    def test_top_field_reads_the_top_level_only(self):
+        # framework 13: a job's claude_login has a checked_at of its own; read_field takes the first, top_field the top-level one
+        self.write('{"job":"40501234","claude_login":{"checked_at":"2026-10-03T00:00:00Z"},"checked_at":"2026-10-03T01:00:00Z","n":5}\n')
+        f = G.posix(self.f)
+        self.assertEqual(self.g.source("read_field '%s' checked_at" % f)[1].strip(), "2026-10-03T00:00:00Z", "the trap top_field avoids")
+        self.assertEqual(self.g.source("top_field '%s' checked_at" % f)[1], "2026-10-03T01:00:00Z")
+        self.assertEqual(self.g.source("top_field '%s' job" % f)[1], "40501234")
+        self.assertEqual(self.g.source("top_field '%s' next_job" % f)[1], "", "absent")
+        self.assertEqual(self.g.source("top_field '%s' n" % f)[1], "", "not a string")
+        self.assertEqual(self.g.source("top_field '%s' claude_login" % f)[1], "", "an object")
+
 
 class ProfileGet(unittest.TestCase):
     """prof_get: awk for the six plain top-level strings on the way to a worker, profile.py's answer every time."""

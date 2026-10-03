@@ -74,6 +74,7 @@ adapter_status_many() { # ID[,ID...] -> ID|STATE|NODE|RAW per line, ONE squeue; 
   out=$(printf '%s\n' "$out" | tr -d '\r' | grep -v -E '^(squeue|slurm_[a-z_]*)[: ]')
   seen=$(printf '%s\n' "$out" | slurm_parse_squeue_many)
   [ -n "$seen" ] && printf '%s\n' "$seen"
+  # "ended or unknown" is read by bin/hpcworker's sched_word (framework 13) as an id squeue no longer lists: keep the words
   for id in ${ids//,/ }; do printf '%s\n' "$seen" | grep -q "^$id|" || printf '%s|UNKNOWN||ended or unknown\n' "$id"; done
 }
 

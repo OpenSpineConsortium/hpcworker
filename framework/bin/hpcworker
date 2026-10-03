@@ -48,7 +48,8 @@
 # .claude.json: remoteDialogSeen and the workspace's hasTrustDialogAccepted); no token ever goes on
 # a command line or into a job file; the login node gets one sbatch/squeue/scancel per action and
 # never a loop (connect: one squeue, one sbatch, one srun; worker status: one squeue, only while the
-# worker is in line; worker watch: at most one a minute); state is read from files the job writes;
+# worker is in line or, framework 13, ended naming a successor; worker watch: at most one a minute);
+# state is read from files the job writes;
 # nothing is ever deleted outside the run directories under the state directory and a job's own
 # node-local temp, except connect's own outcome file under ~/.hpcworker/log and, for login-setup
 # --remove (or a login-setup that stops after making its key), the key pair whose public half says
@@ -60,7 +61,7 @@
 # through the gate, and the gate only removes that line (forget, or past the site's expiry). Nothing
 # reached through the gate ever starts a Claude sign-in. Versions are integers.
 set -uo pipefail
-VERSION=12
+VERSION=13
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -109,7 +110,9 @@ prof_py() { need_py; "$PY" "$LIB/profile.py" "$@"; }
 #          the key is absent, "S<value>" when it is a plain string, exit 3 when awk cannot say
 #   patch  status.json while the run is in line: the queued file `worker start` writes and the patches
 #          of it, a flat object of strings, numbers, true, false and null; the guard and the new values
-#          as status_patch describes; the new file on stdout, exit 1 (nothing written) on any doubt
+#          as status_patch describes; the new file on stdout, exit 1 (nothing written) on any doubt.
+#          Framework 13: with the guard preempted=JOB,NEXT, the job's own last file (it holds objects,
+#          claude_login): an object or array is then kept as written, on one line
 # Values are passed in the environment and on stdin, never as awk operands or -v (both read escapes).
 # shellcheck disable=SC2016
 HPCW_JSON_AWK='
@@ -139,14 +142,17 @@ function value(   c, op, cl, k) {
   }
 }
 function put(k, v) { if (k in at) val[at[k]] = v; else { n++; key[n] = k; val[n] = v; at[k] = n } }
-function top(   k, v, c) {
+function top(   k, v, c, p0) {
   n = 0; pos = 1; len = length(s)
   skipws(); if (substr(s, pos, 1) != "{") return 0; pos++
   skipws(); if (substr(s, pos, 1) == "}") { pos++; skipws(); return pos > len }
   while (1) {
     skipws(); k = scalar(); if (substr(k, 1, 1) != "\"") return 0
     skipws(); if (substr(s, pos, 1) != ":") return 0; pos++
+    skipws(); p0 = pos
     v = value(); if (v == "") return 0
+    # an object or an array: its text as written, on one line (a raw line break can only be space between tokens)
+    if (v == "{" || v == "[") { v = substr(s, p0, pos - p0); gsub(/[\r\n]+/, " ", v); nested[substr(k, 2, length(k) - 2)] = 1 }
     put(substr(k, 2, length(k) - 2), v)
     skipws(); c = substr(s, pos, 1); pos++
     if (c == "}") { skipws(); return pos > len }
@@ -171,7 +177,8 @@ BEGIN {
   present = (s !~ /^[ \t\r\n]*$/)
   if (present) {
     if (!top()) { bad = 1; exit 1 }
-    for (i = 1; i <= n; i++) if (val[i] == "{" || val[i] == "[" || val[i] ~ /^"/ && val[i] ~ /[\001-\037]/) { bad = 1; exit 1 }
+    # an object or array only in the last file of a job (the preempted guard), never in a patch of the queued file
+    for (i = 1; i <= n; i++) if ((key[i] in nested) && kind != "preempted" || val[i] ~ /^"/ && val[i] ~ /[\001-\037]/) { bad = 1; exit 1 }
   }
   if (kind == "queued" || kind == "queued-or-none") {
     if (!present && kind == "queued") { bad = 1; exit 1 }
@@ -180,6 +187,15 @@ BEGIN {
       j = val[at["job"]]; if (substr(j, 1, 1) == "\"") j = substr(j, 2, length(j) - 2)
       if (j != job) { bad = 1; exit 1 }
     }
+  } else if (kind == "preempted") {
+    # framework 13: the file says preempted for JOB and names NEXT as its successor, or names none
+    if (!present || !("state" in at) || val[at["state"]] != "\"preempted\"" || !("job" in at)) { bad = 1; exit 1 }
+    split(job, jn, ",")
+    j = val[at["job"]]; if (substr(j, 1, 1) == "\"") j = substr(j, 2, length(j) - 2)
+    if (j != jn[1] || jn[2] == "") { bad = 1; exit 1 }
+    x = ("next_job" in at) ? val[at["next_job"]] : "\"\""; if (substr(x, 1, 1) == "\"") x = substr(x, 2, length(x) - 2)
+    if (x == "null") x = ""
+    if (x != "" && x != jn[2]) { bad = 1; exit 1 }
   } else if (kind != "any") { bad = 1; exit 1 }
 }
 mode == "patch" && length($0) > 0 {
@@ -699,16 +715,25 @@ stop_worker_run() { # RUN_DIR NAME: the stop file, then a wait for the job's own
 # true, false or null), the others kept as they are and where they are, new ones last; one line of
 # compact JSON, through FILE.cli.<pid> and a rename. GUARD: queued=JOB (the file says queued for JOB),
 # queued-or-none=JOB (or there is none, or it is empty), any; with either queued guard, never once the
-# node file exists. Exit 1 and nothing written when the guard does not hold, when a value is not one
-# JSON scalar, or when the file is not a flat object of scalars: every file this patches is the queued
-# file `worker start` writes or an earlier patch of it, and anything else is not this command's to
-# change. awk, not python (the login node's banner bans python3).
+# node file exists. Framework 13: preempted=JOB,NEXT (the file says preempted for JOB and names NEXT as
+# its successor, or names none), only while job.id still names JOB: a successor that started writes
+# job.id before its first status.json, so its own write is never written over. Exit 1 and nothing
+# written when the guard does not hold, when a value is not one JSON scalar, or when the file is not a
+# flat object of scalars: every file this patches is the queued file `worker start` writes or an
+# earlier patch of it, and anything else is not this command's to change; the one exception is the
+# preempted guard's file, the job's own last write, whose objects (claude_login) are kept as written.
+# awk, not python (the login node's banner bans python3).
 status_patch() {
   local f="$1" guard="$2" kind job d out
   shift 2
   kind="${guard%%=*}"; job="${guard#*=}"; [ "$kind" = "$guard" ] && job=""
   case "$f" in */*) d="${f%/*}";; *) d=.;; esac
-  case "$kind" in queued|queued-or-none) [ -e "$d/node" ] && return 1;; any) ;; *) return 1;; esac
+  case "$kind" in
+    queued|queued-or-none) [ -e "$d/node" ] && return 1;;
+    preempted) [ "$(tr -d '[:space:]' < "$d/job.id" 2>/dev/null)" = "${job%%,*}" ] || return 1;;
+    any) ;;
+    *) return 1;;
+  esac
   out=$(printf '%s\n' "$@" | HPCW_J_MODE=patch HPCW_J_FILE="$f" HPCW_J_KIND="$kind" HPCW_J_JOB="$job" LC_ALL=C awk "$HPCW_JSON_AWK") || return 1
   [ -n "$out" ] || return 1
   { printf '%s\n' "$out" > "$f.cli.$$" && mv -f "$f.cli.$$" "$f"; } || { rm -f "$f.cli.$$"; return 1; }
@@ -734,8 +759,11 @@ status_refresh() { # RUN_DIR [FLOOR_S]: while the run is in line (status.json "q
   # FLOOR_S (framework 11; the gate passes 60): nothing is asked when the queued file says the scheduler
   # was asked less than FLOOR_S seconds ago, by this command or any other (a copied key that calls status
   # in a loop, or two watches, still make one squeue a minute)
+  # Framework 13: a job that ended naming its successor (status.json "preempted" with a next job) has itself and
+  # that successor asked about instead, in one call (successor_refresh), under the same floor.
   local rd="$1" floor="${2:-0}" sj="$1/status.json" jid line tstate reason start node now exp="" norm gca ca ce
   SCHED_JSON=null
+  if [ -s "$sj" ] && [ "$(read_field "$sj" state)" = preempted ]; then successor_refresh "$rd" "$floor"; return 0; fi
   jid=$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)
   [ -n "$jid" ] && [ ! -e "$rd/node" ] || return 0
   if [ -s "$sj" ]; then
@@ -781,6 +809,91 @@ status_refresh() { # RUN_DIR [FLOOR_S]: while the run is in line (status.json "q
   esac
   return 0
 }
+top_field() { # FILE KEY -> framework 13: the top-level plain string KEY of a JSON object file ("" when absent, not a
+  # plain string, or the file is not one JSON object), through the awk program's get mode: never a key of the same
+  # name inside an object, as read_field can be (a job's claude_login has its own checked_at)
+  local out
+  out=$(HPCW_J_MODE=get HPCW_J_FILE="$1" HPCW_J_KEY="$2" LC_ALL=C awk "$HPCW_JSON_AWK" < /dev/null 2>/dev/null) || return 0
+  case "$out" in S*) printf '%s' "${out#S}";; esac
+  return 0
+}
+successor_refresh() { # RUN_DIR [FLOOR_S]: framework 13. status.json says "preempted": its job ended (wall time,
+  # preemption, or cancelled) and its trap wrote that, naming the successor that takes over (next_job; next.id's
+  # when the file names none and next.id was queued by that job). Until framework 13 nobody asked whether that
+  # successor still existed, and one cancelled on its own left the file "preempted" with a next job for good
+  # (2026-10-02: go2432's successor cancelled at 20:42:10, the job at 20:42:16; the panel said it was coming back
+  # and offered nothing). ONE scheduler call about BOTH ids (adapter_status_many JOB,NEXT, as worker start asks),
+  # not within FLOOR_S of the file's checked_at:
+  #   the job itself listed, in any state but ended (PENDING, REQUEUED, CONFIGURING, RUNNING, COMPLETING, ...)
+  #       nothing is written. A job preempted under --qos=requeue is listed again under its own id and writes its
+  #       own status.json when it starts again, and job.id cannot tell that write from the old one (the same id),
+  #       so no patch may race it; not even checked_at, so while the job is listed each `worker status` asks once
+  #       (the panel asks once a minute, a watch at most once a minute)
+  #   the job gone or ended, the successor PENDING or RUNNING
+  #       the record stays as it is, with the scheduler's word on the successor (scheduler_state and checked_at;
+  #       reason and expected_start, which this one call does not carry, as they were)
+  #   the job gone or ended, the successor gone or ended (not listed, or listed as ended)
+  #       the record says "stopped" (stop_reason successor_gone, next_job ""), progress.log says "Ended", and a
+  #       next.id that names that successor goes: Connect starts the worker again
+  #   no answer, or one not understood about either: nothing is changed or said
+  # Written only through status_patch's preempted guard: the file still preempted for that job and successor,
+  # job.id still that job. SCHED_JSON: what was learned about the job that takes over (the job itself when it is
+  # listed again, else the successor), or null.
+  # The job's own file holds claude_login, an object with a checked_at of its own: the fields are read at the
+  # top level only (top_field), never with read_field, which takes the first of that name anywhere.
+  local rd="$1" floor="${2:-0}" sj="$1/status.json" job jid nid np x out id st node raw now ca ce msg
+  local jw="" jnode="" jraw="" nw="" nnode="" nraw=""
+  SCHED_JSON=null
+  job=$(top_field "$sj" job); [ -n "$job" ] || return 0
+  jid=$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)
+  [ "$jid" = "$job" ] || return 0
+  nid=$(top_field "$sj" next_job)
+  if [ -z "$nid" ] && [ -s "$rd/next.id" ]; then read -r nid np < "$rd/next.id" || true; [ "${np:-}" = "$job" ] || nid=""; fi
+  [ -n "$nid" ] && [ "$nid" != "$job" ] || return 0
+  if [[ "$floor" =~ ^[0-9]+$ ]] && [ "$floor" -gt 0 ]; then
+    ca=$(top_field "$sj" checked_at); ce=$(hpcw_iso_epoch "$ca")
+    [ -n "$ce" ] && [ $(( $(date +%s) - ce )) -lt "$floor" ] && return 0
+  fi
+  # exit 2 and nothing printed when the scheduler did not answer: nothing is decided then
+  out=$(adapter_status_many "$job,$nid" 2>/dev/null) || return 0
+  while IFS='|' read -r id st node raw; do
+    if [ "$id" = "$job" ]; then jw=$(sched_word "$st" "$raw"); jnode=$node; jraw=$raw
+    elif [ "$id" = "$nid" ]; then nw=$(sched_word "$st" "$raw"); nnode=$node; nraw=$raw; fi
+  done < <(printf '%s\n' "$out")
+  now=$(hpcw_now_iso)
+  case "$jw" in
+    alive)
+      SCHED_JSON=$(printf '{"state":%s,"reason":"","expected_start":"","node":%s,"checked_at":%s}' "$(json_str "$jraw")" "$(json_str "$jnode")" "$(json_str "$now")")
+      return 0;;
+    gone) ;;
+    *) return 0;;
+  esac
+  case "$nw" in
+    alive)
+      SCHED_JSON=$(printf '{"state":%s,"reason":"","expected_start":"","node":%s,"checked_at":%s}' "$(json_str "$nraw")" "$(json_str "$nnode")" "$(json_str "$now")")
+      status_patch "$sj" "preempted=$job,$nid" scheduler_state="$(json_str "$nraw")" checked_at="$(json_str "$now")" 2>/dev/null
+      ;;
+    gone)
+      SCHED_JSON=$(printf '{"state":"GONE","reason":"","expected_start":"","node":"","checked_at":%s}' "$(json_str "$now")")
+      msg="the next job in the chain was cancelled or never started; press Connect to start again"
+      if status_patch "$sj" "preempted=$job,$nid" state='"stopped"' message="$(json_str "$msg")" needs='"nothing"' hint="$(json_str "$(hpcw_hint stopped nothing)")" \
+           stop_reason='"successor_gone"' next_job='""' scheduler_state='"GONE"' checked_at="$(json_str "$now")" updated_at="$(json_str "$now")" 2>/dev/null; then
+        if [ -s "$rd/next.id" ]; then x=""; read -r x np < "$rd/next.id" || true; [ "$x" = "$nid" ] && rm -f "$rd/next.id"; fi
+        hpcw_progress "$rd" "Ended"
+      fi
+      ;;
+  esac
+  return 0
+}
+sched_word() { # STATE RAW, one line of adapter_status_many -> alive | gone | doubt (framework 13, successor_refresh)
+  case "$1" in
+    PENDING|RUNNING) echo alive;;
+    DONE|FAILED) echo gone;;
+    # Slurm's adapter_status_many lists an id squeue no longer knows as UNKNOWN, "ended or unknown" (lib/adapters/slurm.sh)
+    UNKNOWN) if [ "$2" = "ended or unknown" ]; then echo gone; else echo doubt; fi;;
+    *) echo doubt;;
+  esac
+}
 status_line() { # RUN_DIR -> the one line for a person (the first line of `worker status`, and --json's "line")
   local rd="$1" sj="$1/status.json" st sub onl n nid msg
   if [ ! -s "$sj" ]; then echo "Your worker has been asked for and has not reported yet."; return 0; fi
@@ -809,7 +922,11 @@ status_line() { # RUN_DIR -> the one line for a person (the first line of `worke
       nid=$(read_field "$sj" next_job); [ -n "$nid" ] || nid=$(next_job_of "$rd")
       if [ -n "$nid" ]; then echo "Your worker is renewing itself; it is back in a few minutes."; else echo "Your worker has ended. hpcworker connect starts it again."; fi;;
     stopped)
-      if [ "$(read_field "$sj" stop_reason)" = login_abandoned ]; then echo "Your worker stopped: waiting for your Claude sign-in timed out."; else echo "Your worker is stopped."; fi;;
+      case "$(read_field "$sj" stop_reason)" in
+        login_abandoned) echo "Your worker stopped: waiting for your Claude sign-in timed out.";;
+        successor_gone) echo "Your worker stopped: the next job in the chain was cancelled or never started. hpcworker connect starts it again.";;
+        *) echo "Your worker is stopped.";;
+      esac;;
     error) msg=$(read_field "$sj" message); msg="${msg%.}"; echo "Your worker couldn't start: ${msg:-no reason was recorded}.";;
     *) echo "Your worker has been asked for and has not reported yet.";;
   esac
@@ -840,7 +957,8 @@ watch_run() { # RUN_DIR NAME MINUTES SEEN [ASKED_AT]: follow a worker until it i
       need_login) say "$(status_line "$rd")"; say "Sign in once with: hpcworker claude login (the worker carries on by itself)"; return 3;;
     esac
     now=$(date +%s)
-    if { [ "$st" = queued ] || [ -z "$st" ]; } && [ $(( now - last_sched )) -ge 60 ]; then status_refresh "$rd"; last_sched=$now; continue; fi
+    # framework 13: a job that ended naming its successor has itself and the successor asked about (status_refresh)
+    if { [ "$st" = queued ] || [ -z "$st" ] || [ "$st" = preempted ]; } && [ $(( now - last_sched )) -ge 60 ]; then status_refresh "$rd"; last_sched=$now; continue; fi
     if [ "$now" -ge "$deadline" ]; then say "$(status_line "$rd")"; say "(still not online after $mins min; hpcworker worker watch --name $name follows it again)"; return 2; fi
     sleep "${HPCW_WATCH_POLL_S:-5}"
   done
@@ -871,8 +989,9 @@ watch_json() { # RUN_DIR NAME MINUTES FLOOR_S: framework 11, `worker watch --jso
   # scheduler's word on it changes, and once at the start and at the end:
   #   {"v":1,"event":"status","final":false|true, then the fields of `worker status --json`}
   # and when 20 s pass with nothing written: {"v":1,"event":"keepalive","at":"<UTC>"}. status.json is read
-  # every 5 s (files only); the scheduler is asked at most once a minute, only while the worker is in line,
-  # and with FLOOR_S not within FLOOR_S s of anyone's last ask. Ends with final true and exit 0 online (with
+  # every 5 s (files only); the scheduler is asked at most once a minute, only while the worker is in line
+  # (framework 13: or ended naming a successor, asked about with the job in one call), and with FLOOR_S not
+  # within FLOOR_S s of anyone's last ask. Ends with final true and exit 0 online (with
   # its link), 1 stopped, error, or ended with no successor, 2 out of time. Waiting for the Claude sign-in
   # is a change like any other and the watch goes on (the gate never signs in; a sign-in made elsewhere
   # brings the worker online). A line that cannot be written (the reader went away) ends it at once, and so
@@ -891,7 +1010,7 @@ watch_json() { # RUN_DIR NAME MINUTES FLOOR_S: framework 11, `worker watch --jso
   while :; do
     now=$SECONDS
     watch_sig "$rd"; st="$WSTATE"
-    if { [ "$st" = queued ] || [ -z "$st" ]; } && [ $(( now - last_sched )) -ge 60 ]; then
+    if { [ "$st" = queued ] || [ -z "$st" ] || [ "$st" = preempted ]; } && [ $(( now - last_sched )) -ge 60 ]; then
       status_refresh "$rd" "$floor"; last_sched=$now
       watch_sig "$rd"; st="$WSTATE"
     fi
@@ -1052,7 +1171,8 @@ EOT
     status)
       [ -d "$rd" ] || die "no worker named $name (hpcworker worker start)"
       local sj="$rd/status.json" cj="$rd/connection.json"
-      # framework 10: ONE scheduler call, only while the worker is in line (status.json says so, or has not been written yet)
+      # framework 10: ONE scheduler call, only while the worker is in line (status.json says so, or has not been written yet);
+      # framework 13: or for a job that ended naming a successor, and that successor (status_refresh, successor_refresh)
       status_refresh "$rd" "$floor"
       if [ $as_json = 1 ]; then status_json "$rd" "$name" ""; return 0; fi
       say "$(status_line "$rd")"

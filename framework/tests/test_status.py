@@ -4,7 +4,8 @@ trim), `worker status` with its one scheduler call while queued (the reason, the
 got its computer, a job the grid dropped, a scheduler that did not answer), the person-facing line for
 every state, `--json` and `--details`, `worker stop` of a worker still in line, `worker restrict`,
 `claude consent --record`, `worker watch`, and what the 10.0.0 extension and a framework 9 worker
-still find (V11_CONTRACT.md section 19)."""
+still find (V11_CONTRACT.md section 19). Framework 13: a job that ended naming its successor ("preempted"
+with a next job) has the successor asked about, and a successor that is gone stops the record."""
 import json
 import os
 import re
@@ -203,8 +204,14 @@ class Lines(Base):
         os.makedirs(rd, exist_ok=True)
         with open(os.path.join(rd, "job.id"), "w") as fh:
             fh.write("40501234\n")
-        # a worker in line is one the scheduler still lists (else worker status reads it as dropped)
-        self.g.jobs(["40501234|PENDING|Priority|N/A|"] if base.get("state") == "queued" else [])
+        # a worker in line is one the scheduler still lists (else worker status reads it as dropped); framework 13:
+        # so is the successor of a job that ended naming one (else worker status reads the chain as broken)
+        if base.get("state") == "queued":
+            self.g.jobs(["40501234|PENDING|Priority|N/A|"])
+        elif base.get("state") == "preempted" and base.get("next_job"):
+            self.g.jobs(["%s|PENDING|Dependency|N/A|" % base["next_job"]])
+        else:
+            self.g.jobs([])
         self.g.write_status(base)
 
     def test_each_state(self):
@@ -222,6 +229,7 @@ class Lines(Base):
             (dict(state="preempted", next_job=""), "Your worker has ended. hpcworker connect starts it again."),
             (dict(state="stopped", stop_reason="login_abandoned"), "Your worker stopped: waiting for your Claude sign-in timed out."),
             (dict(state="stopped", stop_reason="request"), "Your worker is stopped."),
+            (dict(state="stopped", stop_reason="successor_gone"), "Your worker stopped: the next job in the chain was cancelled or never started. hpcworker connect starts it again."),
             (dict(state="stopped"), "Your worker is stopped."),
             (dict(state="error", message="image /x is not readable"), "Your worker couldn't start: image /x is not readable."),
         ]
@@ -433,10 +441,209 @@ class Framework9Compat(Base):
         self.assertTrue(os.path.exists(os.path.join(rd, "stop")), "the stop file is the job's signal, as before")
         self.assertRegex(out, r"^worker worker: stopped \(no word from job 40500019 within 1s")
 
-    def test_version_says_11(self):
+    def test_version_says_13(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "12")
+        self.assertEqual(G.CURRENT_VERSION, "13")
+
+
+class SuccessorOfAnEndedJob(Base):
+    """Framework 13. A job's trap writes "preempted" when it ends at its wall time, is preempted or is cancelled,
+    naming the successor it queued. Before framework 13 nobody asked whether that successor was still there:
+    on 2026-10-02 go2432's successor was cancelled at 20:42:10 and the job at 20:42:16, and the file said
+    "preempted", next_job 40551869, for good. worker status (the gate's status) now asks the scheduler about the
+    job and its successor, in one call, under the same floor as a job in line. The job itself listed again (a
+    preempted job under --qos=requeue comes back under its own id) leaves the record alone; only the job gone or
+    ended and the successor gone or ended stop it."""
+
+    JOB = "40501234"
+    NEXT = "40501300"
+    CHANGED = ("state", "message", "needs", "hint", "next_job", "updated_at")
+
+    def setUp(self):
+        super().setUp()
+        rd = self.g.rundir()
+        os.makedirs(rd)
+        self.put_files()
+        self.g.write_status(self.preempted())
+
+    def put_files(self, job_id=None, next_id=None):
+        rd = self.g.rundir()
+        for name, text in (("job.id", job_id or self.JOB), ("node", "asx15"), ("next.id", next_id or "%s %s" % (self.NEXT, self.JOB))):
+            with open(os.path.join(rd, name), "w", newline="\n") as fh:
+                fh.write(text + "\n")
+
+    def preempted(self, **extra):
+        """status.json as the job's trap leaves it: every key write_status writes, claude_login an object"""
+        s = {"version": 12, "site": "testsite", "run": "worker", "job": self.JOB, "node": "asx15", "pid": 4242, "state": "preempted",
+             "message": "job %s ending (wall time or preemption); the next job in the chain, %s, takes over and resumes the session" % (self.JOB, self.NEXT),
+             "needs": "nothing", "hint": "This job ended; the next one takes over shortly.", "submitted_at": iso(-30000), "got_computer_at": iso(-29000),
+             "started_at": iso(-29000), "online_at": iso(-28800), "ends_at": iso(-200), "renewal": False, "updated_at": iso(-3600),
+             "title": "Wayne State grid", "session_name": "asx15-hazy-meadow", "requested_name": "Wayne State grid", "session_url": "",
+             "environment_url": "https://claude.ai/code?environment=env_01X", "environment_id": "env_01X",
+             "claude_login": {"loggedIn": True, "email": "st1234@wayne.edu", "subscriptionType": "max", "checked_at": iso(-3700)},
+             "consent": True, "consent_source": "claude_config", "workspace_trusted": True, "rc_alive": False, "resumed": False, "tmux": True,
+             "restarts": 0, "chain": True, "next_job": self.NEXT, "chain_note": "successor %s queued (afterany:%s)" % (self.NEXT, self.JOB),
+             "scheduler_in_worker": False, "scheduler_note": "off in the site profile", "workspace": "/x/ws", "rc_log": "/x/rc.log", "token_path": "/x/job.token"}
+        s.update(extra)
+        return s
+
+    def squeue_both(self):
+        """ONE squeue about the job and its successor (adapter_status_many, as worker start asks)"""
+        return "squeue -h -j %s,%s -o %%i|%%T|%%N" % (self.JOB, self.NEXT)
+
+    def raw(self):
+        with open(os.path.join(self.g.rundir(), "status.json"), encoding="utf-8", newline="") as fh:
+            return fh.read()
+
+    def test_a_successor_the_scheduler_no_longer_lists_stops_the_record(self):
+        self.g.jobs([])
+        before = self.g.status()
+        j = self.status_json()
+        self.assertEqual(self.g.calls(), [self.squeue_both()], "ONE squeue, for the job and its successor")
+        st = self.g.status()
+        self.assertEqual(j["status"], st, "the answer carries the record as written")
+        self.assertEqual((st["state"], st["stop_reason"], st["next_job"], st["needs"], st["scheduler_state"]), ("stopped", "successor_gone", "", "nothing", "GONE"))
+        self.assertEqual(st["message"], "the next job in the chain was cancelled or never started; press Connect to start again")
+        self.assertEqual(st["hint"], "Your worker is stopped; start it again when you need it.")
+        self.assertRegex(st["updated_at"], ISO)
+        self.assertNotEqual(st["updated_at"], before["updated_at"])
+        self.assertEqual(st["checked_at"], st["updated_at"])
+        # everything else the job wrote is kept as written (claude_login, the object, too), in its order; the new keys last
+        for k, v in before.items():
+            if k not in self.CHANGED:
+                self.assertEqual(st[k], v, k)
+        self.assertEqual(list(st)[:len(before)], list(before))
+        self.assertEqual(list(st)[len(before):], ["stop_reason", "scheduler_state", "checked_at"])
+        with open(os.path.join(self.g.rundir(), "status.json"), encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertTrue(raw.endswith("}\n") and raw.count("\n") == 1, "one line")
+        self.assertEqual((j["scheduler"]["state"], j["scheduler"]["reason"], j["scheduler"]["expected_start"]), ("GONE", "", ""))
+        self.assertEqual(j["next_job"], "", "next.id named the successor that is gone, and went")
+        self.assertFalse(os.path.exists(os.path.join(self.g.rundir(), "next.id")))
+        self.assertTrue(self.g.progress()[-1].endswith(" Ended"), self.g.progress())
+        want = "Your worker stopped: the next job in the chain was cancelled or never started. hpcworker connect starts it again."
+        self.assertEqual(j["line"], want)
+        self.assertEqual(self.line(), want)
+        # stopped now: nothing more is asked, nothing more is said
+        n = len(self.g.calls())
+        self.assertIsNone(self.status_json()["scheduler"])
+        self.assertEqual(len(self.g.calls()), n)
+        self.assertEqual(len([l for l in self.g.progress() if l.endswith(" Ended")]), 1)
+
+    def test_a_successor_that_ended_counts_as_gone(self):
+        for word in ("CANCELLED", "CANCELLED+", "FAILED", "COMPLETED", "TIMEOUT"):
+            self.put_files()
+            self.g.write_status(self.preempted())
+            self.g.jobs(["%s|%s|None|N/A|" % (self.NEXT, word)])
+            j = self.status_json()
+            self.assertEqual((j["status"]["state"], j["status"]["stop_reason"], j["scheduler"]["state"]), ("stopped", "successor_gone", "GONE"), word)
+
+    def test_a_successor_in_line_or_running_leaves_the_record_as_it_is(self):
+        # the job gone (not listed), its successor in line
+        self.g.jobs(["%s|PENDING|Dependency|N/A|" % self.NEXT])
+        before = self.g.status()
+        j = self.status_json()
+        self.assertEqual(self.g.calls(), [self.squeue_both()])
+        st = self.g.status()
+        for k, v in before.items():
+            self.assertEqual(st[k], v, k)
+        # the scheduler's word on the successor and the floor's checked_at; the one call carries no reason or estimate
+        self.assertEqual(st["scheduler_state"], "PENDING")
+        self.assertRegex(st["checked_at"], ISO)
+        self.assertEqual(list(st)[len(before):], ["scheduler_state", "checked_at"])
+        self.assertEqual((j["scheduler"]["state"], j["scheduler"]["reason"], j["scheduler"]["expected_start"]), ("PENDING", "", ""))
+        self.assertEqual(j["next_job"], self.NEXT)
+        self.assertEqual(j["line"], "Your worker is renewing itself; it is back in a few minutes.")
+        self.assertTrue(os.path.exists(os.path.join(self.g.rundir(), "next.id")))
+        self.assertFalse(any(l.endswith(" Ended") for l in self.g.progress()))
+        # the gate's floor (checked_at): asked a moment ago, so not asked again
+        n = len(self.g.calls())
+        rc, out, err = self.g.run("worker status --json --poll-floor 60")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.g.calls()), n)
+        self.assertIsNone(json.loads(out)["scheduler"])
+        # a successor that got its computer: still the record as it is, with the scheduler's word
+        self.g.jobs(["%s|RUNNING|None|N/A|asx16" % self.NEXT])
+        j = self.status_json()
+        self.assertEqual((j["status"]["state"], j["status"]["next_job"], j["status"]["scheduler_state"], j["scheduler"]["node"]), ("preempted", self.NEXT, "RUNNING", "asx16"))
+
+    def test_the_job_itself_listed_again_leaves_the_record_alone(self):
+        # a job preempted under --qos=requeue is listed again under its own id and writes its own status.json when
+        # it starts again: whatever its successor's state, nothing is written (not even checked_at), nothing said
+        for word in ("PENDING", "REQUEUED", "CONFIGURING", "RUNNING", "COMPLETING"):
+            for successor in ([], ["%s|CANCELLED|None|N/A|" % self.NEXT], ["%s|PENDING|Dependency|N/A|" % self.NEXT]):
+                why = "%s, successor %s" % (word, successor or "not listed")
+                self.put_files()
+                self.g.write_status(self.preempted())
+                before = self.raw()
+                self.g.jobs(["%s|%s|BeginTime|N/A|%s" % (self.JOB, word, "asx17" if word in ("RUNNING", "COMPLETING") else "")] + successor)
+                n = len(self.g.calls())
+                j = self.status_json()
+                self.assertEqual(self.g.calls()[n:], [self.squeue_both()], why)
+                self.assertEqual(self.raw(), before, why)
+                self.assertEqual((j["status"]["state"], j["status"]["next_job"], j["next_job"]), ("preempted", self.NEXT, self.NEXT), why)
+                self.assertEqual(j["scheduler"]["state"], word, "the scheduler's word on the job that takes over: " + why)
+                self.assertEqual(j["line"], "Your worker is renewing itself; it is back in a few minutes.", why)
+                self.assertTrue(os.path.exists(os.path.join(self.g.rundir(), "next.id")), why)
+        self.assertFalse(any(l.endswith(" Ended") for l in self.g.progress()))
+        # nothing written, so the floor has no checked_at to go by: the next status asks once more (the panel asks
+        # once a minute, a watch at most once a minute)
+        n = len(self.g.calls())
+        rc, out, err = self.g.run("worker status --json --poll-floor 60")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.g.calls()[n:], [self.squeue_both()])
+
+    def test_the_job_ended_and_its_successor_gone_stops_the_record(self):
+        # the job listed as ended (or not listed), the successor not listed or listed as ended: stopped
+        for jobs in (["%s|CANCELLED|None|N/A|" % self.JOB], ["%s|PREEMPTED|None|N/A|" % self.JOB],
+                     ["%s|COMPLETED|None|N/A|" % self.JOB, "%s|CANCELLED|None|N/A|" % self.NEXT], []):
+            self.put_files()
+            self.g.write_status(self.preempted())
+            self.g.jobs(jobs)
+            j = self.status_json()
+            self.assertEqual((j["status"]["state"], j["status"]["stop_reason"], j["status"]["next_job"], j["scheduler"]["state"]),
+                             ("stopped", "successor_gone", "", "GONE"), jobs)
+            self.assertFalse(os.path.exists(os.path.join(self.g.rundir(), "next.id")), jobs)
+
+    def test_a_scheduler_that_did_not_answer_changes_nothing(self):
+        self.g.jobs([])
+        open(os.path.join(self.g.sched, "squeue_fail"), "w").close()
+        before = self.g.status()
+        j = self.status_json()
+        self.assertIsNone(j["scheduler"])
+        self.assertEqual(self.g.status(), before)
+        self.assertEqual(j["line"], "Your worker is renewing itself; it is back in a few minutes.")
+
+    def test_a_successor_that_started_is_never_written_over(self):
+        # the successor started: it writes job.id (and node) before its first status.json
+        self.put_files(job_id=self.NEXT)
+        self.g.jobs([])
+        before = self.g.status()
+        self.status_json()
+        self.assertEqual(self.g.calls(), [], "the job on record is the successor now; its own files say where it is")
+        self.assertEqual(self.g.status(), before)
+
+    def test_the_successor_named_by_next_id_alone(self):
+        self.g.write_status(self.preempted(next_job=""))
+        self.g.jobs([])
+        j = self.status_json()
+        self.assertEqual(self.g.calls(), [self.squeue_both()], "next.id names it, queued by this job")
+        self.assertEqual((j["status"]["state"], j["status"]["stop_reason"]), ("stopped", "successor_gone"))
+        # a next.id queued by another job names no successor of this one: nothing asked, the chain reads as ended
+        self.put_files(next_id="%s 40500999" % self.NEXT)
+        self.g.write_status(self.preempted(next_job=""))
+        n = len(self.g.calls())
+        j = self.status_json()
+        self.assertEqual(len(self.g.calls()), n)
+        self.assertEqual(j["status"]["state"], "preempted")
+
+    def test_a_text_watch_ends_on_it(self):
+        self.g.jobs([])
+        rc, out, err = self.g.run("worker watch --minutes 1", HPCW_WATCH_POLL_S="0")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertEqual(out.splitlines()[-1], "Your worker stopped: the next job in the chain was cancelled or never started. hpcworker connect starts it again.")
+        self.assertEqual(self.g.status()["state"], "stopped")
 
 
 if __name__ == "__main__":

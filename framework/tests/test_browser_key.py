@@ -889,6 +889,44 @@ class GateReal(Base):
         self.assertEqual(self.gate("restrict worker").returncode, 0)
         self.no_trip()
 
+    def test_status_and_watch_stop_a_chain_whose_successor_is_gone(self):
+        # framework 13: the gate's status and watch ask the scheduler about the successor a job that ended named,
+        # and a successor that is gone leaves the record "stopped" (2026-10-02: the panel showed it coming back)
+        self.warm()
+        rd = os.path.join(self.state, "worker")
+        os.makedirs(rd, exist_ok=True)
+        for name, text in (("job.id", "40501234"), ("node", "asx15"), ("next.id", "40501300 40501234")):
+            with open(os.path.join(rd, name), "w") as fh:
+                fh.write(text + "\n")
+        ended = {"version": 12, "run": "worker", "job": "40501234", "node": "asx15", "state": "preempted", "next_job": "40501300",
+                 "updated_at": "2026-10-03T00:42:21Z", "claude_login": {"loggedIn": True, "email": "st1234@wayne.edu", "subscriptionType": "max", "checked_at": "2026-10-03T00:40:00Z"}}
+        self.g.jobs(["40501300|PENDING|Dependency|N/A|"])
+        self.g.write_status(ended)
+        st = self.gate("status worker")
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertEqual(json.loads(st.stdout)["status"]["state"], "preempted", "a successor in line: the record as it is")
+        self.g.jobs([])
+        self.g.write_status(ended)   # asked again only past the floor: a fresh copy of the file has no checked_at
+        st = self.gate("status worker")
+        j = json.loads(st.stdout)
+        self.assertEqual((j["status"]["state"], j["status"]["stop_reason"], j["next_job"]), ("stopped", "successor_gone", ""))
+        self.g.write_status(ended)
+        with open(os.path.join(rd, "next.id"), "w") as fh:
+            fh.write("40501300 40501234\n")
+        w = self.gate("watch worker")
+        self.assertEqual(w.returncode, 1, w.stderr)
+        last = json.loads(w.stdout.splitlines()[-1])
+        self.assertEqual((last["event"], last["final"], last["status"]["state"], last["status"]["stop_reason"]), ("status", True, "stopped", "successor_gone"))
+        # the job itself listed again (requeued under its own id), its successor gone: the record is left alone
+        self.g.jobs(["40501234|PENDING|BeginTime|N/A|"])
+        self.g.write_status(ended)
+        with open(os.path.join(rd, "next.id"), "w") as fh:
+            fh.write("40501300 40501234\n")
+        st = self.gate("status worker")
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertEqual((json.loads(st.stdout)["status"]["state"], self.g.status()["next_job"]), ("preempted", "40501300"))
+        self.no_trip()
+
     def test_returning_connect_runs_no_python(self):
         self.warm()
         e = {"HPCW_PYTHON": REAL_PY}

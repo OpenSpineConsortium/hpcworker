@@ -3,7 +3,9 @@ fakegrid.py: one JSON line per change and at the start and the end, a keepalive 
 written for a while (2 s here for the 20 s of the real thing; the look every 1 s for every 5 s), the
 scheduler asked at most once a minute and only while the worker is in line (and not at all within the
 gate's floor), the end at online, stopped, error, an ended chain, or out of time, each with its exit
-status, and the end when the reader goes away, with a gate's watch slot given back."""
+status, and the end when the reader goes away, with a gate's watch slot given back. Framework 13: a job
+that ended naming its successor has the successor asked about, and the watch ends "stopped" when the
+successor is gone."""
 import json
 import os
 import subprocess
@@ -173,9 +175,42 @@ class Ends(Base):
         self.one(self.queued(state="preempted", node="asx15"), 1)
 
     def test_renewing_is_not_the_end(self):
+        # the successor in line (framework 13 asks the scheduler about it)
+        self.g.jobs(["40501300|PENDING|Dependency|N/A|"])
         self.put(self.queued(state="preempted", node="asx15", next_job="40501300"))
         rc, lines, err = self.watch("--name worker --json --minutes 0")
         self.assertEqual(rc, 2, "out of time, not ended")
+        self.assertEqual(self.squeues(), ["squeue -h -j 40501234,40501300 -o %i|%T|%N"], "the job and its successor, in one call")
+        self.assertEqual(lines[-1][1]["status"]["state"], "preempted")
+
+    def test_a_successor_that_is_gone_ends_it_stopped(self):
+        # framework 13: the successor was cancelled on its own (2026-10-02); the watch ends on "stopped"
+        self.g.jobs([])
+        o = self.one(self.queued(state="preempted", node="asx15", next_job="40501300",
+                                 claude_login={"loggedIn": True, "email": "st1234@wayne.edu", "subscriptionType": "max", "checked_at": iso()}), 1)
+        self.assertEqual((o["status"]["state"], o["status"]["stop_reason"], o["status"]["next_job"]), ("stopped", "successor_gone", ""))
+        self.assertEqual(o["status"]["claude_login"]["email"], "st1234@wayne.edu", "the job's own fields kept")
+        self.assertEqual(o["scheduler"]["state"], "GONE")
+        self.assertEqual(o["line"], "Your worker stopped: the next job in the chain was cancelled or never started. hpcworker connect starts it again.")
+        self.assertEqual(self.squeues(), ["squeue -h -j 40501234,40501300 -o %i|%T|%N"], "the job and its successor, once")
+
+    def test_a_job_listed_again_is_not_the_end(self):
+        # framework 13: a job preempted under --qos=requeue is listed again under its own id: the watch goes on, its
+        # successor gone or not, and the record is left as the job wrote it
+        self.g.jobs(["40501234|PENDING|BeginTime|N/A|"])
+        self.put(self.queued(state="preempted", node="asx15", next_job="40501300"))
+        rc, lines, err = self.watch("--name worker --json --minutes 0")
+        self.assertEqual(rc, 2, "out of time, not ended")
+        self.assertEqual(self.squeues(), ["squeue -h -j 40501234,40501300 -o %i|%T|%N"])
+        self.assertEqual((lines[-1][1]["status"]["state"], lines[-1][1]["status"]["next_job"]), ("preempted", "40501300"))
+
+    def test_the_successor_is_not_asked_within_the_floor(self):
+        self.g.jobs([])
+        self.put(self.queued(state="preempted", node="asx15", next_job="40501300", checked_at=iso(time.time() - 10), scheduler_state="PENDING"))
+        rc, lines, err = self.watch("--name worker --json --minutes 0 --poll-floor 60")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(self.squeues(), [])
+        self.assertEqual(lines[-1][1]["status"]["state"], "preempted")
 
     def test_the_grid_dropped_the_request(self):
         # the scheduler no longer lists the job: status_refresh writes the error, and the watch ends on it
