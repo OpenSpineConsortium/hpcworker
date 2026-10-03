@@ -462,10 +462,10 @@ class Framework9Compat(Base):
         self.assertTrue(os.path.exists(os.path.join(rd, "stop")), "the stop file is the job's signal, as before")
         self.assertRegex(out, r"^worker worker: stopped \(no word from job 40500019 within 1s")
 
-    def test_version_says_14(self):
+    def test_version_says_15(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "14")
+        self.assertEqual(G.CURRENT_VERSION, "15")
 
 
 class SuccessorOfAnEndedJob(Base):

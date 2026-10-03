@@ -15,6 +15,32 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**Framework 15: a restart inside a job reads the log it writes.** When Remote Control ends inside a
+job — a resumed session is "Single session · exits when complete", so it ends with its work; or a crash —
+the job starts it again under `script`, and `script` starts the transcript file over: `rc.log` began
+again at byte 0 while the job's read offset still pointed at the old end, so the job read past the end
+of the file and recognised nothing until the new transcript outgrew the old one — hours in a long job
+(measured live: job 40554631 on sfx10, 2026-10-03; a 15 MB `rc.prev.log` of redraws on go2432's
+wayne-worker says how far that goes). `script` now appends (`-a`, present on the hosts' util-linux
+2.23, under tmux and plain `script` alike), and `clean_tail` treats a log shorter than its offset as
+one started afresh beneath it and reads from its beginning (its last 6000 bytes, as always). Two more of that same moment: `progress.log` said
+"Reconnecting" and nothing after it while the worker was back online, so each restart's first link now
+writes "Online: <link>" again (`online_at` stays the job's first), and the new job test plays the whole
+passage — a resumed session that ends, the fresh registration after it, the log said again — red against
+framework 14 (`test_job.test_a_resumed_session_that_ends_is_followed_by_a_fresh_registration`).
+
+Also in 15: `install --shared` no longer waits for a worker that runs from another copy — a run whose
+`params` names a different `HPCW_CODE` (the shared copy, a checkout) never reads the home being
+converted, so it does not hold the conversion back (`live_run`; measured 2026-10-03, with tests);
+`AI_AGENT`, the generic marker Claude Code also sets in its shell, counts as an agent's variable
+(`hpcw_agent_env`); and the suite runs wherever a person or a job puts it: `fakegrid.bash` drops the
+surroundings' scheduler and agent markers so every stand-in plays a login-node call (a compute-node run
+carried `SLURM_JOB_ID` into `browser-key add`, which rightly refuses a batch job: job 40554683),
+`tests/run.sh` picks a UTF-8 locale when the shell has none (Python 3.6 in a batch job otherwise encodes
+a child's argv as ASCII, and the hostile-key tests died in `subprocess`, not in the code under test: job
+40554626), and the conversion tests keep their state folder under the test's own home, never the
+account's real one. `VERSION` is 15.
+
 **Framework 14: a resumed session's link.** Claude Code prints one of two links. A fresh registration
 prints the environment link, `https://claude.ai/code?environment=env_...`. When the job resumes an earlier
 session (`claude remote-control --continue`, a successor or a restart within four hours), Claude Code

@@ -61,7 +61,7 @@
 # through the gate, and the gate only removes that line (forget, or past the site's expiry). Nothing
 # reached through the gate ever starts a Claude sign-in. Versions are integers.
 set -uo pipefail
-VERSION=14
+VERSION=15
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -400,7 +400,7 @@ live_run() { # the first run of this account's that may still read code from thi
   # under way. Files only, no scheduler call. A running job sources lib/ again on every call into
   # the container, so its code must not move while it runs.
   [ -s "$PROFILE" ] || return 0
-  local sd d n st now; sd=$(prof_get "$PROFILE" shared_state_dir 2>/dev/null); { [ -n "$sd" ] && [ -d "$sd" ]; } || return 0
+  local sd d n st now c; sd=$(prof_get "$PROFILE" shared_state_dir 2>/dev/null); { [ -n "$sd" ] && [ -d "$sd" ]; } || return 0
   now=$(date +%s)
   for d in "$sd"/*/; do
     [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = workspaces ] && continue
@@ -408,6 +408,11 @@ live_run() { # the first run of this account's that may still read code from thi
       [ -s "$d/job.id" ] && [ ! -s "$d/probe.json" ] && [ $(( now - $(stat -c %Y "$d/job.id") )) -lt 900 ] && { echo "probe (job $(cat "$d/job.id"))"; return 0; }
       continue
     fi
+    # a run whose params name another copy (the shared one, a checkout) never reads this home: it does not
+    # hold the move back (measured on the grid, 2026-10-03: a checkout's test worker blocked it). A run with
+    # no params, or none naming its code, still counts
+    c=$(sed -n 's/^HPCW_CODE=//p' "$d/params" 2>/dev/null | tail -n 1)
+    [ -n "$c" ] && ! same_dir "$c" "$HPCW_HOME" && continue
     [ -s "$d/next.id" ] && { echo "$n (job $(next_job_of "$d") is queued to take over)"; return 0; }
     if [ -s "$d/status.json" ]; then
       st=$(read_field "$d/status.json" state)

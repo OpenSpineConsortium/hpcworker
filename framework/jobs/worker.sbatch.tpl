@@ -112,7 +112,7 @@ CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 STATE=starting; MESSAGE=""; REQUESTED_NAME="$TITLE"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""; LINK_NOTED=""; LINK_SAID=""
 AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
 NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false; SCHED_INSIDE=false; SCHED_NOTE="off in the site profile"
-ONLINE_AT=""; STOP_REASON=""; NEED_LOGIN_SINCE=0; RC_STARTS=0
+ONLINE_AT=""; ONLINE_LOGGED=0; STOP_REASON=""; NEED_LOGIN_SINCE=0; RC_STARTS=0
 # trust for the workspace as Claude Code has it on record (the second of the two booleans read); the seed below may add it later
 hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
 consent_source() { # claude_config | marker | none : where the student's recorded answer was found
@@ -308,17 +308,20 @@ start_rc() { # [extra args]
   [ "$RC_STARTS" = 1 ] && hpcw_progress "$RUN_DIR" "Connecting to Claude"
   pretrust
   write_launcher "$@"
+  # script -a: without it script empties rc.log and writes from its start, while RC_OFF still holds the old size,
+  # so after a restart the job read past the end for as long as the new output took to outgrow the old (hours in
+  # a long job: 15 MB of redraws on go2432's wayne-worker; live on job 40554631 and in test_job, 2026-10-03)
   RC_OFF=$(stat -c %s rc.log 2>/dev/null || echo 0)
   { echo; echo "===== $(date -u +%FT%TZ) job $JOB on $NODE: starting claude remote-control ${RC_ARGS[*]} $* ====="; } >> rc.log
   if [ "$USING_TMUX" = true ]; then
-    tmux -S "$TMUX_SOCK" new-session -d -s rc -x 220 -y 50 "script -qfc '$RUN_DIR/launch.sh' '$RUN_DIR/rc.log'; sleep 2"
+    tmux -S "$TMUX_SOCK" new-session -d -s rc -x 220 -y 50 "script -aqfc '$RUN_DIR/launch.sh' '$RUN_DIR/rc.log'; sleep 2"
     sleep 1; RC_PID=$(tmux -S "$TMUX_SOCK" list-panes -t rc -F '#{pane_pid}' 2>/dev/null | head -1); RC_PID=${RC_PID:-0}
   else
     # no tmux on this node: `script` still gives claude a real terminal; its stdin is a pipe we hold
     # open on fd 7 so the session does not end at EOF, and consent answers go through the same pipe
     [ -p "$FIFO" ] || mkfifo -m 600 "$FIFO"
     exec 7<>"$FIFO"
-    script -qfc "$RUN_DIR/launch.sh" "$RUN_DIR/rc.log" <&7 >/dev/null 2>&1 &
+    script -aqfc "$RUN_DIR/launch.sh" "$RUN_DIR/rc.log" <&7 >/dev/null 2>&1 &
     RC_PID=$!
   fi
   RC_ALIVE=true; RC_STARTED=$(now_s)
@@ -341,6 +344,8 @@ clean_tail() { # what claude printed since offset $1 (last 6000 bytes at most), 
   # "lines" is for the registration parser: a last line still being written (no newline yet) may be a link cut
   # mid-write. The prompt test and "Last output:" keep it, since a question waiting for its answer has no newline
   local size from=$1; size=$(stat -c %s rc.log 2>/dev/null || echo 0)
+  # a log shorter than the offset was started afresh under it: read it from its start
+  [ "$size" -lt "$from" ] && from=0
   [ $((size - from)) -gt 6000 ] && from=$((size - 6000))
   if [ "${2:-}" = lines ]; then tail -c +"$((from + 1))" rc.log 2>/dev/null | hpcw_strip_codes | hpcw_complete_lines
   else tail -c +"$((from + 1))" rc.log 2>/dev/null | hpcw_strip_codes; fi
@@ -456,9 +461,14 @@ while :; do
         # job output's plain line (the node's local time), once per job. Framework 14: the link is
         # either form (SESSION_URL: an environment link, or a resumed session's own link)
         if [ -n "$SESSION_URL" ] && [ -z "$ONLINE_AT" ]; then
-          ONLINE_AT=$(date -u +%FT%TZ)
+          ONLINE_AT=$(date -u +%FT%TZ); ONLINE_LOGGED=$RESTARTS
           hpcw_progress "$RUN_DIR" "Online: $SESSION_URL"
           printf '%s Online. Open in Claude: %s\n' "$(date +%-H:%M)" "$SESSION_URL"
+        elif [ -n "$SESSION_URL" ] && [ "$ONLINE_LOGGED" != "$RESTARTS" ]; then
+          # back after a restart in this job: progress.log's last word was "Reconnecting", and the panel's log
+          # kept it while the worker was online again (job 40554631, 2026-10-03). online_at stays the first
+          ONLINE_LOGGED=$RESTARTS
+          hpcw_progress "$RUN_DIR" "Online: $SESSION_URL"
         fi
         if [ $ONLINE_NOTED = 0 ]; then ONLINE_NOTED=1; BACKOFF=10; write_connection; [ -n "$SESSION_URL" ] || say "online: session $SESSION_NAME (no link printed yet)"; fi
         # the "online:" line of the job output, once for each link printed

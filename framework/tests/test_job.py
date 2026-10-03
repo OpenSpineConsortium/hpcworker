@@ -39,7 +39,20 @@ case "$1 ${2:-}" in
   "remote-control --help") echo "Usage: claude remote-control [options]  --name <name> --capacity <n> --continue --permission-mode <mode>";;
   remote-control*)
     printf '\033[2J\033[H'
-    if [ "${FAKE_RC_FORM:-environment}" = session ]; then
+    if [ "${FAKE_RC_FORM:-}" = resume_exit ]; then
+      # a resumed single session that ends a few seconds in, then a fresh registration (live: job 40554631, 2026-10-03)
+      case " $* " in
+        *" --continue "*)
+          printf 'Resuming session %s (43m ago)\r\n' "${FAKE_SESSION_URL##*/}"
+          printf '    Single session \xc2\xb7 exits when complete\r\n'
+          printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_SESSION_URL"
+          sleep "${FAKE_EXIT_S:-8}"; exit 0;;
+        *)
+          printf '    Capacity: 0/4 \xc2\xb7 New sessions will be created in the current directory\r\n\r\n'
+          printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_ENV_URL"
+          exec sleep 600;;
+      esac
+    elif [ "${FAKE_RC_FORM:-environment}" = session ]; then
       # framework 14: what 2.1.283 printed when it resumed an earlier session (job 40554211, 2026-10-03)
       printf 'Resuming session %s (43m ago)\r\n' "${FAKE_SESSION_URL##*/}"
       printf '\xc2\xb7\xe2\x9c\x94\xef\xb8\x8e\xc2\xb7 Connected \xc2\xb7 phone \xc2\xb7 HEAD\r\n'
@@ -242,6 +255,36 @@ class Job(unittest.TestCase):
         self.assertEqual(progress[-1], "Online: " + SESSION_URL)
         self.assertRegex(out, r"(?m)^\d{1,2}:\d\d Online\. Open in Claude: %s$" % re.escape(SESSION_URL))
         self.assertRegex(out, r"(?m) online: session Wayne State grid %s$" % re.escape(SESSION_URL))
+
+    def test_a_resumed_session_that_ends_is_followed_by_a_fresh_registration(self):
+        # a resumed session is "Single session · exits when complete": when it ends the job starts Claude Code again
+        # without --continue (tried once a job), and the environment link becomes the link. progress.log says
+        # "Online: <link>" again after "Reconnecting" (before, "Reconnecting" stayed its last word: job 40554631)
+        self.rc_form = "resume_exit"
+        open(self.logged_in, "w").close()
+        with open(os.path.join(self.rd, "connection.json"), "w") as fh:
+            fh.write(json.dumps({"session_url": SESSION_URL, "environment_url": ""}) + "\n")
+        self.render()
+        self.queued_file()
+        proc = self.start_job()
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status().get("session_url") == SESSION_URL and self.status()["state"] == "online", 60), "online on the resumed session")
+            first = self.status()
+            self.assertTrue(first["resumed"])
+            self.assertTrue(self.wait_for(lambda: self.status()["session_url"] == ENV_URL and self.status()["state"] == "online", 90), "online on the environment after the restart")
+            # the restart's pass writes the progress line just before the status write; the wait is insurance
+            self.assertTrue(self.wait_for(lambda: self.progress()[-1] == "Online: " + ENV_URL, 10), self.progress())
+            s = self.status()
+            progress = self.progress()
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertEqual((s["resumed"], s["restarts"], s["environment_url"]), (False, 1, ENV_URL))
+        self.assertEqual(s["online_at"], first["online_at"], "online_at is the job's first")
+        self.assertEqual([p for p in progress if p.startswith(("Online", "Reconnecting"))], ["Online: " + SESSION_URL, "Reconnecting", "Online: " + ENV_URL])
 
     def test_both_forms_the_session_link_printed_last_is_the_link(self):
         self.rc_form = "both"

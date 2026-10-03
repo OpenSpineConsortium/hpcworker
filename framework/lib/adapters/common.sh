@@ -117,10 +117,11 @@ hpcw_rm_own_tmp() { # PATH... : remove ONLY directories the framework made for o
 hpcw_have_terminal() { [ -t 0 ]; }
 # 0 when an agent's own variables are set: CLAUDECODE, the request and worker a Beethoven for VS Code
 # worker sets in Claude's shell (BEETHOVEN_REQUEST_ID and kin, and the ASHLEY_ twins it still sets for
-# older readers: its names before 2026-09-30)
+# older readers: its names before 2026-09-30), and AI_AGENT, the generic marker Claude Code also sets in its
+# shell (seen in a Beethoven worker's session, 2026-10-03)
 hpcw_agent_env() {
   [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${BEETHOVEN_REQUEST_ID:-}" ] || [ -n "${BEETHOVEN_WORKER:-}" ] \
-    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ]
+    || [ -n "${ASHLEY_REQUEST_ID:-}" ] || [ -n "${ASHLEY_WORKER:-}" ] || [ -n "${ASHLEY_JOB:-}" ] || [ -n "${HPCW_AGENT:-}" ] || [ -n "${AI_AGENT:-}" ]
 }
 # 0 when an agent, not a person, is at the keyboard: an agent's variables, or no terminal
 hpcw_agent_marker() { hpcw_agent_env || ! hpcw_have_terminal; }

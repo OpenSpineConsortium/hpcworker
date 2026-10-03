@@ -418,6 +418,9 @@ class GuardedRemove(unittest.TestCase):
 
     def test_agent_marker(self):
         self.assertEqual(bash(with_common("hpcw_agent_marker"), env={"CLAUDECODE": "1"})[0], 0)
+        # hpcw_agent_env, not hpcw_agent_marker: under this runner stdin is no terminal, so the marker
+        # answers 0 whatever the variables say, and the assertion would hold without the common.sh change
+        self.assertEqual(bash(with_common("hpcw_agent_env"), env={"AI_AGENT": "claude-code"})[0], 0, "the generic marker Claude Code sets")
         # a Beethoven for VS Code worker's request, under its names since 2026-09-30 and the older ones
         for var in ("BEETHOVEN_REQUEST_ID", "BEETHOVEN_WORKER", "ASHLEY_REQUEST_ID", "ASHLEY_WORKER"):
             self.assertEqual(bash(with_common("hpcw_agent_marker"), env={var: "r1"})[0], 0, var)
@@ -655,13 +658,19 @@ class SharedInstall(unittest.TestCase):
             rc, _, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
             self.assertEqual(rc, 0, err)
             prof = os.path.join(home, "profile.json")
+            # the state folder in this test's own home: Wayne State's names the account's real one, and on the
+            # grid a worker there would hold the conversion back (measured, 2026-10-03)
+            fake_home = os.path.join(td, "home")
+            os.makedirs(fake_home)
             with open(prof) as fh:
                 edited = fh.read().replace('"display_name": "Wayne State University HPC grid"', '"display_name": "edited by me"')
+                edited = edited.replace('"/rs/rs_grp_oschome/$USER/hpcworker"', '"$HOME/state"')
+            self.assertIn('"$HOME/state"', edited)
             with open(prof, "w") as fh:
                 fh.write(edited)
             with open(os.path.join(home, "consent"), "w") as fh:
                 fh.write("yes\n")
-            rc, out, err = self.install_shared(shared, home)
+            rc, out, err = self.install_shared(shared, home, fake_home=fake_home)
             self.assertEqual(rc, 0, err)
             self.assertIn("switched to the shared copy of hpcworker %s at %s; your own copy (version %s) was moved to " % (CURRENT_VERSION, posix(shared), CURRENT_VERSION), out)
             self.assertIn("(nothing deleted)", out)
@@ -720,11 +729,52 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual(rc, 1, (out, err))
             self.assertIn("(job 40500019, online)", err)
             still_own_copy()
+            # the same heartbeat, from a run whose params name this copy: it still holds the move back
+            # newline="": the product writes params with printf on the grid (LF); a Windows checkout's text
+            # mode would write CRLF, and the \r would make live_run's cd fail for the wrong reason
+            with open(os.path.join(rd, "params"), "w", newline="") as fh:
+                fh.write("RUN=worker\nHPCW_CODE=%s\n" % posix(home))
+            rc, out, err = attempt()
+            self.assertEqual(rc, 1, (out, err))
+            self.assertIn("(job 40500019, online)", err)
+            still_own_copy()
+            os.remove(os.path.join(rd, "params"))
             # stopped on record: the conversion goes ahead
             with open(os.path.join(rd, "status.json"), "w") as fh:
                 fh.write('{"state": "stopped", "job": "40500019"}\n')
             rc, out, err = attempt()
             self.assertEqual(rc, 0, err)
+            self.assertIn("switched to the shared copy", out)
+
+    def test_conversion_goes_ahead_beside_a_run_from_another_copy(self):
+        # a worker online from the shared copy or a checkout (its params say so) reads nothing in this home
+        # (measured on the grid, 2026-10-03: a checkout's test worker held a conversion back)
+        with tempfile.TemporaryDirectory() as td:
+            shared, _ = make_shared(td)
+            fake_home = os.path.join(td, "home")
+            os.makedirs(fake_home)
+            home = os.path.join(td, "hpcw")
+            env = {"HPCW_HOME": posix(home), "HOME": posix(fake_home)}
+            rc, _, err = bash("bash '%s/bin/hpcworker' install --profile wayne" % posix(ROOT), env=env)
+            self.assertEqual(rc, 0, err)
+            prof = os.path.join(home, "profile.json")
+            with open(prof) as fh:
+                p = json.load(fh)
+            p["shared_state_dir"] = "$HOME/state"
+            with open(prof, "w") as fh:
+                json.dump(p, fh)
+            rd = os.path.join(fake_home, "state", "worker")
+            os.makedirs(rd)
+            other = os.path.join(td, "checkout")
+            os.makedirs(other)
+            with open(os.path.join(rd, "status.json"), "w") as fh:
+                fh.write('{"state": "online", "job": "40500019"}\n')
+            with open(os.path.join(rd, "next.id"), "w") as fh:
+                fh.write("40500020 40500019\n")
+            with open(os.path.join(rd, "params"), "w", newline="") as fh:
+                fh.write("RUN=worker\nHPCW_CODE=%s\n" % posix(other))
+            rc, out, err = self.install_shared(shared, home, fake_home=fake_home)
+            self.assertEqual(rc, 0, (out, err))
             self.assertIn("switched to the shared copy", out)
 
     def test_refusals_change_nothing(self):

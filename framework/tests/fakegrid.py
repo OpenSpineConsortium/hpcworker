@@ -112,6 +112,14 @@ def msys(path):
 
 def bash(script, stdin_text=None, env=None, cwd=None, timeout=300):
     e = dict(os.environ)
+    # every stand-in plays a login-node call, so what the suite's own surroundings would add is dropped:
+    # a run inside a compute-node job carried SLURM_JOB_ID into `browser-key add`, which rightly refuses
+    # a batch job (job 40554683, 2026-10-03), and a run under Claude Code carried its agent markers into
+    # every verb with a person's refusal. A test that wants one sets it through env=, which wins below.
+    for k in ("SLURM_JOB_ID", "PBS_JOBID", "LSB_JOBID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AI_AGENT",
+              "BEETHOVEN_REQUEST_ID", "BEETHOVEN_WORKER", "ASHLEY_REQUEST_ID", "ASHLEY_WORKER", "ASHLEY_JOB",
+              "HPCW_AGENT", "HPCW_GATE", "HPCW_GATE_SLOT", "SSH_ORIGINAL_COMMAND", "SSH_CONNECTION"):
+        e.pop(k, None)
     e["HPCW_PYTHON"] = PY
     e["MSYS_NO_PATHCONV"] = "1"
     e["MSYS2_ARG_CONV_EXCL"] = "*"
