@@ -38,7 +38,15 @@ SACCT=$(command -v sacct || echo /opt/hpcw/slurm/bin/sacct)
 CIROOT="${HPCW_CI_DIR:-/rs/rs_grp_oschome/$USER/hpcworker-ci}"
 CI="$CIROOT/${REPO//\//-}"
 mkdir -p "$CI" || die "cannot create $CI"
-if [ ! -d "$CI/src/.git" ]; then GH repo clone "$REPO" "$CI/src" -- -q || die "clone of $REPO failed"; fi
+# every git call speaks through the same gh sign-in: a ~/.gitconfig credential helper may hold
+# ANOTHER account's sign-in (measured 2026-10-03: the clone came through gh, then the plain fetch
+# went through a global `store` helper as a second account and read "Repository not found")
+HELPER="!env -u GITHUB_TOKEN -u GH_TOKEN $GHBIN auth git-credential"
+if [ ! -d "$CI/src/.git" ]; then
+  git -c credential.helper= -c "credential.helper=$HELPER" clone -q "https://github.com/$REPO.git" "$CI/src" || die "clone of $REPO failed"
+fi
+git -C "$CI/src" config --unset-all credential.helper 2>/dev/null
+git -C "$CI/src" config credential.helper '' && git -C "$CI/src" config --add credential.helper "$HELPER"
 git -C "$CI/src" fetch -q origin "$REF" || die "fetch of $REF failed"
 SHA=$(git -C "$CI/src" rev-parse FETCH_HEAD) || die "no commit for $REF"
 RUN="$CI/run-$SHA"
