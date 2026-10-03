@@ -18,6 +18,9 @@ echo "host $(hostname -s) $(date -u +%FT%TZ) python $(/usr/bin/python3 --version
 export TMPDIR=/tmp/$USER/hpcw_ci_$SLURM_JOB_ID; mkdir -p "$TMPDIR"; trap 'rm -rf "$TMPDIR"' EXIT
 # submitted by a person's terminal or a worker: either way the suite runs as a person's would
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT AI_AGENT GITHUB_TOKEN GH_TOKEN
-cd "$SLURM_SUBMIT_DIR/src" || exit 1
+# the job starts in the folder -D named (the run folder; the log lands there too). Not
+# $SLURM_SUBMIT_DIR: that is where sbatch was TYPED, and grid_ci.sh submits from wherever it
+# stands (measured: job 40555495 cd'd into the caller's checkout and found no src)
+cd src || exit 1
 HPCW_PYTHON=/usr/bin/python3 bash framework/tests/run.sh
 echo "exit $?"
