@@ -166,25 +166,55 @@ hpcw_progress_trim() { # RUN_DIR: keep the last 400 lines (a temporary file, the
 
 hpcw_strip_codes() { # stdin -> stdout: a terminal transcript without escape sequences, NULs or carriage returns
   # LC_ALL=C: under en_US.UTF-8, sed 4.2.2 (CentOS 7) matches none of the CSI sequences, because the
-  # byte range in the bracket expression follows the locale's collation (measured on warrior, 2026-09-29)
-  tr -d '\000' | LC_ALL=C sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g'
+  # byte range in the bracket expression follows the locale's collation (measured on warrior, 2026-09-29).
+  # The CSI expression uses | as its delimiter so its intermediate bytes are written [ -/] (space to slash,
+  # 0x20-0x2F). Framework 13 and older wrote [ -\/] inside s/.../: in a bracket expression a backslash is a
+  # literal, so GNU sed read the range as space to backslash (0x20-0x5C), and a sequence ending in a capital
+  # letter (ESC[K, ESC[G, ESC[1C, ESC[1A) took the next character with it as its final byte: "or ESC[K https://"
+  # lost the h, so the link was missed, and a name after ESC[2K lost its first letter (sed 4.8 and 4.9, 2026-10-03)
+  tr -d '\000' | LC_ALL=C sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's|\x1b\[[0-9;?]*[ -/]*[@-~]||g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g'
 }
 
-hpcw_parse_registration() { # stdin: Claude Code's terminal text, codes stripped -> NAME|URL|ENVIRONMENT_ID (empty when not printed yet)
-  # `claude remote-control` (2.1.283) prints, after the QR code:
+hpcw_complete_lines() { # stdin -> stdout: only the lines that end in a newline; a last line still being written (no newline yet) is left out
+  # bash builtins only. A NUL would end the read early, so this runs after hpcw_strip_codes, which removes them
+  local t=""
+  IFS= read -r -d '' t || true
+  case "$t" in
+    *$'\n') printf '%s' "$t";;
+    *$'\n'*) printf '%s\n' "${t%$'\n'*}";;
+  esac
+  return 0
+}
+
+hpcw_parse_registration() { # stdin: Claude Code's terminal text, codes stripped -> NAME|ENVIRONMENT_URL|ENVIRONMENT_ID|LINK (each empty when not printed yet)
+  # `claude remote-control` (2.1.283) prints, after the QR code, for a fresh registration:
   #     ·✔︎· Connected · phone · HEAD
   #         Capacity: 1/32 · New sessions will be created in the current directory
   #         asx10-hazy-meadow
   #     Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01XzAN32jsbL8W1PAFSvitBt
-  # The session name is the line after "Capacity:"; the link is the environment URL. The block may be
-  # redrawn, so the last occurrence of each wins.
-  awk '
+  # and, framework 14, when it resumes an earlier session (--continue; go2432's job 40554211, 2026-10-03):
+  #     Resuming session session_01N4R9mLRJ5wFbf1oaDe5pyj (43m ago)
+  #     Single session · exits when complete
+  #     Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R9mLRJ5wFbf1oaDe5pyj
+  # The session name is the line after "Capacity:". A link is either form, on claude.ai or claude.com,
+  # from whatever line it is on: ENVIRONMENT_URL is the last environment link, LINK the last link of either
+  # form (the one Claude Code's screen offers now). The block may be redrawn, so the last occurrence wins.
+  # Only complete lines are read (hpcw_complete_lines): a last line with no newline yet may be a link cut
+  # mid-write, https://claude.ai/code/session_01N4 of a longer id, which the pattern would take whole.
+  hpcw_complete_lines | awk '
     { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line) }
     /Capacity:/ { want = 1; next }
     want == 1 && line == "" { next }
     want == 1 { if (line ~ /^[a-z0-9]+(-[a-z0-9]+)+$/) name = line; want = 0 }
-    { if (match(line, /https:\/\/claude\.ai\/code\?environment=[A-Za-z0-9_-]+/)) url = substr(line, RSTART, RLENGTH) }
-    END { id = url; sub(/.*environment=/, "", id); printf "%s|%s|%s\n", name, url, id }'
+    {
+      rest = line
+      while (match(rest, /https:\/\/claude\.(ai|com)\/code(\?environment=[A-Za-z0-9_-]+|\/session_[A-Za-z0-9_-]+)/)) {
+        u = substr(rest, RSTART, RLENGTH); link = u
+        if (u ~ /\?environment=/) env = u
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+    END { id = env; sub(/.*environment=/, "", id); printf "%s|%s|%s|%s\n", name, env, id, link }'
 }
 
 hpcw_consent_seen() { # CLAUDE_CONFIG_DIR -> 0 when Claude Code itself recorded the student's answer to "Enable Remote Control?"

@@ -261,6 +261,27 @@ class Lines(Base):
         self.assertTrue(any(l.startswith("worker worker: online (job 40501234 on node07; heartbeat ") for l in lines), lines)
         self.assertIn("  session: asx1-a-b   open in Claude: https://claude.ai/code?environment=env_01X", lines)
 
+    def test_online_with_a_resumed_session_link(self):
+        # framework 14: a resumed session prints only its own link; the job writes it as session_url, and
+        # environment_url stays empty. worker status names it (framework 13 printed no link at all)
+        ses = "https://claude.ai/code/session_01N4R9mLRJ5wFbf1oaDe5pyj"
+        self.put(state="online", title="Wayne State grid", session_url=ses, environment_url="", environment_id="", session_name="Wayne State grid",
+                 submitted_at=iso(-300), online_at=iso(-120), updated_at=iso())
+        rc, out, err = self.g.run("worker status")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines(), ["Your worker is online (ready 3 min after you asked).", "Open in Claude: %s  Look for Wayne State grid." % ses])
+        rc, out, err = self.g.run("worker status --details")
+        self.assertIn("  session: Wayne State grid   open in Claude: %s" % ses, out.splitlines())
+        # both written: session_url is the link printed last, and it is the one named
+        env = "https://claude.ai/code?environment=env_01X"
+        self.put(state="online", title="Wayne State grid", session_url=ses, environment_url=env, submitted_at=iso(-300), online_at=iso(-120), updated_at=iso())
+        rc, out, err = self.g.run("worker status")
+        self.assertEqual(out.splitlines()[1], "Open in Claude: %s  Look for Wayne State grid." % ses)
+        # a session_url that is not a Claude Code link is passed over for the environment link
+        self.put(state="online", title="Wayne State grid", session_url="https://evil.example/code/session_1", environment_url=env, updated_at=iso())
+        rc, out, err = self.g.run("worker status")
+        self.assertEqual(out.splitlines()[1], "Open in Claude: %s  Look for Wayne State grid." % env)
+
 
 class StopInLine(Base):
     def test_stop_of_a_worker_still_in_line(self):
@@ -441,10 +462,10 @@ class Framework9Compat(Base):
         self.assertTrue(os.path.exists(os.path.join(rd, "stop")), "the stop file is the job's signal, as before")
         self.assertRegex(out, r"^worker worker: stopped \(no word from job 40500019 within 1s")
 
-    def test_version_says_13(self):
+    def test_version_says_14(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "13")
+        self.assertEqual(G.CURRENT_VERSION, "14")
 
 
 class SuccessorOfAnEndedJob(Base):

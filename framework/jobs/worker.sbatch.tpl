@@ -8,7 +8,7 @@
 # never the credential), queue its own successor so the worker is always on (one successor per
 # link, started by the scheduler when this job ends; a stop file ends the chain), start
 # `claude remote-control` inside the container under a pseudo-terminal (tmux, or `script` with a
-# held-open pipe), parse the session name and the environment link out of rc.log into
+# held-open pipe), parse the session name and the link (framework 14: either form) out of rc.log into
 # connection.json, heartbeat status.json every @HEARTBEAT_S@ s, and leave cleanly on SIGTERM
 # (wall time or preemption: the successor takes over) or the stop file (stopped, chain ended; a
 # TERM landing during that stop leaves the state stopped).
@@ -41,6 +41,14 @@
 # waiting for the Claude sign-in LOGIN_ABANDON_S after it began waiting (from its own start when it
 # started signed out) stops itself, cancels its queued successor and says why (stop_reason
 # login_abandoned), so an abandoned first run holds no slot.
+#
+# Framework 14. Claude Code prints one of two links: the environment link for a fresh registration
+# (https://claude.ai/code?environment=env_...), or, when it resumes an earlier session, that session's
+# link (https://claude.ai/code/session_..., "Single session · exits when complete"); claude.com for
+# either. Both count: session_url is the link printed (either form), environment_url the environment
+# link when one was printed, else "". Online needs one of them; the online message, progress.log's
+# "Online: <link>" and the job output name the link that exists. Until framework 14 a resumed session
+# went online with no link at all (go2432's job 40554211, 2026-10-03).
 #
 # The code: lib/ comes from HPCW_CODE, the directory the command that rendered this job ran from
 # (the lab's shared copy, by its numbered directory, or ~/.hpcworker); HPCW_HOME is the student's
@@ -99,7 +107,9 @@ if [ "$(prev_field job)" = "$JOB" ]; then SUBMITTED_AT=$(prev_field submitted_at
 if [ -s next.id ]; then read -r _nid _np < next.id || true; [ "${_nid:-}" = "$JOB" ] && RENEWAL=true; fi
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 # the session title (framework 10): the profile's session_title, "<title> · <name>" for a worker not named worker; Claude Code's --name
-STATE=starting; MESSAGE=""; REQUESTED_NAME="$TITLE"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""
+# framework 14: SESSION_URL is the link Claude Code printed (either form), ENV_URL the environment link when one was printed;
+# LINK_NOTED the link the last online status.json was written with, LINK_SAID the last one the job output named
+STATE=starting; MESSAGE=""; REQUESTED_NAME="$TITLE"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""; LINK_NOTED=""; LINK_SAID=""
 AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
 NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false; SCHED_INSIDE=false; SCHED_NOTE="off in the site profile"
 ONLINE_AT=""; STOP_REASON=""; NEED_LOGIN_SINCE=0; RC_STARTS=0
@@ -327,18 +337,27 @@ rc_stop() { # Ctrl-C first, so Remote Control deregisters; then end the session
   if [ "$USING_TMUX" = true ]; then tmux -S "$TMUX_SOCK" kill-server 2>/dev/null; else kill "$RC_PID" 2>/dev/null; fi
   RC_ALIVE=false
 }
-clean_tail() { # what claude printed since offset $1 (last 6000 bytes at most), without terminal codes
+clean_tail() { # what claude printed since offset $1 (last 6000 bytes at most), without terminal codes; with $2 = lines, only complete lines
+  # "lines" is for the registration parser: a last line still being written (no newline yet) may be a link cut
+  # mid-write. The prompt test and "Last output:" keep it, since a question waiting for its answer has no newline
   local size from=$1; size=$(stat -c %s rc.log 2>/dev/null || echo 0)
   [ $((size - from)) -gt 6000 ] && from=$((size - 6000))
-  tail -c +"$((from + 1))" rc.log 2>/dev/null | hpcw_strip_codes
+  if [ "${2:-}" = lines ]; then tail -c +"$((from + 1))" rc.log 2>/dev/null | hpcw_strip_codes | hpcw_complete_lines
+  else tail -c +"$((from + 1))" rc.log 2>/dev/null | hpcw_strip_codes; fi
 }
 last_line() { printf '%s' "$1" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-200; }
-note_registration() { # $1: cleaned tail -> SESSION_NAME / ENV_URL / ENV_ID from the "Connected" block; 0 when a link is known
-  local reg name url id; reg=$(printf '%s\n' "$1" | hpcw_parse_registration)
-  name=${reg%%|*}; url=${reg#*|}; url=${url%%|*}; id=${reg##*|}
+note_registration() { # $1: cleaned tail of complete lines (clean_tail OFFSET lines) -> SESSION_NAME, SESSION_URL (the link printed, either form), ENV_URL / ENV_ID (an environment link); 0 when a link is known
+  local reg name env id link rest; reg=$(printf '%s\n' "$1" | hpcw_parse_registration)
+  name=${reg%%|*}; rest=${reg#*|}; env=${rest%%|*}; rest=${rest#*|}; id=${rest%%|*}; link=${rest#*|}
   [ -n "$name" ] && SESSION_NAME="$name"
-  [ -n "$url" ] && { ENV_URL="$url"; ENV_ID="$id"; SESSION_URL="$url"; }
-  [ -n "$ENV_URL" ]
+  [ -n "$env" ] && { ENV_URL="$env"; ENV_ID="$id"; }
+  [ -n "$link" ] && SESSION_URL="$link"
+  [ -n "$SESSION_URL" ]
+}
+online_message() { # the sentence an online status.json carries: the link that exists (framework 14)
+  if [ -n "$SESSION_URL" ] && [ "$SESSION_URL" = "$ENV_URL" ]; then echo "Open in Claude: $SESSION_URL and find $SESSION_NAME (or tap Code in the Claude app)."
+  elif [ -n "$SESSION_URL" ]; then echo "Open in Claude: $SESSION_URL (or tap Code in the Claude app)."
+  else echo "Open in Claude: claude.ai/code and find $SESSION_NAME (or tap Code in the Claude app)."; fi
 }
 PROMPT_RE='\(y/n\)|\[y/n\]|\[Y/n\]|\[y/N\]|yes/no|Enable Remote Control'
 
@@ -425,24 +444,32 @@ while :; do
         [ "$STATE" = need_consent ] || { write_status need_consent "Claude Code asks once whether to enable Remote Control; answer it yourself with: hpcworker claude login (this job waits)"; say "waiting for consent"; }
       fi
     else
-      note_registration "$tail_txt" || true
+      note_registration "$(clean_tail "$RC_OFF" lines)" || true
       if printf '%s' "$tail_txt" | grep -q -i -E 'full-scope|must be logged in|not logged in|log in again|Please run /login|Invalid API key'; then
         [ "$STATE" = need_login ] || { write_status need_login "Claude Code says the sign-in on the grid is missing or expired; run: hpcworker claude login"; say "need_login"; }
       elif printf '%s' "$tail_txt" | grep -q -i "Couldn't verify Remote Control eligibility"; then
         [ "$STATE" = error ] || write_status error "Claude Code could not reach its feature-flag service from $NODE (Remote Control needs it); ask your center about outbound HTTPS from compute nodes"
       elif printf '%s' "$tail_txt" | grep -q -i 'Workspace not trusted'; then
         [ "$STATE" = error ] || write_status error "Claude Code refused the workspace as untrusted: run hpcworker claude login once more (it records the trust answer)"
-      elif [ -n "$ENV_URL" ] || printf '%s' "$tail_txt" | grep -q -E 'Connected ·|Capacity: [0-9]+/[0-9]+|claude\.ai/code'; then
+      elif [ -n "$SESSION_URL" ] || printf '%s' "$tail_txt" | grep -q -E 'Connected ·|Capacity: [0-9]+/[0-9]+|claude\.(ai|com)/code'; then
         # framework 10: this job's first registration with a link: online_at, progress.log and the
-        # job output's plain line (the node's local time), once per job
-        if [ -n "$ENV_URL" ] && [ -z "$ONLINE_AT" ]; then
+        # job output's plain line (the node's local time), once per job. Framework 14: the link is
+        # either form (SESSION_URL: an environment link, or a resumed session's own link)
+        if [ -n "$SESSION_URL" ] && [ -z "$ONLINE_AT" ]; then
           ONLINE_AT=$(date -u +%FT%TZ)
-          hpcw_progress "$RUN_DIR" "Online: $ENV_URL"
-          printf '%s Online. Open in Claude: %s\n' "$(date +%-H:%M)" "$ENV_URL"
-          [ "$STATE" = online ] && write_status online "$MESSAGE"
+          hpcw_progress "$RUN_DIR" "Online: $SESSION_URL"
+          printf '%s Online. Open in Claude: %s\n' "$(date +%-H:%M)" "$SESSION_URL"
         fi
-        if [ $ONLINE_NOTED = 0 ]; then ONLINE_NOTED=1; BACKOFF=10; write_connection; say "online: session $SESSION_NAME ${ENV_URL:+$ENV_URL}"; fi
-        [ "$STATE" = online ] && [ -n "$ENV_URL" ] || { write_status online "Open in Claude: ${ENV_URL:-claude.ai/code} and find $SESSION_NAME (or tap Code in the Claude app). $(last_line "$tail_txt")"; [ -n "$ENV_URL" ] && write_connection; }
+        if [ $ONLINE_NOTED = 0 ]; then ONLINE_NOTED=1; BACKOFF=10; write_connection; [ -n "$SESSION_URL" ] || say "online: session $SESSION_NAME (no link printed yet)"; fi
+        # the "online:" line of the job output, once for each link printed
+        if [ -n "$SESSION_URL" ] && [ "$SESSION_URL" != "$LINK_SAID" ]; then LINK_SAID="$SESSION_URL"; say "online: session $SESSION_NAME $SESSION_URL"; fi
+        # status.json (and connection.json with it) again whenever it does not carry the link there is now:
+        # not online yet, no link yet (the last line refreshed), or a link printed since (framework 14:
+        # before, a link printed after the first online write never reached the message)
+        if [ "$STATE" != online ] || [ -z "$SESSION_URL" ] || [ "$SESSION_URL" != "$LINK_NOTED" ]; then
+          write_status online "$(online_message) $(last_line "$tail_txt")"; LINK_NOTED="$SESSION_URL"
+          [ -n "$SESSION_URL" ] && write_connection
+        fi
       elif [ $(( $(now_s) - RC_STARTED )) -gt 60 ] && [ "$STATE" = starting ]; then
         write_status running "claude remote-control is running; no registration line recognised yet. Last output: $(last_line "$tail_txt")"
       fi
@@ -462,7 +489,7 @@ while :; do
     # while waiting for the sign-in, ask every minute (the panel's sign-in ends with a worker start or a wait for this)
     if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$LOGIN_RECHECK_S" ]; then check_auth; [ "$LOGGED_IN" = true ] && write_status starting "signed in; starting Remote Control"; fi
     if [ "$STATE" != need_login ] && [ "$LOGGED_IN" = true ] && [ "$(now_s)" -ge "$NEXT_START" ]; then
-      RESUMED=false; ONLINE_NOTED=0; ENV_URL=""; ENV_ID=""; SESSION_URL=""
+      RESUMED=false; ONLINE_NOTED=0; ENV_URL=""; ENV_ID=""; SESSION_URL=""; LINK_NOTED=""; LINK_SAID=""
       if resume_wanted; then RESUMED=true; RESUME_TRIED=1; start_rc --continue; write_status starting "starting Remote Control (resuming the previous session)"; else start_rc; write_status starting "starting Remote Control"; fi
     fi
   fi

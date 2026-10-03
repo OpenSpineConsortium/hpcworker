@@ -42,8 +42,10 @@
 
 hpcw_login_strip() { # stdin -> stdout: the transcript without escape sequences, NULs, carriage returns or any non-ASCII byte
   # LC_ALL=C: under a UTF-8 locale sed 4.2.2 matches none of the byte ranges; the tr drops the box
-  # drawing and tick marks the screen uses, so a link inside a box is a bare token afterwards
-  tr -d '\000' | LC_ALL=C sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g' | LC_ALL=C tr -d '\200-\377'
+  # drawing and tick marks the screen uses, so a link inside a box is a bare token afterwards. The CSI
+  # expression's intermediate bytes are [ -/] under a | delimiter: the [ -\/] of framework 13 and older was
+  # space to backslash in GNU sed, and ESC[K before a link took the link's h (hpcw_strip_codes, common.sh)
+  tr -d '\000' | LC_ALL=C sed -e 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' -e 's|\x1b\[[0-9;?]*[ -/]*[@-~]||g' -e 's/\x1b[()][A-Za-z0-9]//g' -e 's/\r//g' | LC_ALL=C tr -d '\200-\377'
 }
 
 hpcw_login_url() { # stdin: stripped text -> the first authorize link (an Anthropic domain, "oauth" and "authorize" in it), wrapped lines joined; nothing when absent

@@ -101,24 +101,96 @@ def with_cli(body, hpcw_home):
     return "export HPCW_HOME='%s'; source '%s/bin/hpcworker' && %s" % (posix(hpcw_home), posix(ROOT), body)
 
 
+ENV = "https://claude.ai/code?environment=env_01XzAN32jsbL8W1PAFSvitBt"
+SESSION = "https://claude.ai/code/session_01N4R9mLRJ5wFbf1oaDe5pyj"
+# framework 14: what Claude Code 2.1.283 printed when it resumed an earlier session (go2432's job 40554211,
+# 2026-10-03): the session's own link, no environment link and no "Capacity:" block
+RESUMED = (
+    "\x1b[2J\x1b[H\x1b[?25l"
+    "Resuming session session_01N4R9mLRJ5wFbf1oaDe5pyj (43m ago)\r\n"
+    "·✔︎· Connected · phone · HEAD\r\n"
+    "    Single session · exits when complete\r\n"
+    "Continue coding in the Claude mobile app or \x1b[4m" + SESSION + "\x1b[24m\r\n"
+)
+
+
 class Registration(unittest.TestCase):
-    def test_exact_output_parses(self):
-        rc, out, err = bash(with_common("hpcw_strip_codes | hpcw_parse_registration"), stdin_text=REGISTRATION)
+    """NAME|ENVIRONMENT_URL|ENVIRONMENT_ID|LINK (framework 14: LINK is the last link of either form)"""
+
+    def parse(self, text):
+        rc, out, err = bash(with_common("hpcw_strip_codes | hpcw_parse_registration"), stdin_text=text)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(out, "asx10-hazy-meadow|https://claude.ai/code?environment=env_01XzAN32jsbL8W1PAFSvitBt|env_01XzAN32jsbL8W1PAFSvitBt")
+        return out
+
+    def test_exact_output_parses(self):
+        # the environment form: a fresh registration; the link printed is the environment link
+        self.assertEqual(self.parse(REGISTRATION), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, ENV))
 
     def test_redrawn_block_last_wins(self):
         text = REGISTRATION.replace("asx10-hazy-meadow", "asx10-old-name").replace("env_01XzAN32jsbL8W1PAFSvitBt", "env_first") + REGISTRATION
-        rc, out, _ = bash(with_common("hpcw_strip_codes | hpcw_parse_registration"), stdin_text=text)
-        self.assertEqual((rc, out), (0, "asx10-hazy-meadow|https://claude.ai/code?environment=env_01XzAN32jsbL8W1PAFSvitBt|env_01XzAN32jsbL8W1PAFSvitBt"))
+        self.assertEqual(self.parse(text), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, ENV))
+
+    def test_the_session_form_alone(self):
+        # the resumed session: the link is the session's own; no environment link, no name block
+        self.assertEqual(self.parse(RESUMED), "|||" + SESSION)
+
+    def test_both_forms_the_last_printed_is_the_link(self):
+        # a registration, then a session link: the environment stays, the link is the session's
+        self.assertEqual(self.parse(REGISTRATION + RESUMED), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, SESSION))
+        # the other way round: the environment link is the last one printed
+        self.assertEqual(self.parse(RESUMED + REGISTRATION), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, ENV))
+        # both on one line, from whatever line they are on: left to right
+        self.assertEqual(self.parse("see %s, or %s.\n" % (ENV, SESSION)), "|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, SESSION))
+
+    def test_the_claude_com_host_for_both(self):
+        env = ENV.replace("claude.ai", "claude.com")
+        ses = SESSION.replace("claude.ai", "claude.com")
+        self.assertEqual(self.parse(RESUMED.replace("claude.ai", "claude.com")), "|||" + ses)
+        self.assertEqual(self.parse(REGISTRATION.replace("claude.ai", "claude.com")), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (env, env))
+
+    def test_lookalikes_are_no_link(self):
+        for text in ("http://claude.ai/code/session_01N4\n", "https://claude.ai/code/sessions\n", "https://claude.ai.evil.example/code/session_01N4\n",
+                     "https://claude.ai/code/session/abc\n", "https://claude.org/code?environment=env_01\n", "https://claude.ai/code?env=env_01\n"):
+            self.assertEqual(self.parse(text), "|||", text)
+
+    def test_a_cursor_code_right_before_the_link_or_the_name_takes_nothing_with_it(self):
+        # framework 14: hpcw_strip_codes' CSI intermediates are space to slash. Framework 13's [ -\/] was space to
+        # backslash in GNU sed, so a code ending in a capital letter took the next character as its final byte:
+        # "or ESC[K https://..." lost the h and no link was found; a name after ESC[2K lost its first letter
+        for code in ("\x1b[K", "\x1b[1C", "\x1b[2K", "\x1b[G", "\x1b[1A"):
+            for gap in ("", " "):
+                text = REGISTRATION.replace("    \x1b[1masx10-hazy-meadow", code + "    \x1b[1m" + code + "asx10-hazy-meadow").replace("or https://", "or " + code + gap + "https://")
+                self.assertEqual(self.parse(text), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, ENV), repr(code + gap))
+                resumed = RESUMED.replace("\x1b[4m" + SESSION, "\x1b[4m" + code + gap + SESSION)
+                self.assertEqual(self.parse(resumed), "|||" + SESSION, repr(code + gap))
+
+    def test_a_link_cut_mid_write_is_not_taken(self):
+        # framework 14: only complete lines are parsed. A last line with no newline yet may be a link still being
+        # written, and its first part has a link's shape: https://claude.ai/code/session_01N4 would be taken whole
+        cut = "Continue coding in the Claude mobile app or " + SESSION[:35]
+        self.assertEqual(self.parse(cut), "|||")
+        self.assertEqual(self.parse(RESUMED.replace(SESSION + "\x1b[24m\r\n", SESSION[:35])), "|||")
+        # a registration already printed stands; the cut link is not the link printed last
+        self.assertEqual(self.parse(REGISTRATION + cut), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, ENV))
+        # the rest of the line, with its newline: now it is a link
+        self.assertEqual(self.parse(REGISTRATION + cut + SESSION[35:] + "\r\n"), "asx10-hazy-meadow|%s|env_01XzAN32jsbL8W1PAFSvitBt|%s" % (ENV, SESSION))
+        # an environment link cut the same way, a carriage return without its newline, and a name line not finished
+        self.assertEqual(self.parse("or " + ENV[:-6]), "|||")
+        self.assertEqual(self.parse("or " + ENV + "\r"), "|||")
+        self.assertEqual(self.parse("Capacity: 1/32\n    asx10-hazy"), "|||")
+
+    def test_complete_lines_only(self):
+        for text, want in (("a\nb\n", "a\nb\n|END"), ("a\nb", "a\n|END"), ("ab", "|END"), ("", "|END"), ("a\n\nb", "a\n\n|END"), ("\n", "\n|END")):
+            rc, out, err = bash(with_common("{ hpcw_complete_lines; echo '|END'; }"), stdin_text=text)
+            self.assertEqual((rc, out), (0, want.strip()), repr(text))
 
     def test_nothing_yet(self):
         rc, out, _ = bash(with_common("hpcw_parse_registration"), stdin_text="Starting Remote Control...\nYou must be logged in to use Remote Control\n")
-        self.assertEqual((rc, out), (0, "||"))
+        self.assertEqual((rc, out), (0, "|||"))
 
     def test_prose_after_capacity_is_not_a_name(self):
         rc, out, _ = bash(with_common("hpcw_parse_registration"), stdin_text="Capacity: 1/32\nSomething Else Entirely\n")
-        self.assertEqual((rc, out), (0, "||"))
+        self.assertEqual((rc, out), (0, "|||"))
 
 
 class Consent(unittest.TestCase):

@@ -15,6 +15,34 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**Framework 14: a resumed session's link.** Claude Code prints one of two links. A fresh registration
+prints the environment link, `https://claude.ai/code?environment=env_...`. When the job resumes an earlier
+session (`claude remote-control --continue`, a successor or a restart within four hours), Claude Code
+2.1.283 prints "Resuming session session_... (43m ago)", "Single session · exits when complete" and that
+session's own link, `https://claude.ai/code/session_...`, and no environment link. Until framework 14 the
+job's parser knew only the environment form, so on 2026-10-03 go2432's job 40554211 resumed a session and
+wrote `status.json` as `online` with `environment_url` and `session_url` both empty: Beethoven, which also
+knew only that form, showed "Starting · Connecting to Claude…" for a worker that was online. Now the
+parser (`hpcw_parse_registration`, `lib/adapters/common.sh`) takes either form, on `claude.ai` or
+`claude.com`, from whatever line it is on, the last one printed winning. `status.json` and
+`connection.json` carry `session_url` = the link printed (either form), `environment_url` = the
+environment link when one was printed, else "", and `environment_id` as before, or "". The online message
+names the link that exists ("Open in Claude: <environment link> and find <name> …" or "Open in Claude:
+<session link> (or tap Code in the Claude app)."), as do `progress.log`'s "Online: <link>", the job
+output's "<H:MM> Online. Open in Claude: <link>" and its "online: session <name> <link>" line; a link
+printed after the first online write is written again (before, the message kept "claude.ai/code"). `worker
+status`, `worker watch` (text and `--json`, which also counts a change of `session_url` as a change) and
+`diag` take the link from `session_url` when it is a Claude Code link, else from `environment_url`
+(`run_link`), so a framework 13 job's files read as before. Two fixes on the same path: the escape-code
+filter (`hpcw_strip_codes`, and `hpcw_login_strip` in `lib/login_plain.sh`) wrote the CSI intermediates as
+`[ -\/]` inside `s/.../`, which GNU sed reads as space to backslash (in a bracket expression a backslash is
+a literal), so a code ending in a capital letter (ESC[K, ESC[G, ESC[1C, ESC[1A) took the next character
+with it: "or ESC[K https://…" lost its h and the link was missed, and a name after ESC[2K lost its first
+letter. It is now `[ -/]` under a `|` delimiter. And the parser reads complete lines only
+(`hpcw_complete_lines`; the job's `clean_tail OFFSET lines`): a last line with no newline yet may be a link
+cut mid-write, whose first part already has a link's shape. The consent prompt test and "Last output:"
+still see that last line, since a question waiting for its answer has no newline. `VERSION` is 14.
+
 **A chain whose next job is gone (framework 13).** A job that ends at its wall time, is preempted or is
 cancelled writes `preempted` into `status.json`, naming the successor it queued in `next_job`. Until
 framework 13 nobody asked whether that successor still existed, so a successor cancelled on its own left
@@ -273,7 +301,8 @@ and then again every minute while it waits.
 `login`, `consent`, `nothing`: the one thing the student must do now; `consent` is set as soon as no
 record exists while the job is on its way, so the panel can write the marker before Claude Code
 asks) and `hint` (one sentence in plain words for that). `connection.json` keeps `session_name` and
-`environment_url`; `hpcworker worker status` prints the environment link. Version 10's fields are in
+`environment_url` (framework 14: and `session_url`, the link printed, either form); `hpcworker worker
+status` prints that link. Version 10's fields are in
 "Where a worker is" below.
 
 ## The extension's line: `hpcworker connect` (version 10)
@@ -733,7 +762,7 @@ change and nothing else:
 ```
 
 A status line (the fields of `worker status --json`, after `event` and `final`) comes at the start, each
-time the worker's `state`, `needs`, `job`, `node`, `environment_url`, `message`, `scheduler_state`,
+time the worker's `state`, `needs`, `job`, `node`, `environment_url`, `session_url` (framework 14), `message`, `scheduler_state`,
 `reason`, `expected_start`, `next_job` or `stop_reason` changes (a heartbeat alone is no change), and at
 the end with `final: true`. A keepalive line comes when 20 s pass with nothing written. `status.json` is
 read every 5 s with bash builtins alone (no process is started for the look); the scheduler is asked at
@@ -1086,7 +1115,8 @@ the id that queued it), `chain.log`, `node`, `progress.log` (version 10), `statu
 `need_consent`, `running`, `online`, `stopped`, `preempted`, `error`; `needs` and `hint` for the
 panel; heartbeat every 30 s;
 `claude_login` carries `loggedIn`, `email`, `subscriptionType` and nothing else; `session_name`,
-`environment_url`, `environment_id`, `requested_name`, `consent`, `consent_source`,
+`session_url` (framework 14: the link printed, either form), `environment_url` (the environment link, or
+""), `environment_id`, `requested_name`, `consent`, `consent_source`,
 `workspace_trusted`, `chain`, `next_job`, `chain_note`), `connection.json` (the same session fields
 plus node, job, pid, token path, permission mode, capacity), `rc.log` (Claude Code's terminal),
 `job.token` (0600), `in_image.sh` and `launch.sh` (the exact command lines the job ran), `stop`
@@ -1098,7 +1128,15 @@ The registration block Claude Code 2.1.283 prints, and what the job takes from i
 ·✔︎· Connected · phone · HEAD
     Capacity: 1/32 · New sessions will be created in the current directory
     asx10-hazy-meadow                                  -> session_name
-Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01X...   -> environment_url, environment_id
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01X...   -> environment_url, environment_id, session_url
+```
+
+and, framework 14, when it resumes an earlier session:
+
+```
+Resuming session session_01N4R9mLRJ5wFbf1oaDe5pyj (43m ago)
+    Single session · exits when complete
+Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R9mLRJ5wFbf1oaDe5pyj   -> session_url (environment_url "")
 ```
 
 ## Adding a university

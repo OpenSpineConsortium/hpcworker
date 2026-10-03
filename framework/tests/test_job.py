@@ -23,6 +23,7 @@ import fakegrid as G
 
 LINUX = os.name != "nt" and all(shutil.which(t) for t in ("mkfifo", "timeout")) and (shutil.which("tmux") or shutil.which("script"))
 ENV_URL = "https://claude.ai/code?environment=env_01XzAN32jsbL8W1PAFSvitBt"
+SESSION_URL = "https://claude.ai/code/session_01N4R9mLRJ5wFbf1oaDe5pyj"
 
 FAKE_APPTAINER = r"""#!/bin/bash
 # a container runtime that runs its command here: exec [binds] IMAGE CMD...
@@ -38,10 +39,29 @@ case "$1 ${2:-}" in
   "remote-control --help") echo "Usage: claude remote-control [options]  --name <name> --capacity <n> --continue --permission-mode <mode>";;
   remote-control*)
     printf '\033[2J\033[H'
-    printf '\xc2\xb7\xe2\x9c\x94\xef\xb8\x8e\xc2\xb7 Connected \xc2\xb7 phone \xc2\xb7 HEAD\r\n'
-    printf '    Capacity: 1/32 \xc2\xb7 New sessions will be created in the current directory\r\n'
-    printf '    asx10-hazy-meadow\r\n'
-    printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_ENV_URL"
+    if [ "${FAKE_RC_FORM:-environment}" = session ]; then
+      # framework 14: what 2.1.283 printed when it resumed an earlier session (job 40554211, 2026-10-03)
+      printf 'Resuming session %s (43m ago)\r\n' "${FAKE_SESSION_URL##*/}"
+      printf '\xc2\xb7\xe2\x9c\x94\xef\xb8\x8e\xc2\xb7 Connected \xc2\xb7 phone \xc2\xb7 HEAD\r\n'
+      printf '    Single session \xc2\xb7 exits when complete\r\n'
+      printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_SESSION_URL"
+    elif [ "${FAKE_RC_FORM:-}" = cut ]; then
+      # framework 14: the resumed block with its link line in two writes 12 s apart (two of the job's looks),
+      # and an erase code right before the link
+      printf 'Resuming session %s (43m ago)\r\n' "${FAKE_SESSION_URL##*/}"
+      printf '\xc2\xb7\xe2\x9c\x94\xef\xb8\x8e\xc2\xb7 Connected \xc2\xb7 phone \xc2\xb7 HEAD\r\n'
+      printf '    Single session \xc2\xb7 exits when complete\r\n'
+      printf 'Continue coding in the Claude mobile app or \033[K%s' "${FAKE_SESSION_URL:0:35}"
+      sleep "${FAKE_CUT_S:-12}"
+      printf '%s\r\n' "${FAKE_SESSION_URL:35}"
+    else
+      printf '\xc2\xb7\xe2\x9c\x94\xef\xb8\x8e\xc2\xb7 Connected \xc2\xb7 phone \xc2\xb7 HEAD\r\n'
+      printf '    Capacity: 1/32 \xc2\xb7 New sessions will be created in the current directory\r\n'
+      printf '    asx10-hazy-meadow\r\n'
+      printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_ENV_URL"
+      # both forms: the environment link, then a session's own
+      [ "${FAKE_RC_FORM:-}" = both ] && printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_SESSION_URL"
+    fi
     exec sleep 600;;
   *) echo "fake claude: $*" >&2; exit 2;;
 esac
@@ -86,10 +106,12 @@ class Job(unittest.TestCase):
         subprocess.run(["bash", "-c", "pkill -f '%s' 2>/dev/null; true" % self.td])
         shutil.rmtree(self.td, ignore_errors=True)
 
+    rc_form = "environment"
+
     def env(self):
         e = dict(os.environ)
         e.update(HOME=self.home, USER="st1234", SLURM_JOB_ID=self.JOB, FAKE_SCHED_DIR=self.g.sched, FAKE_LOGGED_IN=self.logged_in,
-                 FAKE_ENV_URL=ENV_URL, PATH=self.g.bin + ":" + e["PATH"], HPCW_PYTHON=sys.executable)
+                 FAKE_ENV_URL=ENV_URL, FAKE_SESSION_URL=SESSION_URL, FAKE_RC_FORM=self.rc_form, PATH=self.g.bin + ":" + e["PATH"], HPCW_PYTHON=sys.executable)
         for k in ("TMUX", "CLAUDECODE"):
             e.pop(k, None)
         return e
@@ -159,6 +181,9 @@ class Job(unittest.TestCase):
             self.assertEqual(self.epoch(s["ends_at"]) - self.epoch(s["got_computer_at"]), 8 * 3600, "got_computer_at + the job's hours")
             self.assertGreaterEqual(self.epoch(s["online_at"]), self.epoch(s["got_computer_at"]))
             self.assertEqual(s["environment_url"], ENV_URL)
+            # framework 14, the environment form: the link printed is the environment link, and the message names it
+            self.assertEqual((s["session_url"], s["environment_id"]), (ENV_URL, "env_01XzAN32jsbL8W1PAFSvitBt"))
+            self.assertTrue(s["message"].startswith("Open in Claude: %s and find asx10-hazy-meadow (or tap Code in the Claude app)." % ENV_URL), s["message"])
             self.assertNotIn("stop_reason", s)
             for key in ("version", "site", "run", "job", "node", "pid", "state", "message", "needs", "hint", "started_at", "updated_at", "session_name", "requested_name",
                         "session_url", "environment_url", "environment_id", "claude_login", "consent", "consent_source", "workspace_trusted", "rc_alive", "resumed",
@@ -181,7 +206,85 @@ class Job(unittest.TestCase):
         self.assertEqual(self.progress()[-1], "Stopped")
         self.assertTrue(os.path.exists(os.path.join(self.rd, "stop.done")))
         self.assertRegex(out, r"(?m)^\d{1,2}:\d\d Online\. Open in Claude: %s$" % re.escape(ENV_URL))
+        self.assertRegex(out, r"(?m) online: session asx10-hazy-meadow %s$" % re.escape(ENV_URL))
         self.assertIn("scancel 40501234", self.g.calls(), "the successor the job queued is cancelled by the stop")
+
+    def run_online(self, link):
+        """the job, signed in, until online with LINK; then stopped. -> (status.json, connection.json, progress, job output) while online"""
+        open(self.logged_in, "w").close()
+        self.render()
+        self.queued_file()
+        proc = self.start_job()
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online" and self.status()["online_at"] and self.status()["session_url"] == link, 90), "online within 90 s")
+            s = self.status()
+            with open(os.path.join(self.rd, "connection.json")) as fh:
+                c = json.load(fh)
+            progress = self.progress()
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual((proc.returncode, self.status()["state"]), (0, "stopped"), out)
+        return s, c, progress, out
+
+    def test_a_resumed_session_link_brings_it_online(self):
+        # framework 14: Claude Code resumed an earlier session and printed only that session's link (job
+        # 40554211, 2026-10-03). Framework 13 went online with no link at all, and the panel waited for good.
+        self.rc_form = "session"
+        s, c, progress, out = self.run_online(SESSION_URL)
+        self.assertEqual((s["session_url"], s["environment_url"], s["environment_id"]), (SESSION_URL, "", ""))
+        self.assertTrue(s["message"].startswith("Open in Claude: %s (or tap Code in the Claude app)." % SESSION_URL), s["message"])
+        self.assertNotIn("claude.ai/code and find", s["message"])
+        self.assertEqual(s["session_name"], "Wayne State grid", "no name block: the requested title stands")
+        self.assertEqual((c["session_url"], c["environment_url"], c["environment_id"], c["online_at"]), (SESSION_URL, "", "", s["online_at"]))
+        self.assertEqual(progress[-1], "Online: " + SESSION_URL)
+        self.assertRegex(out, r"(?m)^\d{1,2}:\d\d Online\. Open in Claude: %s$" % re.escape(SESSION_URL))
+        self.assertRegex(out, r"(?m) online: session Wayne State grid %s$" % re.escape(SESSION_URL))
+
+    def test_both_forms_the_session_link_printed_last_is_the_link(self):
+        self.rc_form = "both"
+        s, c, progress, out = self.run_online(SESSION_URL)
+        self.assertEqual((s["session_url"], s["environment_url"], s["environment_id"]), (SESSION_URL, ENV_URL, "env_01XzAN32jsbL8W1PAFSvitBt"))
+        self.assertTrue(s["message"].startswith("Open in Claude: %s (or tap Code in the Claude app)." % SESSION_URL), s["message"])
+        self.assertEqual((c["session_url"], c["environment_url"]), (SESSION_URL, ENV_URL))
+        # progress.log says "Online: <link>" once a job, with the first link the job read (both lines are printed at once)
+        self.assertIn(progress[-1], ("Online: " + SESSION_URL, "Online: " + ENV_URL))
+
+    def test_a_link_cut_mid_write_is_never_the_link(self):
+        # framework 14: the parser reads complete lines only. The link line comes in two writes 12 s apart, with ESC[K
+        # right before the link, so for two of the job's looks rc.log ends in https://claude.ai/code/session_01N4,
+        # which has a link's shape. The job is online without a link meanwhile, then names the whole link, once.
+        # (Framework 13's sed took the link's h with the ESC[K, and the whole link was never found either.)
+        self.rc_form = "cut"
+        cut = SESSION_URL[:35]
+        open(self.logged_in, "w").close()
+        self.render()
+        self.queued_file()
+        proc = self.start_job()
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online", 60), "online, with no link yet, within 60 s")
+            self.assertEqual((self.status()["session_url"], self.status()["environment_url"]), ("", ""), "the cut link is not taken")
+            def conn():
+                with open(os.path.join(self.rd, "connection.json")) as fh:
+                    return json.load(fh)
+            # connection.json is written right after status.json: wait for both
+            self.assertTrue(self.wait_for(lambda: self.status()["session_url"] == SESSION_URL and conn()["session_url"] == SESSION_URL, 60), "the whole link within 60 s")
+            s = self.status()
+            c = conn()
+            progress = self.progress()
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertTrue(s["message"].startswith("Open in Claude: %s (or tap Code in the Claude app)." % SESSION_URL), s["message"])
+        self.assertEqual(c["session_url"], SESSION_URL)
+        self.assertEqual([p for p in progress if p.startswith("Online")], ["Online: " + SESSION_URL])
+        self.assertRegex(out, r"(?m) online: session Wayne State grid %s$" % re.escape(SESSION_URL))
+        self.assertNotRegex(out, r"(?m)%s$" % re.escape(cut))
 
     def test_signed_out_job_stops_itself(self):
         self.render(LOGIN_ABANDON_S="3")

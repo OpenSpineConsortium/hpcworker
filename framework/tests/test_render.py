@@ -122,10 +122,14 @@ class Render(RenderBase):
             self.assertIn('"%s":%%s' % key, text, key)
         self.assertIn('"title":%s,"online_at":%s}', text, "connection.json")
         self.assertIn('stop_reason', text)
-        for line in ("Got a computer", "Connecting to Claude", "Online: $ENV_URL", "Waiting for your Claude sign-in", "Reconnecting", "Renewing", "Ended", "Stopped",
+        # framework 14: the link printed, either form (SESSION_URL), not only an environment link
+        for line in ("Got a computer", "Connecting to Claude", "Online: $SESSION_URL", "Waiting for your Claude sign-in", "Reconnecting", "Renewing", "Ended", "Stopped",
                      "Stopped: waiting for your Claude sign-in timed out", "Couldn't start: $MESSAGE"):
             self.assertIn('hpcw_progress "$RUN_DIR" "%s"' % line, text, line)
-        self.assertIn("printf '%s Online. Open in Claude: %s\\n' \"$(date +%-H:%M)\" \"$ENV_URL\"", text)
+        self.assertIn("printf '%s Online. Open in Claude: %s\\n' \"$(date +%-H:%M)\" \"$SESSION_URL\"", text)
+        # framework 14: the parser and the message take either link form
+        self.assertIn("note_registration", text)
+        self.assertIn("online_message", text)
         self.assertIn("if abandon_due; then login_abandon; fi", text)
         self.assertIn("within four hours", text)
         self.assertNotIn("seven days", text)

@@ -146,6 +146,20 @@ class Lines(Base):
                          [("need_login", "login", False), ("online", "nothing", True)])
         self.assertEqual(self.squeues(), [], "nothing asked of the scheduler once the job has a computer")
 
+    def test_online_with_a_resumed_session_link_is_the_end(self):
+        # framework 14: the session form alone (environment_url "") ends the watch as online, and a change of
+        # link is a change worth a line
+        ses = "https://claude.ai/code/session_01N4R9mLRJ5wFbf1oaDe5pyj"
+        self.put(self.queued(state="running", node="asx15", message="connecting"))
+        rc, lines, err = self.watch(steps=[(2.5, self.queued(state="online", node="asx15", session_url=ses, environment_url=""))])
+        self.assertEqual(rc, 0, err)
+        status = [o for _, o in lines if o["event"] == "status"]
+        self.assertEqual([(o["status"]["state"], o["final"]) for o in status], [("running", False), ("online", True)])
+        self.assertEqual(status[-1]["status"]["session_url"], ses)
+        rc, out, err = self.g.run("worker watch --name worker --minutes 1")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[-1], "Open in Claude: %s  Look for Wayne State grid." % ses)
+
     def test_online_without_its_link_is_not_the_end(self):
         self.put(self.queued(state="online", node="asx15"))
         rc, lines, err = self.watch(steps=[(2.5, self.queued(state="online", node="asx15", environment_url="https://claude.ai/code?environment=env_01X"))])

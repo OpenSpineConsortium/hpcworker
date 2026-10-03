@@ -61,7 +61,7 @@
 # through the gate, and the gate only removes that line (forget, or past the site's expiry). Nothing
 # reached through the gate ever starts a Claude sign-in. Versions are integers.
 set -uo pipefail
-VERSION=13
+VERSION=14
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -950,7 +950,7 @@ watch_run() { # RUN_DIR NAME MINUTES SEEN [ASKED_AT]: follow a worker until it i
     st=$(read_field "$rd/status.json" state 2>/dev/null)
     case "$st" in
       online)
-        url=$(read_field "$rd/status.json" environment_url); title=$(read_field "$rd/status.json" title)
+        url=$(run_link "$rd/status.json"); title=$(read_field "$rd/status.json" title)
         if [ -n "$url" ]; then say "$(status_line "$rd")"; say "Open in Claude: $url  Look for ${title:-$(session_title_for "$name")}."; return 0; fi;;
       stopped|error) say "$(status_line "$rd")"; return 1;;
       preempted) [ -z "$(read_field "$rd/status.json" next_job)" ] && [ -z "$(next_job_of "$rd")" ] && { say "$(status_line "$rd")"; return 1; };;
@@ -969,7 +969,7 @@ status_json() { # RUN_DIR NAME PREFIX: `worker status --json`'s one line (v 1, f
   printf '{"v":1,%s"run":%s,"job":%s,"next_job":%s,"state_dir":%s,"status":%s,"connection":%s,"scheduler":%s,"line":%s}\n' "$3" "$(json_str "$name")" "$(json_str "$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" \
     "$(json_str "$STATE_DIR")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)" "$SCHED_JSON" "$(json_str "$(status_line "$rd")")"
 }
-WATCH_KEYS="state needs job node environment_url message scheduler_state reason expected_start next_job stop_reason"
+WATCH_KEYS="state needs job node environment_url session_url message scheduler_state reason expected_start next_job stop_reason"
 WSIG=""; WSTATE=""
 watch_sig() { # RUN_DIR -> WSIG, the fields whose change is worth a line, joined, and WSTATE, the state (bash
   # builtins only, no process started: this runs every 5 s for as long as the watch lasts)
@@ -1017,7 +1017,7 @@ watch_json() { # RUN_DIR NAME MINUTES FLOOR_S: framework 11, `worker watch --jso
     sig="$WSIG"
     fin=""; code=""
     case "$st" in
-      online) url=$(read_field "$rd/status.json" environment_url); [ -n "$url" ] && { fin=true; code=0; };;
+      online) url=$(run_link "$rd/status.json"); [ -n "$url" ] && { fin=true; code=0; };;
       stopped|error) fin=true; code=1;;
       preempted) [ -z "$(read_field "$rd/status.json" next_job)" ] && [ -z "$(next_job_of "$rd")" ] && { fin=true; code=1; };;
     esac
@@ -1041,6 +1041,19 @@ read_field() { # FILE KEY -> string value (python-free; strings and simple scala
   tr -d '\n' < "$1" | grep -o "\"$2\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$2\": *//" -e 's/^"//' -e 's/"$//'
 }
 next_job_of() { [ -s "$1/next.id" ] && awk '{print $1; exit}' "$1/next.id"; return 0; }
+run_link() { # STATUS_OR_CONNECTION_FILE -> the link to open, nothing when there is none (framework 14). Claude Code
+  # prints an environment link for a fresh registration and a session link when it resumes a session; the job
+  # writes the one printed as session_url (either form) and the environment link, when printed, as
+  # environment_url. A framework 13 job wrote both the same, or both "".
+  local u
+  u=$(read_field "$1" session_url 2>/dev/null) || u=""
+  case "$u" in
+    https://claude.ai/code\?environment=*|https://claude.com/code\?environment=*|https://claude.ai/code/session_*|https://claude.com/code/session_*) printf '%s' "$u"; return 0;;
+  esac
+  u=$(read_field "$1" environment_url 2>/dev/null) || u=""
+  [ -n "$u" ] && printf '%s' "$u"
+  return 0
+}
 # framework 10: one `worker start` at a time per worker. mkdir is atomic on every file system the state
 # directory may live on (NFS, Lustre, CephFS); a lock older than five minutes belongs to a start that was
 # killed, and goes. The lock holds only the scheduler check, the render and the submit (seconds).
@@ -1178,7 +1191,7 @@ EOT
       say "$(status_line "$rd")"
       if [ -s "$sj" ]; then
         local pst purl ptitle page; pst=$(read_field "$sj" state)
-        if [ "$pst" = online ] && purl=$(read_field "$sj" environment_url) && [ -n "$purl" ]; then ptitle=$(read_field "$sj" title); say "Open in Claude: $purl  Look for ${ptitle:-$(session_title_for "$name")}."; fi
+        if [ "$pst" = online ] && purl=$(run_link "$sj") && [ -n "$purl" ]; then ptitle=$(read_field "$sj" title); say "Open in Claude: $purl  Look for ${ptitle:-$(session_title_for "$name")}."; fi
         page=$(( $(date +%s) - $(stat -c %Y "$sj") ))
         case "$pst" in starting|running|online|need_login|need_consent) [ "$page" -gt 180 ] && say "(hpcworker worker status --details says more.)";; esac
       fi
@@ -1190,7 +1203,7 @@ EOT
       age=$(( $(date +%s) - $(stat -c %Y "$sj") ))
       say "worker $name: $st (job $(read_field "$sj" job) on $(read_field "$sj" node); heartbeat ${age}s ago at $upd)"
       say "  $(read_field "$sj" message)"
-      say "  session: $(read_field "$sj" session_name)   open in Claude: $(read_field "$sj" environment_url)"
+      say "  session: $(read_field "$sj" session_name)   open in Claude: $(run_link "$sj")"
       say "  signed in: $(tr -d '\n' < "$sj" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false') $(tr -d '\n' < "$sj" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4); consent recorded: $(read_field "$sj" consent) ($(read_field "$sj" consent_source)); restarts: $(read_field "$sj" restarts)"
       say "  always on: $(read_field "$sj" chain); next job: ${nid:-none} $(read_field "$sj" chain_note)"
       local sn; sn=$(read_field "$sj" scheduler_note)
@@ -1913,7 +1926,7 @@ cmd_diag() {
   local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/status.json" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
     local st age nid; st=$(read_field "$d/status.json" state); age=$(( $(date +%s) - $(stat -c %Y "$d/status.json") )); nid=$(next_job_of "$d")
     case "$st" in
-      online) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true false false "online: job $(read_field "$d/status.json" job) on $(read_field "$d/status.json" node), session $(read_field "$d/status.json" session_name) $(read_field "$d/status.json" environment_url)${nid:+; next job $nid queued}" || emit "hpcw.worker.$n" false false false "last said online ${age}s ago; the job has probably ended (${nid:+job $nid is queued to take over; }hpcworker worker start --name $n)";;
+      online) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true false false "online: job $(read_field "$d/status.json" job) on $(read_field "$d/status.json" node), session $(read_field "$d/status.json" session_name) $(run_link "$d/status.json")${nid:+; next job $nid queued}" || emit "hpcw.worker.$n" false false false "last said online ${age}s ago; the job has probably ended (${nid:+job $nid is queued to take over; }hpcworker worker start --name $n)";;
       starting|running) [ "$age" -lt 120 ] && emit "hpcw.worker.$n" true true false "$st: $(read_field "$d/status.json" message)" || emit "hpcw.worker.$n" false false false "stale ($st, ${age}s): $(read_field "$d/status.json" message)";;
       need_consent|need_login) emit "hpcw.worker.$n" false false false "$st: $(read_field "$d/status.json" message)";;
       queued) emit "hpcw.worker.$n" true true false "in line for a computer: job $(read_field "$d/status.json" job), asked at $(read_field "$d/status.json" submitted_at)${nid:+; next job $nid queued}";;

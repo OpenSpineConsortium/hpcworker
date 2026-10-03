@@ -84,6 +84,14 @@ class LinkFinder(unittest.TestCase):
         text = "\x1b[2J\x1b[H│ \x1b[1m%s\x1b[22m │\r\n│ Paste code here if prompted > │\r\n" % URL
         self.assertEqual(self.find(text), URL)
 
+    def test_an_erase_code_right_before_the_link_takes_nothing_with_it(self):
+        # framework 14: the CSI intermediates are space to slash. Framework 13's [ -\/] was space to backslash in GNU
+        # sed, so ESC[K right before the link (or before a space and the link) took the link's h, and none was found
+        for code in ("\x1b[K", "\x1b[2K", "\x1b[1C", "\x1b[G"):
+            for gap in ("", " "):
+                text = "Browser didn't open? Use the url below to sign in:\r\n\r\n%s%s%s\r\n\r\nPaste code here if prompted > " % (code, gap, URL)
+                self.assertEqual(self.find(text), URL, repr(code + gap))
+
     def test_wrapped_over_two_lines_is_joined(self):
         text = "%s\n%s\n\nPaste code here if prompted >\n" % (URL[:150], URL[150:])
         self.assertEqual(self.find(text), URL)
