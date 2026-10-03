@@ -8,7 +8,7 @@
 # shell starts with no locale, the grid's own condition; tests/run.sh picks a UTF-8 one itself.
 set -uo pipefail
 sed -i -e 's|^mirrorlist=|#mirrorlist=|' -e 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|' /etc/yum.repos.d/CentOS-*.repo
-yum install -q -y python3 openssh > /dev/null || { echo "yum install failed"; exit 1; }
+yum install -q -y python3 openssh openssh-clients > /dev/null || { echo "yum install failed"; exit 1; }
 /usr/bin/python3 --version; bash --version | head -1; ssh-keygen -h 2>&1 | head -1 || true
 useradd -m ci || exit 1
 # the runner's bind mount stays root-owned; the suite runs in the ci user's own copy
