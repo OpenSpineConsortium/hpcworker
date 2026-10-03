@@ -409,9 +409,14 @@ class GuardedRemove(unittest.TestCase):
             gone2 = os.path.join(td, "hpcw_probe_9")
             for d in (keep, gone, gone2):
                 os.makedirs(d)
-            rc, _, err = bash(with_common("hpcw_rm_own_tmp '%s' '%s' '%s' '' /" % (posix(keep), posix(gone), posix(gone2))))
+            # under an hpcw_-named folder, as when a suite's own TMPDIR is hpcw_ci_<job>: only the last
+            # component may decide (job 40555616: the old anywhere-match removed this one)
+            nested = os.path.join(td, "hpcw_ci_7", "claude")
+            os.makedirs(nested)
+            rc, _, err = bash(with_common("hpcw_rm_own_tmp '%s' '%s' '%s' '%s' '' /" % (posix(keep), posix(gone), posix(gone2), posix(nested))))
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.isdir(keep), "a directory that is not per-job must survive")
+            self.assertTrue(os.path.isdir(nested), "the last component alone decides, not a folder on the way")
             self.assertFalse(os.path.exists(gone))
             self.assertFalse(os.path.exists(gone2))
             self.assertIn("REFUSING", err)

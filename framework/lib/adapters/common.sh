@@ -106,10 +106,15 @@ hpcw_rm_own_tmp() { # PATH... : remove ONLY directories the framework made for o
   # The one place the framework deletes anything. A path is removed only when its last component is
   # hpcworker_<id>, hpcw_<id> or hpcw_probe_<id>, so a mis-rendered pattern can never point this at a
   # home directory, a config directory, a state directory or the root.
-  local p; for p in "$@"; do
+  local p b; for p in "$@"; do
     [ -n "$p" ] || continue
     case "$p" in /|"$HOME"|"$HOME"/|/tmp|/dev/shm|"${HOME}/.beethoven"*|"${HOME}/.ashley"*|*/.claude*|*/.hpcworker*) echo "REFUSING to remove $p (not a per-job directory)" >&2; continue;; esac
-    case "${p%/}" in */hpcworker_[A-Za-z0-9_.-]*|*/hpcw_[A-Za-z0-9_.-]*) rm -rf -- "${p%/}";; *) echo "REFUSING to remove $p (not a per-job directory)" >&2;; esac
+    # the LAST component alone decides: the old glob (*/hpcw_...*) matched the prefix anywhere on the
+    # way, so a folder named claude UNDER an hpcw_-named folder counted as per-job and went (measured:
+    # job 40555616, whose suite ran with TMPDIR=/tmp/$USER/hpcw_ci_<job>) — the one guard against a
+    # mis-rendered pattern was itself looser than its comment claimed
+    b="${p%/}"; b="${b##*/}"
+    case "$b" in hpcworker_[A-Za-z0-9_.-]*|hpcw_[A-Za-z0-9_.-]*) rm -rf -- "${p%/}";; *) echo "REFUSING to remove $p (not a per-job directory)" >&2;; esac
   done
 }
 
