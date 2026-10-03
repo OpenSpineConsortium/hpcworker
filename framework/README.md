@@ -78,11 +78,16 @@ directory and the numbered directory it resolves to.
   read the directory at all, bash itself refuses before hpcworker runs (`Permission denied`, exit 126;
   `No such file or directory`, exit 127). The extension falls back to a copy of the student's own on
   any of the three. If the shared copy later becomes unreadable, the launcher says so and exits 3.
-- **At Wayne State the student's account must be in the group `oschome`.** The volume
-  `/rs/rs_grp_oschome` is `drwxrws---` with no access for others, so an account outside the group
-  cannot reach the shared copy, the image, `claude` or its own `shared_state_dir` under it; a copy of
-  its own does not change that. The group has two members today (2026-09-29): the maintainer and the
-  group's owner. Adding a student is for C&IT or the group owner.
+- **At Wayne State the student's AccessID must be on the lab's list.** The volume's root behind
+  `/rs/rs_grp_oschome` is closed to others (`other::---`, and sticky), so an account that is not its
+  owner, not in the group `oschome` and not named in its ACL cannot reach the shared copy, the image,
+  `claude` or its own `shared_state_dir` under it; a copy of its own does not change that (bash answers
+  `Permission denied`, exit 126). The list is the root's named-user entries, `user:<AccessID>:rwx`,
+  which `tools/grid_access.sh` keeps equal to the accounts the access service approved with the
+  extension grant, never a lab-only approval (`docs/guides/LAB_LEAD.md`, section 9). The group
+  `oschome` is not the list: only C&IT adds members,
+  and it had two on 2026-09-29, the maintainer and the group's owner. Below the root, everything a
+  student uses is readable by others.
 
 A worker job names the numbered directory the shared copy resolves to (`current` is followed one link
 when the command starts, never further: `/rs/rs_grp_oschome` is itself a link to the volume's physical
@@ -146,8 +151,10 @@ ROOT/deploy.log   one line per publish
 
 `ROOT` is the directory above `current` in the site profile's `shared_install`
 (`/rs/rs_grp_oschome/shared/beethoven/hpcworker` at Wayne State). The group is the one that owns the
-directory above `ROOT` (`oschome`): read and traverse, no write; others nothing. The volume carries
-POSIX ACLs with a group-writable default, so the script sets the group and mask entries (and the
+directory above `ROOT` (`oschome`); the group and others may read and traverse, and neither may write.
+Who reaches the copy at all is decided higher up, by the list on the volume's root that
+`tools/grid_access.sh` keeps; this script never touches the root's ACL. The volume carries POSIX ACLs
+with a group-writable default, so the script sets the group, mask and other entries (and the
 directories' defaults) to read as well, and prints `getfacl` to show it. Running it again with the
 same files changes nothing and says so; a changed `README.md` alone is updated in place; any other
 difference under the same version is refused (publish it as the next integer version, or `--replace`,
@@ -583,19 +590,22 @@ unless the copy's own folders and files can be changed by their owner alone: the
 `current` link (re-pointing the link re-points every key), the numbered directory, `bin/`, `lib/`,
 `lib/adapters/`, `jobs/` and `profiles/` (a profile names the image and the `claude` a worker runs),
 and each file in them, each owned by the copy's owner or root, none a link but `current`.
-`tools/deploy_shared.sh` publishes the copy that way (group read and traverse, no write). **Every folder
+`tools/deploy_shared.sh` publishes the copy that way (group and others read and traverse, no write). **Every folder
 from `/` down to the copy is judged as well, and one that others may write to is refused** unless it is
 sticky (`chmod +t`: then only an entry's owner may rename or remove it). Whoever can rename a folder
 above the copy can put another `current/bin/hpcworker` in its place, and every enrolled key's forced
 command would run it in its own account at Beethoven's next poll, from anywhere on the internet; the
 portal path of 11.0 has the same weakness, but only when the student types a command, and the key path
-should not be opened on top of it. At Wayne State this README records the volume `/rs/rs_grp_oschome`
-as `drwxrws---` (group-writable, not sticky) since 2026-09-29; if that is still so, `browser-key add`
-refuses there until its owner (C&IT) sets the sticky bit or removes group write on it, and Greg does the
-same for any folder of his between it and the copy (`shared`, `shared/beethoven`, `hpcworker`). Before
+should not be opened on top of it. At Wayne State the volume's root behind the link `/rs/rs_grp_oschome`
+is the lab lead's own folder, `drwxrws--T go2432 oschome`: group-writable and sticky, the bit set by
+Greg on 2026-10-02, so it passes. (This README recorded it as `drwxrws---`, not sticky, on 2026-09-29
+and took it for C&IT's to fix; it is Greg's.) Greg keeps the same rule for any folder of his between it
+and the copy (`shared`, `shared/beethoven`, `hpcworker`): writable by him alone, or sticky. What remains
+for C&IT is only the CephFS scaffold above the root, folders owned by root or by other labs' accounts,
+which framework 12 reports as a note and does not refuse ("Folders above the copy", at the top). Before
 any student enrols, the lab lead runs `hpcworker browser-key check` (read only): one line per folder or
-file that others may change, then `ok` or `refused`. Not measured on the grid: the modes of
-`/rs/rs_grp_oschome`, `shared` and `shared/beethoven` today.
+file that others may change, then `ok` or `refused`. Not measured on the grid: the modes of `shared`
+and `shared/beethoven` today.
 
 `remove` takes our line out (`HPCW-KEY removed`, or `HPCW-KEY none`), with the same guards; the gate's
 `forget` does the same for the key itself, and neither leaves the line in `authorized_keys.beethoven-prev`.
@@ -1084,7 +1094,8 @@ Only `profiles/wayne.json`: partitions `secp/secondary` (starts at once) and `re
 partitions `gmsap` and `gvohp`, `module load apptainer/1.2.2` at `/wsu/el7/gnu7/apptainer/1.2.2/bin`,
 the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/beethoven`, the lab's shared
 copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/beethoven/hpcworker/current`, which
-every account must be in the group `oschome` to read, like everything else on that volume), the CephFS state
+an account reaches only when its AccessID is on the lab's list on the volume's root, kept by
+`tools/grid_access.sh`, like everything else on that volume), the CephFS state
 directory `/rs/rs_grp_oschome/$USER/hpcworker`, node temp at `/tmp/$USER/hpcworker_$SLURM_JOB_ID`
 (never `$TMPDIR`), `claude_config_dir` `$HOME/.beethoven/claude` (the sign-in Beethoven for VS Code
 already made; the framework starts Claude Code there, reads `claude auth status` and the two consent

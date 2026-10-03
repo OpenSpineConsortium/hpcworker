@@ -12,7 +12,10 @@
 #   ROOT/v<N>/      one directory per framework VERSION: bin/ lib/ jobs/ profiles/ VERSION README.md
 #   ROOT/current    a relative link to v<N>, switched in one rename (ln -s, then mv -T; coreutils 8.22's
 #                   `ln -sfn` unlinks first, which leaves a moment with no `current`)
-#   ROOT/deploy.log one line per publish
+#   ROOT/deploy.log one line per publish (date, account, version, commit), 0644 like the rest of the tree
+#   ROOT/.incoming-v<N>.XXXXXX  the staging directory of a publish (mktemp, so 0700) while it runs; one
+#                   whose publish failed is left for a person to remove. tools/grid_access.sh leaves
+#                   these out of its sweep and its --open-tree.
 # Older v<N> directories are never removed: a running worker's job names the numbered directory it
 # started on (the launcher resolves `current` once, when the worker starts), and its chain keeps it
 # until the student starts the worker again. Remove an old version by hand, and only when no worker
@@ -29,12 +32,15 @@
 # a temp file). A version already published with the same files is not extracted again (idempotent);
 # when only README.md differs it is updated in place (a running chain never reads it); a version
 # published with different code is refused unless --replace, which moves the old directory aside as
-# v<N>.replaced-<time> (never deleted). Permissions: group read and traverse, no group
-# write, nothing for others; the numbered directories are read-only for their owner too, so a copy
-# or an upload that follows a stray link cannot change them. When the tree carries POSIX ACLs (the
-# Wayne State volume does, with a group-writable default), the group and mask entries and the
-# directories' default entries are set to match. It prints the tree, the link, the ACLs and what
-# changed against the previous `current`.
+# v<N>.replaced-<time> (never deleted). Permissions: group and others read and traverse (and run
+# bin/ and the .sbatch files), no write for either; the numbered directories are read-only for their
+# owner too, so a copy or an upload that follows a stray link cannot change them. When the tree
+# carries POSIX ACLs (the Wayne State volume does, with a group-writable default), the group, mask
+# and other entries and the directories' default entries are set to match. Who may reach the copy at
+# all is decided above it, at the gate: the named-user list on the volume root (user:<id>:rwx for
+# each approved AccessID, with other::--- and the sticky bit on the root), kept by
+# tools/grid_access.sh. Deploy never touches the root's ACL. It prints the tree, the link, the ACLs
+# and what changed against the previous `current`.
 set -uo pipefail
 
 say() { printf '%s\n' "$*"; }
@@ -42,24 +48,24 @@ die() { printf 'deploy_shared: %s\n' "$*" >&2; exit 1; }
 
 # ---- the cluster side: `deploy_shared.sh --publish ROOT N GROUP REPLACE DRY COMMIT MANIFEST_B64`, the tar on stdin ----
 has_acl() { command -v getfacl >/dev/null 2>&1 && getfacl -p "$1" 2>/dev/null | grep -q -E '^(mask::|default:|user:[^:]|group:[^:])'; }
-set_perms() { # DIR [GROUP]: group read and traverse, no group write, nothing for others, read-only for the owner
+set_perms() { # DIR [GROUP]: group and others read and traverse, no write for either, read-only for the owner
   local d="$1" group="${2:-}" acl=0
   [ -n "$group" ] && { chgrp -R "$group" "$d" || return 1; }
   has_acl "$d" && acl=1
-  find "$d" -type d -exec chmod 2550 {} + || return 1
-  find "$d" -type f -exec chmod 0440 {} + || return 1
-  find "$d" -type f \( -path "$d/bin/*" -o -name '*.sbatch' \) -exec chmod 0550 {} + || return 1
+  find "$d" -type d -exec chmod 2555 {} + || return 1
+  find "$d" -type f -exec chmod 0444 {} + || return 1
+  find "$d" -type f \( -path "$d/bin/*" -o -name '*.sbatch' \) -exec chmod 0555 {} + || return 1
   [ $acl = 1 ] || return 0
   # an ACL'd tree: chmod moves only the mask, so the entries are set explicitly, per kind of file.
   # Not "rX": X follows an execute bit the inherited group entry still carries, and marks every file x
-  find "$d" -type d -exec setfacl -m u::r-x,g::r-x,m::r-x,o::--- {} + -exec setfacl -d -m u::r-x,g::r-x,m::r-x,o::--- {} + || return 1
-  find "$d" -type f -exec setfacl -m u::r--,g::r--,m::r--,o::--- {} + || return 1
-  find "$d" -type f \( -path "$d/bin/*" -o -name '*.sbatch' \) -exec setfacl -m u::r-x,g::r-x,m::r-x,o::--- {} + || return 1
+  find "$d" -type d -exec setfacl -m u::r-x,g::r-x,m::r-x,o::r-x {} + -exec setfacl -d -m u::r-x,g::r-x,m::r-x,o::r-x {} + || return 1
+  find "$d" -type f -exec setfacl -m u::r--,g::r--,m::r--,o::r-- {} + || return 1
+  find "$d" -type f \( -path "$d/bin/*" -o -name '*.sbatch' \) -exec setfacl -m u::r-x,g::r-x,m::r-x,o::r-x {} + || return 1
 }
-root_perms() { # ROOT: the owner publishes into it; the group reads and traverses; others nothing (and the same as defaults)
-  chmod 2750 "$1" || return 1
+root_perms() { # ROOT: the owner publishes into it; the group and others read and traverse (and the same as defaults)
+  chmod 2755 "$1" || return 1
   has_acl "$1" || return 0
-  setfacl -m u::rwx,g::r-x,m::r-x,o::--- "$1" && setfacl -d -m u::rwx,g::r-x,m::r-x,o::--- "$1"
+  setfacl -m u::rwx,g::r-x,m::r-x,o::r-x "$1" && setfacl -d -m u::rwx,g::r-x,m::r-x,o::r-x "$1"
 }
 compare_to_manifest() { # DIR MANIFEST -> same | readme (only README.md differs) | differs (a file added, missing or changed)
   local d="$1" man="$2" want have
@@ -125,7 +131,9 @@ publish() {
     say "   current: ${prev:-none} -> v$n"
   else say "   current already names v$n"; fi
   printf '%s %s v%s %s %s current=%s\n' "$(date -u +%FT%TZ)" "$(id -un)" "$n" "$commit" "$status" "v$n" >> "$root/deploy.log"
-  chmod 0640 "$root/deploy.log" 2>/dev/null
+  # readable by others like the rest of the tree (it holds a date, the account, the version and the
+  # commit): at 0640 tools/grid_access.sh's sweep failed after every publish and --open-tree undid it
+  chmod 0644 "$root/deploy.log" 2>/dev/null
   say "== what changed"
   if [ -n "$prev" ] && [ "$prev" != "v$n" ] && [ -d "$root/$prev" ]; then
     diff -rq "$root/$prev" "$dest" | sed -e "s#$root/##g" -e 's/^/   /'

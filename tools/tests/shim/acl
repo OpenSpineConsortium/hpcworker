@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# setfacl and getfacl for tools/tests/test_grid_access.sh, on a machine without the acl package (WSL's
+# Ubuntu on the maintainer's PC has none, and installing it is not allowed). The test links this file as
+# setfacl and getfacl first on PATH. It emulates the part of POSIX ACLs that tools/grid_access.sh and the
+# test use, on any filesystem:
+#   - user::, other:: and (while the ACL is not extended) group:: are the file's real mode bits, so stat
+#     and chmod see what setfacl did; setfacl never clears the setgid or sticky bit, as on Linux;
+#   - named user and group entries, the owning group's entry once the ACL is extended, and the default
+#     entries are kept in $SHIM_ACL_STORE/<device>-<inode>; once extended, the mode's group bits are the
+#     mask, as on Linux;
+#   - setfacl recalculates the mask as the union of the group class unless -n is given or the call sets
+#     the mask itself; the default ACL is seeded from the access ACL the first time it is set;
+#   - a user or group the system (or $SHIM_USERS) does not know is refused as setfacl refuses it, and
+#     that file is left unchanged.
+# Not emulated: -R, -M, -X, --restore, --set, X in permissions, numeric qualifiers.
+# Every call is appended to $SHIM_LOG. With SHIM_ACL_FAIL=x, setfacl -x fails (a grid side that stops
+# half-way).
+set -uo pipefail
+set -f
+me=$(basename "$0")
+STORE=${SHIM_ACL_STORE:?SHIM_ACL_STORE is not set}
+printf '%s %s\n' "$me" "$*" >> "${SHIM_LOG:-/dev/null}"
+mkdir -p "$STORE"
+
+rwx() { local d=$1 s=""; if (( d & 4 )); then s+=r; else s+=-; fi; if (( d & 2 )); then s+=w; else s+=-; fi; if (( d & 1 )); then s+=x; else s+=-; fi; printf '%s' "$s"; }
+dig() { local p=$1 d=0; case "$p" in *r*) d=$((d + 4));; esac; case "$p" in *w*) d=$((d + 2));; esac; case "$p" in *x*) d=$((d + 1));; esac; printf '%d' "$d"; }
+norm() { if [[ "$1" =~ ^[0-7]$ ]]; then rwx "$1"; else rwx "$(dig "$1")"; fi; }
+readmode() { # PATH -> SP U G O, the mode's octal digits
+  local a; a=$(stat -L -c %a -- "$1" 2>/dev/null) || return 1
+  a=$(printf '%04o' "$((8#$a))")
+  SP=${a:0:1} U=${a:1:1} G=${a:2:1} O=${a:3:1}
+}
+load() { # PATH -> ENT (the stored entries), KEYF
+  KEYF="$STORE/$(stat -L -c '%d-%i' -- "$1")"
+  ENT=()
+  if [ -f "$KEYF" ]; then mapfile -t ENT < "$KEYF"; fi
+}
+save() { if [ ${#ENT[@]} = 0 ]; then rm -f "$KEYF"; else printf '%s\n' "${ENT[@]}" > "$KEYF"; fi; }
+get() { local e; for e in "${ENT[@]}"; do case "$e" in "$1":*) printf '%s' "${e##*:}"; return 0;; esac; done; return 1; }
+put() { local i; for i in "${!ENT[@]}"; do case "${ENT[$i]}" in "$1":*) ENT[$i]="$1:$2"; return 0;; esac; done; ENT+=("$1:$2"); }
+del() { local i; for i in "${!ENT[@]}"; do case "${ENT[$i]}" in "$1":*) unset 'ENT[i]';; esac; done; ENT=("${ENT[@]}"); }
+ext() { local e; for e in "${ENT[@]}"; do case "$e" in default:*) ;; *) return 0;; esac; done; return 1; }   # extended: an access entry is stored
+has_default() { local e; for e in "${ENT[@]}"; do case "$e" in default:*) return 0;; esac; done; return 1; }
+become_ext() { ext || put "group:" "$(rwx "$G")"; }
+recalc() { local u=0 e; for e in "${ENT[@]}"; do case "$e" in default:*) ;; user:*|group:*) u=$(( u | $(dig "${e##*:}") ));; esac; done; G=$u; }
+drecalc() {
+  local u=0 e named=0
+  for e in "${ENT[@]}"; do case "$e" in
+    default:user::*|default:other::*|default:mask::*) ;;
+    default:group::*) u=$(( u | $(dig "${e##*:}") ));;
+    default:user:*|default:group:*) u=$(( u | $(dig "${e##*:}") )); named=1;;
+  esac; done
+  [ $named = 1 ] && put "default:mask:" "$(rwx "$u")"
+  return 0
+}
+known_user() { local u; for u in ${SHIM_USERS:-}; do [ "$u" = "$1" ] && return 0; done; getent passwd "$1" >/dev/null 2>&1; }
+known_group() { local g; for g in ${SHIM_GROUPS:-}; do [ "$g" = "$1" ] && return 0; done; getent group "$1" >/dev/null 2>&1; }
+pr_eff() { # ENTRY MASKDIGIT
+  local d; d=$(dig "${1##*:}")
+  if (( (d & $2) != d )); then printf '%s\t#effective:%s\n' "$1" "$(rwx $((d & $2)))"; else printf '%s\n' "$1"; fi
+}
+
+if [ "$me" = getfacl ]; then
+  omit=0 paths=() rc=0
+  while [ $# -gt 0 ]; do case "$1" in
+    -p|--absolute-names|-n|--numeric|-e|--all-effective) shift;;
+    -c|--omit-header) omit=1; shift;;
+    --) shift; paths+=("$@"); break;;
+    -*) echo "getfacl: unsupported option $1 (test shim)" >&2; exit 2;;
+    *) paths+=("$1"); shift;;
+  esac; done
+  for p in "${paths[@]}"; do
+    if ! readmode "$p"; then echo "getfacl: $p: No such file or directory" >&2; rc=1; continue; fi
+    load "$p"
+    if [ $omit = 0 ]; then
+      echo "# file: $p"
+      echo "# owner: $(stat -L -c %U -- "$p")"
+      echo "# group: $(stat -L -c %G -- "$p")"
+      if [ "$SP" != 0 ]; then echo "# flags: $( (( SP & 4 )) && echo s || echo -)$( (( SP & 2 )) && echo s || echo -)$( (( SP & 1 )) && echo t || echo -)"; fi
+    fi
+    echo "user::$(rwx "$U")"
+    if ext; then
+      for e in "${ENT[@]}"; do case "$e" in user:[!:]*) pr_eff "$e" "$G";; esac; done
+      pr_eff "group::$(get group:)" "$G"
+      for e in "${ENT[@]}"; do case "$e" in group:[!:]*) pr_eff "$e" "$G";; esac; done
+      echo "mask::$(rwx "$G")"
+    else
+      echo "group::$(rwx "$G")"
+    fi
+    echo "other::$(rwx "$O")"
+    if has_default; then
+      v=$(get default:user:) && echo "default:user::$v"
+      for e in "${ENT[@]}"; do case "$e" in default:user:[!:]*) echo "$e";; esac; done
+      v=$(get default:group:) && echo "default:group::$v"
+      for e in "${ENT[@]}"; do case "$e" in default:group:[!:]*) echo "$e";; esac; done
+      v=$(get default:mask:) && echo "default:mask::$v"
+      v=$(get default:other:) && echo "default:other::$v"
+    fi
+    echo
+  done
+  exit $rc
+fi
+
+[ "$me" = setfacl ] || { echo "acl shim: called as $me" >&2; exit 2; }
+ops=() paths=() nomask=0 dflag=0
+while [ $# -gt 0 ]; do case "$1" in
+  -n|--no-mask) nomask=1; shift;;
+  -d|--default) dflag=1; shift;;
+  -m|--modify) ops+=("m ${2:?}"); shift 2;;
+  -x|--remove) ops+=("x ${2:?}"); shift 2;;
+  -b|--remove-all) ops+=("b -"); shift;;
+  -k|--remove-default) ops+=("k -"); shift;;
+  --) shift; paths+=("$@"); break;;
+  -*) echo "setfacl: unsupported option $1 (test shim)" >&2; exit 2;;
+  *) paths+=("$1"); shift;;
+esac; done
+[ ${#paths[@]} -gt 0 ] || { echo "setfacl: no file given" >&2; exit 2; }
+rc=0
+for p in "${paths[@]}"; do
+  if ! readmode "$p"; then echo "setfacl: $p: No such file or directory" >&2; rc=1; continue; fi
+  load "$p"
+  bad="" named=0 xmask=0 dnamed=0 dxmask=0
+  for op in "${ops[@]}"; do
+    kind=${op%% *} spec=${op#* }
+    if [ "$kind" = x ] && [ "${SHIM_ACL_FAIL:-}" = x ]; then bad="Operation not permitted (SHIM_ACL_FAIL=x)"; break; fi
+    case "$kind" in
+      b) gobj=$(get group: || rwx "$G"); ENT=(); G=$(dig "$gobj"); continue;;
+      k) for e in "${ENT[@]}"; do case "$e" in default:*) del "${e%:*}";; esac; done; continue;;
+    esac
+    IFS=, read -r -a parts <<< "$spec"
+    for ent in "${parts[@]}"; do
+      d=$dflag
+      case "$ent" in d:*|default:*) d=1; ent=${ent#*:};; esac
+      IFS=: read -r t q pm <<< "$ent"
+      case "$t" in u|user) t=user;; g|group) t=group;; m|mask) t=mask;; o|other) t=other;; *) bad="Invalid argument near character 1"; break 2;; esac
+      if [ "$kind" = m ]; then
+        [[ "$pm" =~ ^[-rwx]{1,3}$ || "$pm" =~ ^[0-7]$ ]] || { bad="Invalid argument near character ${#t}"; break 2; }
+        pm=$(norm "$pm")
+      fi
+      if [ -n "$q" ]; then
+        case "$t" in
+          user) known_user "$q" || { bad="Invalid argument near character 3"; break 2; };;
+          group) known_group "$q" || { bad="Invalid argument near character 3"; break 2; };;
+          *) bad="Invalid argument near character 3"; break 2;;
+        esac
+      fi
+      if [ $d = 1 ]; then
+        if ! has_default; then
+          put "default:user:" "$(rwx "$U")"
+          put "default:group:" "$(get group: || rwx "$G")"
+          put "default:other:" "$(rwx "$O")"
+        fi
+        if [ "$kind" = m ]; then put "default:$t:$q" "$pm"; else del "default:$t:$q"; fi
+        [ -n "$q" ] && dnamed=1
+        [ "$t" = mask ] && dxmask=1
+        continue
+      fi
+      if [ "$kind" = x ]; then
+        [ -n "$q" ] || { bad="Invalid argument near character 3"; break 2; }
+        del "$t:$q"; named=1
+        continue
+      fi
+      case "$t" in
+        user) if [ -z "$q" ]; then U=$(dig "$pm"); else become_ext; put "user:$q" "$pm"; named=1; fi;;
+        group) if [ -z "$q" ]; then if ext; then put "group:" "$pm"; else G=$(dig "$pm"); fi; else become_ext; put "group:$q" "$pm"; named=1; fi;;
+        mask) become_ext; G=$(dig "$pm"); xmask=1;;
+        other) O=$(dig "$pm");;
+      esac
+    done
+  done
+  if [ -n "$bad" ]; then echo "setfacl: $p: $bad" >&2; rc=2; continue; fi
+  if [ $named = 1 ] && [ $xmask = 0 ] && [ $nomask = 0 ]; then recalc; fi
+  if [ $dnamed = 1 ] && [ $dxmask = 0 ] && [ $nomask = 0 ]; then drecalc; fi
+  chmod "$SP$U$G$O" -- "$p" || { rc=1; continue; }
+  save
+done
+exit $rc

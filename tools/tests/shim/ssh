@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# ssh for tools/tests/test_grid_access.sh. Each call is appended to $SHIM_SSH_CALLS (one line: the
+# arguments). With SHIM_SSH_MODE=run (the default) the remote command runs here, with this call's stdin,
+# as sshd hands it to the account's shell (`bash -c COMMAND`); with SHIM_SSH_MODE=record it only records
+# and exits 255, as an ssh that could not connect.
+printf '%s\n' "$*" >> "${SHIM_SSH_CALLS:?SHIM_SSH_CALLS is not set}"
+while [ $# -gt 0 ]; do case "$1" in -o|-p|-i|-l|-F|-J) shift 2;; -*) shift;; *) break;; esac; done
+shift   # the host
+[ "${SHIM_SSH_MODE:-run}" = run ] || exit 255
+exec bash -c "$*"

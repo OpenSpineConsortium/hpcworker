@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# id for tools/tests/test_grid_access.sh: the test's grid accounts (AccessIDs like hy9698, which no test
+# machine has) answer `id NAME`, `id -u NAME` and `id -un NAME` when listed in $SHIM_USERS; every other
+# call, `id -un` for this account included, is the real id ($SHIM_REAL_ID, else /usr/bin/id).
+name=""
+for a in "$@"; do case "$a" in -*) ;; *) name=$a;; esac; done
+if [ -n "$name" ]; then
+  for u in ${SHIM_USERS:-}; do
+    [ "$u" = "$name" ] || continue
+    case " $* " in
+      *" -un "*|*" -nu "*|*" -u -n "*|*" -n -u "*) echo "$u";;
+      *" -u "*) echo 61000;;
+      *) echo "uid=61000($u) gid=61000($u) groups=61000($u)";;
+    esac
+    exit 0
+  done
+fi
+exec "${SHIM_REAL_ID:-/usr/bin/id}" "$@"

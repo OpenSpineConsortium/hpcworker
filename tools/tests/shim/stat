@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# stat for tools/tests/test_grid_access.sh: a path listed in the file $SHIM_OWNERS (lines "PATH OWNER",
+# PATH exactly as the caller names it) answers OWNER for %U in a -c/--format format, as if that account
+# owned it (the grid's AccessIDs exist on no test machine, and only root could chown to them). The
+# entry's other answers (its type, its mode) are the real ones. Every other call, with no map, a format
+# without %U or a path not listed, is the real stat ($SHIM_REAL_STAT, else /usr/bin/stat), unchanged.
+real=${SHIM_REAL_STAT:-/usr/bin/stat}
+map=${SHIM_OWNERS:-}
+{ [ -n "$map" ] && [ -s "$map" ]; } || exec "$real" "$@"
+orig=("$@") opts=() fmt="" paths=()
+while [ $# -gt 0 ]; do case "$1" in
+  -c|--format) fmt=${2:-}; shift 2;;
+  --format=*) fmt=${1#--format=}; shift;;
+  --) shift; paths+=("$@"); break;;
+  -*) opts+=("$1"); shift;;
+  *) paths+=("$1"); shift;;
+esac; done
+case "$fmt" in *%U*) ;; *) exec "$real" "${orig[@]}";; esac
+rc=0
+for p in "${paths[@]}"; do
+  owner=$(awk -v p="$p" '$1 == p { print $2; exit }' "$map")
+  f=$fmt
+  [ -z "$owner" ] || f=$(printf '%s' "$fmt" | sed "s/%U/$owner/g")
+  "$real" "${opts[@]}" -c "$f" -- "$p" || rc=$?
+done
+exit $rc
