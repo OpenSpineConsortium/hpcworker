@@ -48,9 +48,13 @@ die() { printf 'deploy_shared: %s\n' "$*" >&2; exit 1; }
 
 # ---- the cluster side: `deploy_shared.sh --publish ROOT N GROUP REPLACE DRY COMMIT MANIFEST_B64`, the tar on stdin ----
 has_acl() { command -v getfacl >/dev/null 2>&1 && getfacl -p "$1" 2>/dev/null | grep -q -E '^(mask::|default:|user:[^:]|group:[^:])'; }
+same_group() { [ -n "$2" ] && [ "$(stat -c %G "$1" 2>/dev/null)" = "$2" ]; }   # DIR GROUP: DIR already carries it
 set_perms() { # DIR [GROUP]: group and others read and traverse, no write for either, read-only for the owner
   local d="$1" group="${2:-}" acl=0
-  [ -n "$group" ] && { chgrp -R "$group" "$d" || return 1; }
+  # a chgrp to the group the tree already carries is skipped, not re-stated: under --here inside a worker's
+  # container the user namespace squashes the lab's group to a name chgrp cannot set (nogroup; kbt2,
+  # 2026-10-03), while the setgid directories have already given every new file the right group on the host
+  if [ -n "$group" ] && ! same_group "$d" "$group"; then chgrp -R "$group" "$d" || return 1; fi
   has_acl "$d" && acl=1
   find "$d" -type d -exec chmod 2555 {} + || return 1
   find "$d" -type f -exec chmod 0444 {} + || return 1
@@ -97,7 +101,7 @@ publish() {
   say "   root: $([ -d "$root" ] && echo present || echo absent); group: $group; v$n: $status; current: ${prev:-none} -> v$n"
   if [ "$dry" = 1 ]; then say "   dry run: nothing written ($(printf '%s\n' "$man" | wc -l | tr -d ' ') files would be published)"; return 0; fi
   if [ ! -d "$root" ]; then mkdir "$root" || die "cannot create $root"; fi
-  [ -n "$group" ] && { chgrp "$group" "$root" || die "chgrp $group $root failed"; }
+  if [ -n "$group" ] && ! same_group "$root" "$group"; then chgrp "$group" "$root" || die "chgrp $group $root failed"; fi
   root_perms "$root" || die "could not set the permissions of $root"
   case "$status" in
     same) say "   v$n is already published with these files: not extracted again";;
@@ -170,6 +174,11 @@ while [ $# -gt 0 ]; do case "$1" in
   --group) group="$2"; shift 2;; --dry-run) dry=1; shift;; --replace) replace=1; shift;; --here) local_run=1; shift;;
   -h|--help) awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0"; exit 0;;
   *) die "unknown option $1 (--help)";; esac; done
+
+# --here inside a worker's container: the image may carry no getfacl/setfacl, but hpcworker binds the
+# host's /usr/bin at /opt/host/bin, and the host's serve (without them the ACL entries went unset and a
+# publish from kbt2 left v15's default:user:: at rwx, dormant on a read-only tree but not deploy's state)
+if [ "$local_run" = 1 ] && ! command -v setfacl >/dev/null 2>&1 && [ -x /opt/host/bin/setfacl ]; then PATH="$PATH:/opt/host/bin"; fi
 
 prof="$FW/profiles/$site.json"
 [ -s "$prof" ] || die "no profile $prof"
