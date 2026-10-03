@@ -11,11 +11,15 @@ if [ -z "$PY" ]; then for p in python3 python; do command -v "$p" >/dev/null 2>&
 [ -n "$PY" ] || { echo "no python found"; exit 1; }
 # a plain ssh gives a shell without LANG; python 3.6 would then read files and pipes as ASCII
 export PYTHONIOENCODING=utf-8
-# and a batch job may have no locale at all: python 3.6 (no PEP 538) then encodes argv and the environment
-# of every child as ASCII, and the tests that hand a child "wé" died in subprocess before the code under test
-# ran (job 40554626 on kbt2, 2026-10-03). CentOS 7 has en_US.UTF-8 and no C.UTF-8, so the first one present
-if [ -z "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" ]; then
-  for l in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do locale -a 2>/dev/null | grep -qx "$l" && { export LANG="$l"; break; }; done
+# and the locale must be one THIS machine has: with none at all, python 3.6 (no PEP 538) encodes argv
+# and the environment of every child as ASCII and tests died in subprocess before the code under test
+# ran (job 40554626); a batch job can also INHERIT the submitter's locale, and a container's name may
+# not exist on the host — same ASCII fallback (job 40555559). Either way: pick the first one present
+# (CentOS 7 has en_US.UTF-8 and no C.UTF-8)
+cur="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+if [ -z "$cur" ] || ! locale -a 2>/dev/null | grep -qix "$cur"; then
+  unset LC_ALL LC_CTYPE LANG
+  for l in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do locale -a 2>/dev/null | grep -qix "$l" && { export LANG="$l"; break; }; done
 fi
 # and the suite's temporary folders must not sit under a setgid directory: on such a parent (Wayne
 # State's CephFS $TMPDIR, mode 2755; measured 2026-10-03) every directory a test makes inherits g+s,
