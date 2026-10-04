@@ -61,7 +61,7 @@
 # through the gate, and the gate only removes that line (forget, or past the site's expiry). Nothing
 # reached through the gate ever starts a Claude sign-in. Versions are integers.
 set -uo pipefail
-VERSION=15
+VERSION=16
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne

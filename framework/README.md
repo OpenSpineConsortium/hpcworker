@@ -15,6 +15,28 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**Framework 16: the deleter's one guard is as narrow as its comment claimed.** `hpcw_rm_own_tmp`, the
+one place the framework deletes anything, promised to act only when a path's LAST component is
+`hpcworker_<id>` or `hpcw_<id>` — but its glob matched that prefix anywhere on the way, so a folder
+named `claude` UNDER an `hpcw_`-named folder counted as per-job and went (measured: job 40555616,
+whose suite ran with `TMPDIR=/tmp/$USER/hpcw_ci_<job>`). The last component alone decides now, and
+the test pins the nested case. Two more hardenings of the suite's footing: its temporary folders
+move off a setgid `$TMPDIR` (Wayne State's CephFS one, mode 2755, marks every made directory g+s
+and the gate's mode checks read 2700 for 700), and the locale in force must be one THIS machine
+has — a batch job inherits the submitter's environment, and a container's locale name absent on
+the host is the same ASCII-argv fall as no locale at all (jobs 40555559, 40554626).
+
+And the grid lane of CI: `tools/grid_ci.sh`, run on the cluster by a person or their worker — one
+clone per repository, one worktree per run named by the commit so a queued job's tree never moves
+under it, the suite (`tools/grid_ci.sbatch`) and with `--container` the Slurm-in-container check as
+real jobs on compute nodes, the verdicts posted to the commit as the statuses
+`grid/framework-suite-py36` and `grid/slurm-in-container` over the account's own `gh` sign-in. No
+token enters the repository, a job file or an argv; GitHub's runners never reach the grid. Its
+first live runs paid for themselves: the job's `cd` must use the folder `-D` named, never
+`$SLURM_SUBMIT_DIR`, which is where sbatch was TYPED (job 40555495), and every git call must speak
+through the gh sign-in, since a `~/.gitconfig` helper may hold another account's (the clone came
+through gh, the plain fetch then read "Repository not found"). `VERSION` is 16.
+
 **Framework 15: a restart inside a job reads the log it writes.** When Remote Control ends inside a
 job — a resumed session is "Single session · exits when complete", so it ends with its work; or a crash —
 the job starts it again under `script`, and `script` starts the transcript file over: `rc.log` began
