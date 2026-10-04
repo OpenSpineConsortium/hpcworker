@@ -35,7 +35,12 @@ exec "$@"
 FAKE_CLAUDE = r"""#!/bin/bash
 case "$1 ${2:-}" in
   "--version ") echo "2.1.283 (Claude Code)";;
-  "auth status") if [ -e "${FAKE_LOGGED_IN:-/nonexistent}" ]; then echo '{"loggedIn": true, "email": "st1234@wayne.edu", "subscriptionType": "max"}'; else echo '{"loggedIn": false}'; fi;;
+  "auth status")
+    # framework 17: once signed in, the whole answer from FAKE_AUTH when it holds one (a file, so a test can change it
+    # under a running job); a Claude subscription otherwise
+    if [ ! -e "${FAKE_LOGGED_IN:-/nonexistent}" ]; then echo '{"loggedIn": false}'
+    elif [ -s "${FAKE_AUTH:-/nonexistent}" ]; then cat "$FAKE_AUTH"
+    else echo '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "st1234@wayne.edu", "subscriptionType": "max"}'; fi;;
   "remote-control --help") echo "Usage: claude remote-control [options]  --name <name> --capacity <n> --continue --permission-mode <mode>";;
   remote-control*)
     printf '\033[2J\033[H'
@@ -114,6 +119,7 @@ class Job(unittest.TestCase):
         self.rd = os.path.join(self.td, "state", "worker")
         os.makedirs(self.rd)
         self.logged_in = os.path.join(self.td, "logged-in")
+        self.auth = os.path.join(self.td, "auth")
 
     def tearDown(self):
         subprocess.run(["bash", "-c", "pkill -f '%s' 2>/dev/null; true" % self.td])
@@ -123,7 +129,7 @@ class Job(unittest.TestCase):
 
     def env(self):
         e = dict(os.environ)
-        e.update(HOME=self.home, USER="st1234", SLURM_JOB_ID=self.JOB, FAKE_SCHED_DIR=self.g.sched, FAKE_LOGGED_IN=self.logged_in,
+        e.update(HOME=self.home, USER="st1234", SLURM_JOB_ID=self.JOB, FAKE_SCHED_DIR=self.g.sched, FAKE_LOGGED_IN=self.logged_in, FAKE_AUTH=self.auth,
                  FAKE_ENV_URL=ENV_URL, FAKE_SESSION_URL=SESSION_URL, FAKE_RC_FORM=self.rc_form, PATH=self.g.bin + ":" + e["PATH"], HPCW_PYTHON=sys.executable)
         for k in ("TMUX", "CLAUDECODE"):
             e.pop(k, None)
@@ -346,6 +352,59 @@ class Job(unittest.TestCase):
         # a later stop is a no-op, and status says why it stopped
         rc, sout, err = G.bash("source '%s/bin/hpcworker' && HPCW_STOP_WAIT_S=1 stop_worker_run '%s' worker" % (G.ROOT, self.rd), env={"HPCW_HOME": os.path.join(self.home, ".hpcworker")})
         self.assertIn("it had stopped before", sout)
+
+    def test_a_sign_in_that_is_not_a_subscription_never_starts_remote_control(self):
+        # framework 17: Claude Code is signed in, by the Console: the job writes what it writes for no sign-in, says why, and
+        # never starts Remote Control; the sign-in wait's clock stops it as for no sign-in. The shape is 2.1.42's (read from
+        # its code), which reports the Console's own key as authMethod "claude.ai" with the e-mail beside it
+        open(self.logged_in, "w").close()
+        with open(self.auth, "w") as fh:
+            fh.write('{\n  "loggedIn": true,\n  "authMethod": "claude.ai",\n  "apiProvider": "firstParty",\n  "apiKeySource": "/login managed key",\n'
+                     '  "email": "st1234@wayne.edu",\n  "orgId": "o",\n  "orgName": "x",\n  "subscriptionType": null\n}\n')
+        self.render(LOGIN_ABANDON_S="6")
+        self.queued_file()
+        proc = self.start_job()
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "need_login", 60), "waits as for no sign-in")
+            s = self.status()
+            out, _ = proc.communicate(timeout=120)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual((s["needs"], s["claude_login"]["loggedIn"], s["claude_login"]["email"], s["claude_login"]["subscriptionType"]), ("login", False, "", ""))
+        self.assertTrue(s["message"].startswith("Claude Code on the cluster is signed in, but not with a Claude subscription"), s["message"])
+        self.assertIn("Beethoven never runs on that", s["message"])
+        self.assertEqual(self.status()["stop_reason"], "login_abandoned", out)
+        self.assertNotIn("Connecting to Claude", self.progress())
+        self.assertNotIn("remote-control started", out)
+        self.assertIn("loggedIn=false (sign-in: other)", out)
+        self.assertNotIn("not signed in yet", out, "no retries for a sign-in that is already written")
+
+    def test_a_sign_in_that_stops_being_a_subscription_ends_the_session(self):
+        open(self.logged_in, "w").close()
+        self.render(AUTH_EVERY_S="5", LOGIN_ABANDON_S="600", LOGIN_RECHECK_S="5")
+        self.queued_file()
+        proc = self.start_job()
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online", 90), "online on the subscription")
+            with open(self.auth, "w") as fh:
+                fh.write('{"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"}\n')
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "need_login", 60), "the next check ends it")
+            s = self.status()
+            self.assertFalse(s["rc_alive"] and s["state"] == "online")
+            self.assertFalse(s["claude_login"]["loggedIn"])
+            self.assertTrue(s["message"].startswith("Claude Code on the cluster is signed in, but not with a Claude subscription"), s["message"])
+            # and when that sign-in goes, the waiting job's message stops saying it is there
+            os.remove(self.logged_in)
+            self.assertTrue(self.wait_for(lambda: self.status()["message"].startswith("Claude Code on the cluster is not signed in"), 60), self.status()["message"])
+            self.assertEqual(self.status()["state"], "need_login")
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertIn("signed in, but not with a Claude subscription: Remote Control stopped", out)
+        self.assertEqual(out.count("remote-control started"), 1, "never started again on it")
 
     def test_a_sign_in_just_before_the_deadline_is_not_abandoned(self):
         # the once-a-minute check would only see it after the deadline: the abandon looks once more first

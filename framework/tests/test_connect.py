@@ -90,7 +90,8 @@ class Orders(Base):
     def test_returning_signed_in_skips_the_sitting(self):
         self.g.setup()
         # a worker stopped earlier said it was signed in; the newest status carrying claude_login decides, whatever its age
-        self.g.write_status({"version": 9, "run": "worker", "job": "40500019", "state": "stopped",
+        # (framework 17: when a framework 17 worker or newer wrote it; an older one's word goes through the sitting, LoginModes)
+        self.g.write_status({"version": 17, "run": "worker", "job": "40500019", "state": "stopped",
                              "claude_login": {"loggedIn": True, "email": "alex@wayne.edu", "subscriptionType": "max", "checked_at": "2026-09-01T00:00:00Z"}},
                             mtime=time.time() - 30 * 86400)
         rc, out, err = self.connect("--consent %s" % G.INSTALL_ID)
@@ -184,7 +185,7 @@ class LoginModes(Base):
     def setUp(self):
         super().setUp()
         self.g.setup()
-        self.g.write_status({"state": "stopped", "job": "1", "claude_login": {"loggedIn": True, "email": "alex@wayne.edu", "subscriptionType": "pro"}}, name="other")
+        self.g.write_status({"version": 17, "state": "stopped", "job": "1", "claude_login": {"loggedIn": True, "email": "alex@wayne.edu", "subscriptionType": "pro"}}, name="other")
 
     def test_never(self):
         rc, out, err = self.connect("--login never")
@@ -196,6 +197,19 @@ class LoginModes(Base):
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("HPCW-STEP signed-in alex@wayne.edu pro", out.splitlines())
         self.assertNotIn("HPCW-STEP signin", out)
+
+    def test_auto_runs_the_sitting_on_an_older_worker_s_answer(self):
+        # framework 17: a worker before framework 17 wrote loggedIn true for any sign-in, one that bills by use included,
+        # and a chain keeps its code: its answer is not taken, and the sitting (which checks the kind) asks Claude Code
+        for version in (16, None):
+            obj = {"state": "stopped", "job": "1", "claude_login": {"loggedIn": True, "email": "alex@wayne.edu", "subscriptionType": "pro"}}
+            if version is not None:
+                obj["version"] = version
+            self.g.write_status(obj, name="other")
+            rc, out, err = self.connect("--login auto", FAKE_SRUN="already")
+            self.assertEqual(rc, 0, (out, err))
+            self.assertEqual(steps(out), ["setup", "queued", "signin", "signed-in", "done"], (version, out))
+            self.assertIn("HPCW-STEP signed-in st1234@wayne.edu max", out.splitlines())
 
     def test_always_runs_the_sitting_even_when_signed_in(self):
         rc, out, err = self.connect("--login always", FAKE_SRUN="already")
@@ -247,6 +261,19 @@ class SigninFailures(Base):
 
     def test_other_failure(self):
         self.check(7, "signin", FAKE_SRUN="other")
+
+    def test_a_sign_in_that_bills_by_use_has_its_own_code(self):
+        # framework 17: the sitting ended on a page that is not a Claude subscription's (the Console's); the
+        # panel says so and offers the sign-in again. The sentence is the sitting's own, relayed whole
+        lines = self.check(7, "signin-billed", FAKE_SRUN="billed")
+        self.assertEqual(lines[-1], "HPCW-STEP failed signin-billed Claude Code offered a sign-in that bills by use instead of your Claude subscription, "
+                                    "and Beethoven signs in only with a Claude subscription; start the sign-in again, and if it repeats ask your lead")
+
+    def test_a_sign_in_of_another_kind_has_its_own_code(self):
+        # framework 17: Claude Code on the grid is already signed in, not with a Claude subscription; signing in
+        # again changes nothing (Beethoven never signs anyone out), so the panel sends the student to the lead
+        lines = self.check(7, "signin-method", FAKE_SRUN="othersignin")
+        self.assertTrue(lines[-1].startswith("HPCW-STEP failed signin-method Claude Code on the grid is signed in in a way that"), lines[-1])
 
     def test_no_answer(self):
         self.check(7, "signin", FAKE_SRUN="silentok")

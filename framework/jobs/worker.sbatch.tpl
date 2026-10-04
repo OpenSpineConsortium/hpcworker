@@ -50,6 +50,11 @@
 # "Online: <link>" and the job output name the link that exists. Until framework 14 a resumed session
 # went online with no link at all (go2432's job 40554211, 2026-10-03).
 #
+# Framework 17 (greg, 2026-10-04: no API key anywhere). Signed in means signed in with a Claude
+# subscription (hpcw_claude_signin): a sign-in that bills by use, a token or a cloud provider is
+# written as no sign-in (need_login, claude_login.loggedIn false, the message says why), Remote Control
+# never starts on it, and one found while a session runs ends that session.
+#
 # The code: lib/ comes from HPCW_CODE, the directory the command that rendered this job ran from
 # (the lab's shared copy, by its numbered directory, or ~/.hpcworker); HPCW_HOME is the student's
 # own folder (profile, consent marker). A chain keeps the code it started with until the next start.
@@ -203,10 +208,13 @@ fi
 # the one-time grid key (framework 10, login-setup) is hidden from Claude Code inside the container
 HIDE_KEY=$(hpcw_hide_login_key "$BINDS" "$HPCW_NODE_TMP")
 if [ -n "$HIDE_KEY" ]; then BINDS="$BINDS $HIDE_KEY"; export HPCW_BINDS="$BINDS"; say "the grid key made by login-setup is hidden from Claude Code in the container"; fi
-# The environment Claude Code gets: its own config dir, no other credential or endpoint (a token
-# in the environment would outrank the sign-in and switch Remote Control off), feature flags left
-# on (Remote Control needs them), no self-update under a running worker.
+# The environment Claude Code gets: its own config dir, no other credential, endpoint or provider (a
+# token in the environment would outrank the sign-in and switch Remote Control off; a key, a gateway
+# or a cloud provider's switch would put it on paid use, which Beethoven never runs on), feature flags
+# left on (Remote Control needs them), no self-update under a running worker.
 CLEAN_ENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR -u CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
+           -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u CLAUDE_CODE_USE_ANTHROPIC_AWS -u CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
+           -u CLAUDE_CODE_USE_MANTLE -u CLAUDE_CODE_USE_GATEWAY -u CLAUDE_CODE_OAUTH_REFRESH_TOKEN -u CLAUDE_CODE_OAUTH_SCOPES
            -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC -u DISABLE_GROWTHBOOK
            HOME="$HOME" CLAUDE_CONFIG_DIR="$CCD" DISABLE_AUTOUPDATER=1 TERM=xterm-256color BROWSER=/bin/false TMPDIR=/tmp ${XDG:+XDG_RUNTIME_DIR="$XDG"} HPCW_JOB="$JOB" HPCW_SITE="$SITE")
 # in_image.sh runs one command inside the image with that environment; a file, so `timeout`,
@@ -222,20 +230,31 @@ in_image() { local t="$1"; shift; timeout "$t" "$RUN_DIR/in_image.sh" "$@"; }
 v=$(in_image 120 "$CLAUDE_BIN" --version 2>&1 | tail -1) || v="(no answer: $v)"
 case "$v" in *REFUSING*|*"no answer"*|"") write_status error "the container cannot run claude on $NODE: $v"; exit 1;; esac
 say "claude in the container: $v"
-LAST_AUTH=0; LOGGED_IN=false
-check_auth() { # Claude Code's own answer about its stored login; loggedIn/email/subscriptionType only, never tokens
-  local out li em st; out=$(in_image 90 "$CLAUDE_BIN" auth status 2>/dev/null) || out=""
-  li=$(printf '%s' "$out" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false'); li=${li:-false}
-  em=$(printf '%s' "$out" | grep -o '"email": *"[^"]*"' | head -1 | cut -d'"' -f4)
-  st=$(printf '%s' "$out" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4)
+LAST_AUTH=0; LOGGED_IN=false; SIGNIN=none
+check_auth() { # Claude Code's own answer about its stored login; loggedIn/authMethod/apiProvider/email/subscriptionType and whether apiKeySource is there, never tokens
+  local out li=false em="" st=""; out=$(in_image 90 "$CLAUDE_BIN" auth status 2>/dev/null) || out=""
+  # framework 17: only a Claude subscription is signed in. Any other sign-in (one that bills by use, a
+  # token, a cloud provider) is written to status.json exactly as no sign-in is, and Remote Control is
+  # never started on it
+  SIGNIN=$(printf '%s' "$out" | hpcw_claude_signin)
+  if [ "$SIGNIN" = subscription ]; then
+    li=true
+    em=$(printf '%s' "$out" | grep -o '"email": *"[^"]*"' | head -1 | cut -d'"' -f4)
+    st=$(printf '%s' "$out" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4)
+  fi
   AUTH_JSON=$(printf '{"loggedIn":%s,"email":%s,"subscriptionType":%s,"checked_at":%s}' "$li" "$(json_str "$em")" "$(json_str "$st")" "$(json_str "$(date -u +%FT%TZ)")")
   LAST_AUTH=$(now_s); LOGGED_IN="$li"
 }
+login_words() { # the sentence need_login carries: not signed in, or signed in some way Beethoven never runs on
+  if [ "$SIGNIN" = other ]; then echo "Claude Code on the cluster is signed in, but not with a Claude subscription (a sign-in that bills by use, a key or a token), and Beethoven never runs on that; ask your lead to help you sign in again with your Claude subscription. This job waits and asks again every minute."
+  else echo "Claude Code on the cluster is not signed in; sign in from the panel (or run: hpcworker claude login). This job waits and asks again every minute."; fi
+}
 check_auth
 # started seconds after a sign-in finished (the panel does that): Claude Code may still be writing
-# its credential, so ask three more times, 10 s apart, before saying need_login
-for _try in 1 2 3; do [ "$LOGGED_IN" = true ] && break; say "not signed in yet (try $_try of 3); asking again in $AUTH_RETRY_S s"; sleep "$AUTH_RETRY_S"; check_auth; done
-say "claude auth status: loggedIn=$LOGGED_IN; consent: $(consent_source)"
+# its credential, so ask three more times, 10 s apart, before saying need_login (a sign-in of another
+# kind is already written: no retry changes it)
+for _try in 1 2 3; do [ "$LOGGED_IN" = true ] || [ "$SIGNIN" = other ] && break; say "not signed in yet (try $_try of 3); asking again in $AUTH_RETRY_S s"; sleep "$AUTH_RETRY_S"; check_auth; done
+say "claude auth status: loggedIn=$LOGGED_IN (sign-in: $SIGNIN); consent: $(consent_source)"
 HELP=$(in_image 90 "$CLAUDE_BIN" remote-control --help 2>&1 || true)
 # when --help did not answer at all, assume the documented flags rather than starting bare
 if ! printf '%s' "$HELP" | grep -q -i -E 'usage|remote-control|options'; then HELP='--name --capacity --continue --permission-mode'; say "remote-control --help gave no usable text; assuming the documented flags"; fi
@@ -431,7 +450,7 @@ trap on_term TERM INT
 [ -s rc.log ] && mv -f rc.log rc.prev.log
 : > rc.log
 BACKOFF=10; NEXT_START=0; LAST_BEAT=0; ONLINE_NOTED=0
-if [ "$LOGGED_IN" != true ]; then write_status need_login "Claude Code on the cluster is not signed in; sign in from the panel (or run: hpcworker claude login). This job waits and asks again every minute."; fi
+if [ "$LOGGED_IN" != true ]; then write_status need_login "$(login_words)"; fi
 while :; do
   if [ -e stop ]; then stop_and_leave "stop file"; fi
   if abandon_due; then login_abandon; fi
@@ -497,13 +516,22 @@ while :; do
       say "remote-control exited; restart #$RESTARTS in ${BACKOFF}s"
     fi
     # while waiting for the sign-in, ask every minute (the panel's sign-in ends with a worker start or a wait for this)
-    if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$LOGIN_RECHECK_S" ]; then check_auth; [ "$LOGGED_IN" = true ] && write_status starting "signed in; starting Remote Control"; fi
+    if [ "$STATE" = need_login ] && [ $(( $(now_s) - LAST_AUTH )) -ge "$LOGIN_RECHECK_S" ]; then
+      check_auth
+      if [ "$LOGGED_IN" = true ]; then write_status starting "signed in; starting Remote Control"
+      elif [ "$MESSAGE" != "$(login_words)" ]; then write_status need_login "$(login_words)"; fi   # a sign-in of another kind came, or went
+    fi
     if [ "$STATE" != need_login ] && [ "$LOGGED_IN" = true ] && [ "$(now_s)" -ge "$NEXT_START" ]; then
       RESUMED=false; ONLINE_NOTED=0; ENV_URL=""; ENV_ID=""; SESSION_URL=""; LINK_NOTED=""; LINK_SAID=""
       if resume_wanted; then RESUMED=true; RESUME_TRIED=1; start_rc --continue; write_status starting "starting Remote Control (resuming the previous session)"; else start_rc; write_status starting "starting Remote Control"; fi
     fi
   fi
-  if [ $(( $(now_s) - LAST_AUTH )) -ge "$AUTH_EVERY_S" ] && [ "$STATE" != need_login ]; then check_auth; fi
+  if [ $(( $(now_s) - LAST_AUTH )) -ge "$AUTH_EVERY_S" ] && [ "$STATE" != need_login ]; then
+    check_auth
+    # framework 17: a sign-in that is no longer a Claude subscription ends Remote Control at once; the job
+    # then waits as it does for no sign-in (and the sign-in wait's own clock may stop it)
+    if [ "$SIGNIN" = other ]; then rc_stop; write_status need_login "$(login_words)"; say "signed in, but not with a Claude subscription: Remote Control stopped"; fi
+  fi
   if [ $(( $(now_s) - LAST_BEAT )) -ge "$HEARTBEAT_S" ]; then write_status "$STATE" "$MESSAGE"; LAST_BEAT=$(now_s); fi
   sleep 5
 done

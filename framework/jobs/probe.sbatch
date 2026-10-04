@@ -3,7 +3,8 @@
 # node-local temp and its free space, /dev/shm, user namespaces, whether the runtime can exec the
 # image (node and claude versions, the flags `claude remote-control` accepts), the egress matrix to
 # Anthropic's hosts with and without inherited proxy variables, what `claude auth status` says
-# (loggedIn, subscriptionType, email; never a token), the XDG_RUNTIME_DIR fix, and tmux.
+# (loggedIn, subscriptionType, email, authMethod; never a token; loggedIn only for a Claude
+# subscription, framework 17), the XDG_RUNTIME_DIR fix, and tmux.
 # Every call inside the image has its own budget (the table at in_image below); they add up to
 # five minutes, the egress checks to one more, so the job ends inside its wall time however slow
 # the node is. It does not run the sign-in sitting: two probes of 2026-09-29 hit a five-minute
@@ -71,6 +72,8 @@ export HPCW_BINDS="$BINDS"
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR")
 mkdir -p "$WORKSPACE" 2>/dev/null || true
 CLEAN=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR -u CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
+       -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u CLAUDE_CODE_USE_ANTHROPIC_AWS -u CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
+       -u CLAUDE_CODE_USE_MANTLE -u CLAUDE_CODE_USE_GATEWAY -u CLAUDE_CODE_OAUTH_REFRESH_TOKEN -u CLAUDE_CODE_OAUTH_SCOPES
        -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC -u DISABLE_GROWTHBOOK HOME="$HOME" CLAUDE_CONFIG_DIR="$CCD" DISABLE_AUTOUPDATER=1 TERM=xterm-256color BROWSER=/bin/false TMPDIR=/tmp XDG_RUNTIME_DIR="$XDG")
 if hpcw_load_runtime; then
   RT_OK=true; RT_VER=$("$RUNTIME_BIN" --version 2>&1 | head -1)
@@ -95,9 +98,12 @@ if hpcw_load_runtime; then
   RC_FLAGS=$(printf '%s' "$HELP" | grep -o -- '--[a-z][a-z-]*' | sort -u | tr '\n' ' ')
   # the first lines of what --help printed, so an error ("not logged in", a TTY complaint) is visible
   HELP_HEAD=$(printf '%s' "$HELP" | hpcw_strip_codes | grep -v '^[[:space:]]*$' | head -6 | cut -c1-160 | tr '\n' ' ')
-  # Claude Code's own account of its stored login: three fields, never the token
+  # Claude Code's own account of its stored login: a few fields, never the token. Framework 17: loggedIn
+  # is true only for a Claude subscription, as the worker counts it (hpcw_claude_signin); any other
+  # sign-in reads false here too, and authMethod beside it says which it was
   AUTH=$(in_image 45 "$CLAUDE_BIN" auth status 2>/dev/null || true)
-  LOGGED_IN=$(printf '%s' "$AUTH" | grep -o '"loggedIn": *\(true\|false\)' | head -1 | grep -o 'true\|false'); LOGGED_IN=${LOGGED_IN:-false}
+  SIGNIN=$(printf '%s' "$AUTH" | hpcw_claude_signin)
+  LOGGED_IN=false; [ "$SIGNIN" = subscription ] && LOGGED_IN=true
   AUTH_EMAIL=$(printf '%s' "$AUTH" | grep -o '"email": *"[^"]*"' | head -1 | cut -d'"' -f4)
   AUTH_SUB=$(printf '%s' "$AUTH" | grep -o '"subscriptionType": *"[^"]*"' | head -1 | cut -d'"' -f4)
   AUTH_METHOD=$(printf '%s' "$AUTH" | grep -o '"authMethod": *"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -105,9 +111,9 @@ if hpcw_load_runtime; then
   # bundle), in one exec and one line, so the runtime starts once for both
   XC=$(in_image 60 bash -c 'x=""; test -w "$XDG_RUNTIME_DIR" && mkdir -p "$XDG_RUNTIME_DIR/probe" && x=writable; c=$(curl -s -m 10 -o /dev/null -w "%{http_code}" https://api.anthropic.com/ 2>/dev/null); echo "xdg=$x curl=${c:-000}"' 2>/dev/null | grep '^xdg=' | tail -1)
   XDG_IN=$(printf '%s' "$XC" | sed -n 's/^xdg=\([^ ]*\).*/\1/p'); CURL_IN=$(printf '%s' "$XC" | sed -n 's/.*curl=\(.*\)$/\1/p')
-  say "runtime $RT_VER; node $NODE_V (${EXEC_S}s); claude $CLAUDE_V; flags: $RC_FLAGS; loggedIn=$LOGGED_IN; xdg in image: $XDG_IN; curl in image: $CURL_IN"
+  say "runtime $RT_VER; node $NODE_V (${EXEC_S}s); claude $CLAUDE_V; flags: $RC_FLAGS; loggedIn=$LOGGED_IN (sign-in: $SIGNIN); xdg in image: $XDG_IN; curl in image: $CURL_IN"
 else
-  LOGGED_IN=false; AUTH_EMAIL=""; AUTH_SUB=""; AUTH_METHOD=""; XDG_IN=""; CURL_IN=""
+  LOGGED_IN=false; SIGNIN=none; AUTH_EMAIL=""; AUTH_SUB=""; AUTH_METHOD=""; XDG_IN=""; CURL_IN=""
   say "no container runtime could be loaded on $NODE (RUNTIME=$RUNTIME RUNTIME_BIN=$RUNTIME_BIN RUNTIME_MODULE=$RUNTIME_MODULE)"
 fi
 # the sign-in flow is not measured here (see the header); the panel's sitting reports its own lines

@@ -114,7 +114,8 @@ class BannedPrograms(unittest.TestCase):
         run("worker status --json", "worker status --name worker --json")
         run("worker restrict", "worker restrict --name other")
         run("worker stop", "worker stop --name worker")
-        g.write_status({"state": "stopped", "job": "1", "claude_login": {"loggedIn": True, "email": "a@b.edu", "subscriptionType": "max"}}, name="old")
+        # framework 17: only a framework 17 worker's loggedIn is a subscription's; an older one's sends connect through the sitting
+        g.write_status({"version": 17, "state": "stopped", "job": "1", "claude_login": {"loggedIn": True, "email": "a@b.edu", "subscriptionType": "max"}}, name="old")
         run("connect, returning", "connect --profile testsite --login auto")
         run("discover", "discover")
         run("probe", "probe")

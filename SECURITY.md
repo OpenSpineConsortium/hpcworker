@@ -113,8 +113,16 @@ Cluster side:
 - Beethoven never reads, stores, copies, prints or relays a Claude credential. The student signs in
   with `claude auth login` on a compute node; the framework starts Claude Code where that credential is
   and reads only `claude auth status`. Every credential variable (`CLAUDE_CODE_OAUTH_TOKEN`,
-  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, the file-descriptor variants) is
-  removed from the worker's environment before Claude Code starts. `claude auth logout` is never run.
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, the file-descriptor variants,
+  `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` with `CLAUDE_CODE_OAUTH_SCOPES`) and every provider switch
+  (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
+  `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `CLAUDE_CODE_USE_MANTLE`,
+  `CLAUDE_CODE_USE_GATEWAY`) is removed from the worker's environment before Claude Code starts. `claude auth logout` is never run.
+- No API key anywhere (greg, 2026-10-04): Beethoven signs in and runs only with a Claude
+  subscription. The sign-in sitting asks for the subscription, never chooses the Anthropic Console or
+  a cloud platform and never shows the Console's sign-in page; a sign-in that `claude auth status` does
+  not show as a Claude subscription (`authMethod` `claude.ai`, `apiProvider` `firstParty` or none, no
+  `apiKeySource`) is treated as no sign-in, and Remote Control never starts on it (framework 17).
 - Tokens and secrets never appear on command lines, in argv, in logs, in job files or in
   `sbatch --export`; the per-job token is a mode-0600 file on shared storage.
 - Supervised mode (`--permission-mode default`) by default; a task manifest enforced by the framework;

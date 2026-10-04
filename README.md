@@ -125,6 +125,9 @@ From the report's "deliberately absent" list and its security controls:
   Code where the credential already is, reads
   `claude auth status`, and reads two yes-or-no keys from Claude Code's own settings file (whether the
   Remote Control question has been answered, whether the folder is trusted), nothing else.
+- No API key anywhere: Beethoven signs in and runs only with a Claude subscription. The sign-in never
+  chooses the Anthropic Console (billed by use) or a cloud platform, and a sign-in of any other kind is
+  treated as no sign-in, so the worker never runs on it.
 - No answer typed into Claude Code that the student did not give. The Remote Control question is
   answered from the student's own recorded statement (a marker file the panel writes on their
   acknowledgement, and Claude Code's own record after the first session), and folder trust for the
