@@ -1202,44 +1202,76 @@ words), and it is Slurm only (a PBS or LSF site is told so in one line, exit 1).
 hpcworker queue report [--days N] [--limits]      # N from 1 to 90; 14 when not given
 ```
 
-What it runs on the login node: one `sacct -u $USER -S now-Ndays -X -n -P --format=JobID,JobName,
-Partition,QOS,Submit,Start,End,State,Timelimit,NodeList` under `timeout 60` (`-X`: each job's
-allocation line only, no `.batch` or `.extern` steps), and with `--limits` one `sinfo -h -o
-'%P|%l|%a|%D|%T'` under `timeout 10`. Two queries typed by a person now and then is within the
-one-scheduler-command-per-action etiquette, as `discover` and `diag` keep it; the 60 s floor binds
-clients that poll, and nothing here polls. Nothing is written anywhere. The header names the account,
-the window, the number of records read and the `sacct` line word for word, so the count can be checked
-against the grid by typing that line.
+What it runs on the login node: one `TZ=UTC0 SLURM_TIME_FORMAT=standard sacct -u $USER -S now-Ndays -X -D
+-n -P --format=JobID,Partition,QOS,Submit,Eligible,Start,End,State,Timelimit,NodeList` under `timeout 60`,
+and with `--limits` one `sinfo -h -o '%P|%l|%a|%D|%T'` under `timeout 10`. Two queries typed by a person
+now and then is within the one-scheduler-command-per-action etiquette, as `discover` and `diag` keep it;
+the 60 s floor binds clients that poll, and nothing here polls. The report itself writes nothing; like
+every verb that reads the profile, it may write the profile reader's cache, `~/.hpcworker/profile.env`
+(on the first load after an install, or after the profile changed). The header names the account, the
+number of records read and the `sacct` line word for word, its two environment assignments first, so
+the count can be checked against the grid by typing that line.
 
-The arithmetic is POSIX awk (the login node's awk has no `mktime` or `strftime`): a Slurm time,
-`YYYY-MM-DDTHH:MM:SS` in the cluster's local clock with no zone, becomes seconds by the days-from-civil
-formula (`HPCW_QUEUE_AWK` in `bin/hpcworker`; `tests/test_queue.py` holds it to python's `calendar`
-over a sweep of dates), and only differences are used (Start minus Submit; End minus Start), so the
-zone never enters. Per partition and QoS: the jobs that started (a Start that is a time), the median,
-p90 (nearest rank: the value at ceil(0.9 n)) and maximum of their waits, written as `Nd Nh Nm`, `Nh Nm`
-or `Nm Ns`, whichever fits; the jobs pending now (State `PENDING`), preempted (`PREEMPTED`), cancelled
-(`CANCELLED`, with or without "by <uid>") and timed out (`TIMEOUT`); and the median run time (End minus
-Start) of the jobs that ended. A Start before its Submit (the clocks the scheduler recorded disagree)
-counts as no wait, and a line after the table says how many did. A line that is not a record (a notice
-the site prints first) is left out and counted. Rows are sorted by partition, then QoS. The footer is
-the one sentence the maintainer asked for, `shortest median wait: <partition> <qos> (<median>)`, over
-every row that started a job (a tie keeps the first in table order), and nothing more: the numbers
-decide. An account with no jobs in the window gets one line and exit 0; a failed query gets the
-scheduler's message on one line and exit 1; `hpcworker queue` alone, or with another word, a usage line
-and exit 2.
+What `sacct` lists, and so what the report counts:
+
+- **The window is `sacct`'s.** With `-S` and no `-s`, `sacct` lists the jobs that were eligible to run
+  or running at any time between the start it is given and now. A job that became eligible before the
+  window and was still in line or running when the window began is listed, its whole wait with it; a
+  job held, or waiting on a dependency (the worker's queued successor, until its predecessor ends), has
+  no eligible time yet and is not listed. So "pending" counts the jobs in line and eligible now.
+- **The wait is Start minus Eligible.** Eligible is the moment the job could first run. A chain
+  successor is submitted minutes after its predecessor starts (`afterany`) and becomes eligible only
+  when that one ends, so Start minus Submit would count the predecessor's whole run as queue time on
+  every link of an always-on chain. Submit stands in only where Eligible is not a time.
+- **Each attempt of a requeued job is a record of its own** (`-D`, `--duplicates`; without it `sacct`
+  prints a requeued job's last attempt only). A job preempted on the requeue QoS goes back in line
+  under its own id and waits for a node again, so each attempt that started is one wait in the figures
+  and one in "started". An attempt that ended `PREEMPTED` counts under "preempted", one that ended
+  `REQUEUED` (or `REQUEUE_HOLD`, `REQUEUE_FED`) under "requeued".
+- **Times are UTC.** `sacct` prints its times in the zone of its own environment and in the form
+  `SLURM_TIME_FORMAT` names; both are set for that one call, in its environment and never on its
+  argument list, whatever the caller's own say. UTC has no daylight saving, so a difference is a true
+  interval; in the cluster's own zone one autumn hour reads twice and one spring hour never happens, so
+  a wait or a run across either came out an hour off, or as no wait at all. `standard` is
+  `YYYY-MM-DDTHH:MM:SS`, the one form the report reads.
+- **No free-text field.** `-P` puts a `|` between fields and does not escape one inside a field, so a
+  job name with a `|` in it would shift every field after it; the job name is not asked for. A line
+  with any other number of fields is not read.
+
+The arithmetic is awk, POSIX only, like `lib/profile.awk`: one text that runs the same under mawk (the
+ubuntu CI lane, a laptop) and gawk 4.0.2 (warrior, the centos 7 lane). `mktime`, `strftime` and
+`systime` are extensions outside POSIX, and `mktime` reads a time in the local zone; instead a time
+becomes seconds since 1970-01-01T00:00:00Z by the days-from-civil formula (`HPCW_QUEUE_AWK` in
+`bin/hpcworker`; `tests/test_queue.py` holds it to python's `calendar` over a sweep of dates). Per
+partition and QoS: the records that started (a Start that is a time), the median, p90 (nearest rank:
+the value at ceil(0.9 n)) and maximum of their waits, written as `Nd Nh Nm`, `Nh Nm` or `Nm Ns`,
+whichever fits; the records pending (State `PENDING`), preempted (`PREEMPTED`), requeued (`REQUEUED`),
+cancelled (`CANCELLED`, with or without "by <uid>") and timed out (`TIMEOUT`); and the median run time
+(End minus Start) of those that ended. A Start before its Eligible (or Submit) time (the clocks the
+scheduler recorded disagree) counts as no wait, and a line after the table says how many did. A record
+whose Submit is not a time this report reads is counted by its state, its wait and run time left out,
+and a line says how many; the footer then says the shortest wait is not known when nothing else
+started. A line that is not a record (a notice the site prints first) is left out and counted; when
+every line `sacct` printed is such a line, the report fails (exit 1) and names the first. Rows are
+sorted by partition, then QoS. The footer is the one sentence the maintainer asked for, `shortest median
+wait: <partition> <qos> (<median>)`, over every row that started a job (a tie keeps the first in table
+order), and nothing more: the numbers decide. An account with no jobs in the window gets one line and
+exit 0; a failed query gets the scheduler's message on one line and exit 1; `hpcworker queue` alone, or
+with another word, a usage line and exit 2.
 
 A sample, made-up data for the shape of it, not a measurement (nothing has been measured on the grid
-yet: "not yet measured"):
+yet: "not yet measured"); it is what the tool prints for the records `tests/test_queue.py` plants:
 
 ```
-queue report for st1234, the last 14 days: 13 records read by `sacct -u st1234 -S now-14days -X -n -P --format=JobID,JobName,Partition,QOS,Submit,Start,End,State,Timelimit,NodeList`
+queue report for st1234: 16 records of jobs eligible or running at any time in the last 14 days, read by `TZ=UTC0 SLURM_TIME_FORMAT=standard sacct -u st1234 -S now-14days -X -D -n -P --format=JobID,Partition,QOS,Submit,Eligible,Start,End,State,Timelimit,NodeList`
+one record per attempt of a requeued job; a wait is Start minus Eligible (minus Submit where Eligible is not a time); times in UTC
 
-partition  qos         started  median wait  p90 wait     max wait     pending  preempted  cancelled  timed out  median run
-gvohp      gpu               1  1m 0s        1m 0s        1m 0s              0          0          0          0  -
-reqp       requeue           5  10m 0s       2d 0h 0m     2d 0h 0m           1          1          1          1  2h 0m
-secp       secondary         5  0m 45s       6m 0s        6m 0s              0          0          0          0  30m 0s
+partition  qos         started  median wait  p90 wait     max wait     pending  preempted  requeued  cancelled  timed out  median run
+gvohp      gpu               1  1m 0s        1m 0s        1m 0s              0          0         0          0          0  -
+reqp       requeue           8  7m 30s       2d 0h 0m     2d 0h 0m           1          1         1          1          1  3h 0m
+secp       secondary         5  0m 45s       6m 0s        6m 0s              0          0         0          0          0  30m 0s
 
-1 job started before being submitted, by the clocks the scheduler recorded; each counts as no wait
+1 record whose Start is before its Eligible (or Submit) time, by the clocks the scheduler recorded; each counts as no wait
 shortest median wait: secp secondary (0m 45s)
 
 partitions now (sinfo -h -o '%P|%l|%a|%D|%T'):
@@ -1250,8 +1282,11 @@ partitions now (sinfo -h -o '%P|%l|%a|%D|%T'):
 
 (The last block is `--limits`: one line per partition from `sinfo`, the time limit, whether it is up,
 and its nodes by state; `*` on the default partition is written "(default)".) Not yet measured on the
-grid: `sacct -S now-Ndays` and the field names against Wayne State's Slurm, the `Unknown` and `None`
-spellings in its `Start` and `End` columns, and `sinfo`'s `%D|%T` form there. The adapter calls are
+grid: `sacct -S now-Ndays` and the field names against Wayne State's Slurm; the `Unknown` and `None`
+spellings in its `Eligible`, `Start` and `End` columns; that its `sacct` prints UTC under `TZ=UTC0` and
+`YYYY-MM-DDTHH:MM:SS` under `SLURM_TIME_FORMAT=standard`; whether it hides a requeued job's earlier
+attempts without `-D`, which state word it gives them (`REQUEUED` or `PREEMPTED`), and whether Submit
+and Eligible are reset at a requeue; and `sinfo`'s `%D|%T` form there. The adapter calls are
 `adapter_history DAYS` and `adapter_partitions` with their `_query` twins, which print the line each
 runs (`lib/adapters/common.sh`); PBS and LSF define `adapter_history` as exit 2 and nothing printed.
 
@@ -1403,10 +1438,13 @@ clearing them, a restrict of no run taking no name) and the watch slots (none fo
 exist); and the real verbs against the fake scheduler with no python3 on PATH),
 `test_profile_awk.py` (`lib/profile.awk` and `lib/profile_sh.sh` against `profile.py`, byte for byte, as
 "The login node" says), `test_queue.py` (`queue report` against records planted in the fake
-scheduler's `sacct`: every row, count and the footer, the one exact `sacct` argv and nothing else run,
-`--limits`'s `sinfo`, the refusals, a PBS site, and the days-from-civil formula against python's
-`calendar`), `test_watch_json.py` (each line of `worker watch --json`, the keepalive, a
-heartbeat that is no change, the ends and their exit statuses, the poll floor, a reader that goes and a
+scheduler's `sacct`: every row, count and the footer, a chain successor's wait from Eligible, each
+attempt of a requeued job, nearest-rank p90 against the maximum, a partition whose name is a prefix of
+another's, waits across a daylight-saving change and under a caller's own `TZ` and `SLURM_TIME_FORMAT`,
+the one exact `sacct` argument list and environment and nothing else run, nothing written in any folder
+of the fake grid or under `TMPDIR`, `--limits`'s `sinfo`, the refusals, a PBS site, diag's partition
+check on the five-field `sinfo`, and the days-from-civil formula against python's `calendar`),
+`test_watch_json.py` (each line of `worker watch --json`, the keepalive, a heartbeat that is no change, the ends and their exit statuses, the poll floor, a reader that goes and a
 hang-up giving back the slot), `PlainExec` in `test_connect.py` (connect and `claude login --plain`
 with no terminal: no `--pty`, the code from standard input and never written back; the setup of an
 account never set up; no sign-in under the gate), the gate's verbs and `browser-key add` in the

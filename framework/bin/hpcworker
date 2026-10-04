@@ -42,8 +42,11 @@
 #   hpcworker gate    that line's forced command: SSH_ORIGINAL_COMMAND, eight fixed verbs, never a sign-in
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker queue report [--days N] [--limits]                 maintainers and lab leads: how long this account's jobs waited
-#                                                                per partition and QoS, from one sacct over the last N days
-#                                                                (default 14, up to 90); --limits adds one sinfo. Slurm sites only
+#                                                                per partition and QoS (Start minus Eligible, or minus Submit
+#                                                                where Eligible is not a time; each attempt of a requeued job
+#                                                                its own), from one sacct of the jobs eligible or running at
+#                                                                any time in the last N days (default 14, up to 90), times in
+#                                                                UTC; --limits adds one sinfo. Slurm sites only
 #   hpcworker version                                            the number; "(shared copy at DIR)" on the lab's copy
 #
 # Rules this command keeps: it never reads, copies or prints a Claude credential (Claude Code keeps
@@ -1900,24 +1903,35 @@ cmd_login_setup() {
 # policy he wants the numbers from the grid itself. So: ONE sacct over the account's own history, and with
 # --limits ONE sinfo, both bounded by timeout; two queries on the login node for a report a person types
 # now and then is within the one-scheduler-command-per-action etiquette as discover and diag keep it (the
-# 60 s floor binds clients that poll, and nothing here polls). Nothing is written anywhere.
+# 60 s floor binds clients that poll, and nothing here polls). The report itself writes nothing; load_profile,
+# as for every verb, may write its cache ~/.hpcworker/profile.env (on the first load after an install, or
+# after the profile changed).
 #
-# The arithmetic is awk, POSIX only: the login node's awk has no mktime, strftime or systime, so a
-# Slurm time (YYYY-MM-DDTHH:MM:SS, the cluster's local clock, no zone) becomes seconds by the
-# days-from-civil formula below. The report uses differences only (Start minus Submit, End minus
-# Start), so the zone never enters it. Values reach awk in the environment and on stdin, never as
-# operands or -v (both read escapes), as HPCW_JSON_AWK has them.
-#   HPCW_Q_MODE=epoch   stdin: one time a line -> its seconds since 1970-01-01T00:00:00 of the same clock,
-#                       an empty line for anything that is not a time (the tests check the formula so)
+# The wait is Start minus Eligible, the moment the job could first run: a chain successor is submitted while its
+# predecessor runs and becomes eligible only when that one ends, so Start minus Submit counted the predecessor's
+# whole run as queue time on every link of an always-on chain. Submit stands in only where Eligible is not a
+# time. Each attempt of a requeued job is its own record (adapter_history's -D) and
+# its own wait: each attempt waited for a node.
+#
+# The arithmetic is awk, POSIX only, like lib/profile.awk: one text that runs the same under mawk (the ubuntu
+# CI lane, a laptop) and gawk 4.0.2 (warrior, the centos 7 lane). mktime, strftime and systime are extensions
+# outside POSIX, and mktime reads a time in the local zone. sacct runs under TZ=UTC0 and
+# SLURM_TIME_FORMAT=standard (adapter_history), so a time arrives here as YYYY-MM-DDTHH:MM:SS in UTC, which the
+# days-from-civil formula below turns into seconds since 1970-01-01T00:00:00Z; a difference is then a true
+# interval, across a daylight-saving change too (in the cluster's own zone one autumn hour reads twice and one
+# spring hour never happens, so a wait or a run that spans either came out an hour off, or clamped to nothing). Values reach awk in the
+# environment and on stdin, never as operands or -v (both read escapes), as HPCW_JSON_AWK has them.
+#   HPCW_Q_MODE=epoch   stdin: one time a line -> its seconds since 1970-01-01T00:00:00 UTC, an empty line for
+#                       anything that is not a time (the tests check the formula so)
 #   HPCW_Q_MODE=report  stdin: adapter_history's records -> the report; HPCW_Q_USER, HPCW_Q_DAYS and
-#                       HPCW_Q_QUERY fill the header
+#                       HPCW_Q_QUERY fill the header. Exit 4 and nothing printed when lines came and none was a record
 # shellcheck disable=SC2016
 HPCW_QUEUE_AWK='
 function days_from_civil(y, m, d,   era, yoe, doy, doe) {
   # days-from-civil (Howard Hinnant): the days from 1970-01-01 to a proleptic Gregorian date. The year
   # is taken to start in March so the leap day is its last day, in 400-year eras of 146097 days;
-  # integer arithmetic throughout. 2026-10-04 -> 20730 (times 86400: 1791072000, the UTC epoch of
-  # that midnight; here the clock is the cluster clock, and only differences are used)
+  # integer arithmetic throughout. 2026-10-04 -> 20730 (times 86400: 1791072000, the epoch of that
+  # midnight in UTC, the zone sacct prints in for this report)
   if (m <= 2) y--
   era = int((y >= 0 ? y : y - 399) / 400)
   yoe = y - era * 400
@@ -1946,22 +1960,28 @@ mode == "epoch" { print epoch($0); next }
 {
   sub(/\r$/, "")
   if ($0 ~ /^[ \t]*$/) next
-  if (NF < 8) { odd++; next }   # a line that is not a record (a notice sacct printed first): left out, counted
+  # the ten fields adapter_history asks for, none of them free text: any other count is not a record (a notice
+  # sacct printed first, or fields that do not line up), left out and counted rather than read one column off
+  if (NF != 10) { odd++; next }
   nrec++
-  part = $3; qos = $4; gsub(/^[ \t]+|[ \t]+$/, "", part); gsub(/^[ \t]+|[ \t]+$/, "", qos)
+  part = $2; qos = $3; gsub(/^[ \t]+|[ \t]+$/, "", part); gsub(/^[ \t]+|[ \t]+$/, "", qos)
   # SUBSEP sorts before every printable byte, so a plain string sort of the keys is partition first, then QoS
   k = part SUBSEP qos
   if (!(k in seen)) { seen[k] = 1; nk++; keys[nk] = k }
   st = $8; sub(/ .*/, "", st)   # "CANCELLED by 12345" -> CANCELLED
   if (st ~ /^PENDING/) pend[k]++
   if (st ~ /^PREEMPTED/) pre[k]++
+  if (st ~ /^REQUEUE/) req[k]++   # REQUEUED, and REQUEUE_HOLD or REQUEUE_FED where a site has them
   if (st ~ /^CANCELLED/) canc[k]++
   if (st ~ /^TIMEOUT/) tout[k]++
-  es = epoch($5); eb = epoch($6); ee = epoch($7)
-  if (es != "" && eb != "") {
-    w = eb - es
-    # a Start before its Submit: the clocks of the submit host and the controller disagree, or the record
-    # is odd; it counts as no wait rather than a negative one, and the report says how many did
+  es = epoch($4); el = epoch($5); eb = epoch($6); ee = epoch($7)
+  # Submit is a time on every record sacct keeps; when it is not, sacct printed a form this awk does not read, and
+  # the record is counted by its state and said, never quietly read as a job that did not start
+  if (es == "") { notime++; next }
+  if (eb != "") {
+    w = eb - (el != "" ? el : es)
+    # a Start before its Eligible (or Submit): the clocks of the submit host and the controller disagree, or the
+    # record is odd; it counts as no wait rather than a negative one, and the report says how many did
     if (w < 0) { w = 0; before++ }
     nw[k]++; wait[k, nw[k]] = w
     if (ee != "" && ee >= eb) { nr[k]++; run[k, nr[k]] = ee - eb }
@@ -1970,10 +1990,13 @@ mode == "epoch" { print epoch($0); next }
 END {
   if (mode != "report") exit
   user = ENVIRON["HPCW_Q_USER"]; days = ENVIRON["HPCW_Q_DAYS"]; query = ENVIRON["HPCW_Q_QUERY"]
-  if (nrec == 0) { print "no jobs of " user " in the history the scheduler keeps for the last " days " days (" query ")"; exit 0 }
-  printf "queue report for %s, the last %s days: %d records read by `%s`\n\n", user, days, nrec, query
-  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %9s  %9s  %9s  %s\n"
-  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "preempted", "cancelled", "timed out", "median run"
+  if (nrec == 0 && odd > 0) exit 4
+  if (nrec == 0) { print "no jobs of " user " eligible or running at any time in the last " days " days, in the history the scheduler keeps (" query ")"; exit 0 }
+  printf "queue report for %s: %d record%s of jobs eligible or running at any time in the last %s days, read by `%s`\n", user, nrec, (nrec > 1 ? "s" : ""), days, query
+  print "one record per attempt of a requeued job; a wait is Start minus Eligible (minus Submit where Eligible is not a time); times in UTC"
+  print ""
+  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %9s  %8s  %9s  %9s  %s\n"
+  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "preempted", "requeued", "cancelled", "timed out", "median run"
   for (i = 2; i <= nk; i++) { t = keys[i]; for (j = i - 1; j >= 1 && keys[j] > t; j--) keys[j + 1] = keys[j]; keys[j + 1] = t }
   best = ""
   for (i = 1; i <= nk; i++) {
@@ -1987,13 +2010,15 @@ END {
     }
     n = nr[k] + 0
     if (n > 0) { for (j = 1; j <= n; j++) a[j] = run[k, j]; ssort(a, n); rm = dur(median(a, n)) }
-    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, pre[k] + 0, canc[k] + 0, tout[k] + 0, rm
+    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, pre[k] + 0, req[k] + 0, canc[k] + 0, tout[k] + 0, rm
   }
   print ""
-  if (before > 0) printf "%d job%s started before being submitted, by the clocks the scheduler recorded; each counts as no wait\n", before, (before > 1 ? "s" : "")
+  if (before > 0) printf "%d record%s whose Start is before %s Eligible (or Submit) time, by the clocks the scheduler recorded; each counts as no wait\n", before, (before > 1 ? "s" : ""), (before > 1 ? "their" : "its")
+  if (notime > 0) printf "%d record%s whose times are not in the form this report reads (YYYY-MM-DDTHH:MM:SS): counted by state, %s wait and run time left out\n", notime, (notime > 1 ? "s" : ""), (notime > 1 ? "their" : "its")
   if (odd > 0) printf "%d line%s that %s not a record left out\n", odd, (odd > 1 ? "s" : ""), (odd > 1 ? "were" : "was")
-  if (best == "") print "shortest median wait: none (no job in the window has started)"
-  else print "shortest median wait: " best " (" dur(bestm) ")"
+  if (best != "") print "shortest median wait: " best " (" dur(bestm) ")"
+  else if (notime > 0) print "shortest median wait: not known (the times of " notime " record" (notime > 1 ? "s" : "") " could not be read)"
+  else print "shortest median wait: none (no job in the window has started)"
 }'
 queue_usage() { echo "usage: hpcworker queue report [--days N] [--limits]   (N from 1 to 90; 14 when not given)" >&2; exit 2; }
 cmd_queue() {
@@ -2013,8 +2038,12 @@ cmd_queue() {
     2) die "the queue report reads Slurm's history (sacct); this site's scheduler is $P_scheduler";;
     *) die "the scheduler's history could not be read: $(printf '%s' "$hist" | tr '\n' ' ' | sed 's/[[:space:]]*$//')";;
   esac
-  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_QUERY="$(adapter_history_query "$days")" LC_ALL=C awk "$HPCW_QUEUE_AWK" \
-    || die "the report could not be made from what the scheduler printed"
+  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_QUERY="$(adapter_history_query "$days")" LC_ALL=C awk "$HPCW_QUEUE_AWK"
+  case $? in
+    0) ;;
+    4) die "none of the lines sacct printed is a record this report reads; the first: $(printf '%s\n' "$hist" | grep -m1 '[^[:space:]]' | tr -d '\r')";;
+    *) die "the report could not be made from what the scheduler printed";;
+  esac
   [ $limits = 1 ] || return 0
   # the second query: what each partition allows now, so a wait can be read against its limit and its nodes
   local parts; parts=$(adapter_partitions)
@@ -2048,6 +2077,12 @@ DIAG_FIRST=1; DIAG_JSON=0
 emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
   if [ $DIAG_JSON = 1 ]; then [ $DIAG_FIRST = 1 ] || printf ','; DIAG_FIRST=0; printf '{"id":%s,"ok":%s,"warn":%s,"skip":%s,"detail":%s}' "$(json_str "$1")" "$2" "$3" "$4" "$(json_str "$5")"
   else local tag=FAIL; [ "$2" = true ] && tag=ok; [ "$3" = true ] && tag=warn; [ "$4" = true ] && tag=skip; printf '%-5s %-24s %s\n' "$tag" "$1" "$5"; fi
+}
+diag_partitions() { # the profile's partitions against sinfo's names
+  # one line per partition and node state since adapter_partitions carries both (queue report --limits): each name once
+  local parts; parts=$(adapter_partitions | cut -d'|' -f1 | sed 's/\*$//' | sort -u | tr '\n' ' ')
+  local want="$P_partition_cpu $P_partition_cpu_batch $P_partitions_gpu" bad="" p; for p in $want; do case " $parts " in *" $p "*) ;; *) bad="$bad $p";; esac; done
+  if [ -z "$bad" ]; then emit hpcw.partitions true false false "profile partitions exist: $want"; else emit hpcw.partitions false false false "not in sinfo:$bad (have: $parts)"; fi
 }
 diag_slurm_in_worker() { # Slurm inside the worker's container (framework 9): what the newest worker heartbeat says about it
   if [ "${P_scheduler_in_worker:-false}" = true ]; then
@@ -2099,10 +2134,7 @@ cmd_diag() {
   else local n; n=$(ps -u "$USER" --no-headers 2>/dev/null | wc -l | tr -d ' '); local cap="$P_login_node_rules_max_processes"
     if [ "$n" -ge "$cap" ]; then emit hpcw.login-node false false false "$n processes of yours on $(hostname -s); the site's cap is $cap"; elif [ "$n" -ge $((cap * 3 / 4)) ]; then emit hpcw.login-node true true false "$n processes of yours on $(hostname -s) (cap $cap)"; else emit hpcw.login-node true false false "$n processes of yours on $(hostname -s) (cap $cap)"; fi; fi
   if [ "$fam" = slurm ]; then
-    # one line per partition and node state since adapter_partitions carries both (queue report --limits): the names once
-    local parts; parts=$(adapter_partitions | cut -d'|' -f1 | sed 's/\*$//' | sort -u | tr '\n' ' ')
-    local want="$P_partition_cpu $P_partition_cpu_batch $P_partitions_gpu" bad="" p; for p in $want; do case " $parts " in *" $p "*) ;; *) bad="$bad $p";; esac; done
-    if [ -z "$bad" ]; then emit hpcw.partitions true false false "profile partitions exist: $want"; else emit hpcw.partitions false false false "not in sinfo:$bad (have: $parts)"; fi
+    diag_partitions
     local q; q=$(adapter_my_qos); local qb="" x; for x in $P_qos_cpu $P_qos_batch; do case " $q " in *" $x "*) ;; *) qb="$qb $x";; esac; done
     if [ -z "$q" ]; then emit hpcw.qos true true false "QoS list not readable (sacctmgr); profile wants $P_qos_cpu/$P_qos_batch"; elif [ -z "$qb" ]; then emit hpcw.qos true false false "QoS available: $q"; else emit hpcw.qos false false false "QoS not on your account:$qb (have: $q)"; fi
   fi

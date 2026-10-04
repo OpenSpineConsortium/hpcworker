@@ -131,21 +131,35 @@ adapter_run_short() { # PART QOS TIME NAME MEM -- CMD... : the same without a te
 # cost 9 ms of CPU on warrior; with %D and %T added, not measured there). The *_query twins print the command as a
 # person would type it, for the report's header: the format lives in one variable so the two cannot drift apart
 HPCW_SINFO_FORMAT='%P|%l|%a|%D|%T'
-HPCW_SACCT_FORMAT=JobID,JobName,Partition,QOS,Submit,Start,End,State,Timelimit,NodeList
+# No free-text field: -P does not escape the '|' between fields, so a job name holding one shifted every field after
+# it. Eligible is the moment the job could first run: a chain successor's is when its predecessor ended, not when it
+# was submitted
+HPCW_SACCT_FORMAT=JobID,Partition,QOS,Submit,Eligible,Start,End,State,Timelimit,NodeList
 adapter_partitions() { timeout 10 sinfo -h -o "$HPCW_SINFO_FORMAT" 2>/dev/null | sort -u; }   # NAME(*=default)|TIMELIMIT|AVAIL|NODES|NODE_STATE
 adapter_partitions_query() { printf "sinfo -h -o '%s'\n" "$HPCW_SINFO_FORMAT"; }
-adapter_history_query() { printf 'sacct -u %s -S now-%sdays -X -n -P --format=%s\n' "$USER" "$1" "$HPCW_SACCT_FORMAT"; }   # DAYS -> the line adapter_history runs
-adapter_history() { # DAYS -> one record per job of this account's from the last DAYS days: JobID|JobName|Partition|QOS|Submit|Start|End|State|Timelimit|NodeList
-  # ONE sacct, for `queue report` (a maintainer at a terminal). -X keeps each job's allocation line and drops its
-  # .batch and .extern steps, -n prints no header, -P puts a pipe between fields with nothing padded. Submit, Start
-  # and End are YYYY-MM-DDTHH:MM:SS in the cluster's local time with no zone; Start and End read "Unknown" while a
-  # job has not started (or ended), and Start reads "None" for one cancelled before it started; State may carry a
-  # word after it ("CANCELLED by 12345"). Bounded by `timeout 60`: the accounting database can be slow, and a person
-  # is waiting. Exit 1 with sacct's message on stderr when it failed. The argv is adapter_history_query's line, word
-  # for word, so the header's count can be checked against the grid by typing that line.
+# DAYS -> the line adapter_history runs, its two environment assignments first, so a person typing it sees what the report read
+adapter_history_query() { printf 'TZ=UTC0 SLURM_TIME_FORMAT=standard sacct -u %s -S now-%sdays -X -D -n -P --format=%s\n' "$USER" "$1" "$HPCW_SACCT_FORMAT"; }
+adapter_history() { # DAYS -> JobID|Partition|QOS|Submit|Eligible|Start|End|State|Timelimit|NodeList, one record per job and per earlier attempt of a requeued job
+  # ONE sacct, for `queue report` (a maintainer at a terminal). With -S and no -s, sacct lists the jobs that were
+  # eligible to run or running at any time between the start it is given and now: a job that became eligible
+  # before the window and was still in line or running when it began is listed, and a job held or waiting on a
+  # dependency (no eligible time yet, as the worker's queued successor has none) is not. -X keeps each job's allocation line and drops its .batch and
+  # .extern steps; -D (--duplicates) keeps every attempt of a job the scheduler requeued (a preemption on the
+  # requeue QoS) as its own record, where sacct would otherwise print the last one only; -n prints no header; -P
+  # puts a pipe between fields with nothing padded.
+  # The times: sacct prints them in its own environment's zone and in the form SLURM_TIME_FORMAT names, so it runs
+  # under TZ=UTC0 (UTC, with no daylight saving to make an hour read twice or not at all) and SLURM_TIME_FORMAT=standard
+  # (YYYY-MM-DDTHH:MM:SS), whatever the caller's own TZ or SLURM_TIME_FORMAT say; in the environment only, so the
+  # argv stays sacct's own. Start and End read "Unknown" while the job has not got there (Eligible too, though a job
+  # with no eligible time is not listed), and Start reads "None" for one cancelled before it started; State may
+  # carry a word after it ("CANCELLED by 12345").
+  # Bounded by `timeout 60`: the accounting database can be slow, and a person is waiting. Exit 1 with sacct's
+  # message on stderr when it failed. The argv and the two assignments are adapter_history_query's line, word for
+  # word, so the header's count can be checked against the grid by typing that line.
   local days="$1" out rc
-  local -a cmd=(sacct -u "$USER" -S "now-${days}days" -X -n -P "--format=$HPCW_SACCT_FORMAT")
-  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 60 "${cmd[@]}" 2>&1); rc=$?; else out=$(LC_ALL=C "${cmd[@]}" 2>&1); rc=$?; fi
+  local -a cmd=(sacct -u "$USER" -S "now-${days}days" -X -D -n -P "--format=$HPCW_SACCT_FORMAT")
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C TZ=UTC0 SLURM_TIME_FORMAT=standard timeout 60 "${cmd[@]}" 2>&1); rc=$?
+  else out=$(LC_ALL=C TZ=UTC0 SLURM_TIME_FORMAT=standard "${cmd[@]}" 2>&1); rc=$?; fi
   [ $rc = 124 ] && { echo "sacct did not answer within 60 s" >&2; return 1; }
   [ $rc = 0 ] || { printf '%s\n' "$out" >&2; return 1; }
   printf '%s\n' "$out"

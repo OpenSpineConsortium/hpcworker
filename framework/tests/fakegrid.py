@@ -2,8 +2,9 @@
 with a site profile, "testsite", that names it and keeps the state directory under a scratch home), and
 a fake scheduler on PATH: sbatch, squeue, scancel and scontrol that keep their jobs in a file, an
 srun that plays the plain sign-in sitting (lib/login_plain.sh's lines) instead of allocating anything,
-and a sacct and sinfo that print what a test plants (FAKE_SACCT, FAKE_SINFO) for `queue report`.
-Every call is logged in <sched>/calls. Nothing here reaches a real scheduler or the network."""
+and a sacct and sinfo that print what a test plants (FAKE_SACCT, FAKE_SINFO) for `queue report` and diag.
+Every call is logged in <sched>/calls; sacct's and sinfo's also in <sched>/argv, each argument apart.
+Nothing here reaches a real scheduler or the network."""
 import json
 import os
 import shutil
@@ -68,21 +69,36 @@ echo "scontrol $*" >> "$d/calls"
 exit 0
 """
 
+# Both also log each call to <sched>/argv with its arguments kept apart, which "calls" (joined by spaces) cannot: a
+# record is the name, TZ and SLURM_TIME_FORMAT as the program saw them ("(unset)" when not set), the number of
+# arguments, then each argument on a line of its own (Grid.argvs reads it back).
+FAKE_ARGV_LOG = r"""{ printf '%s\n%s\n%s\n%d\n' "${0##*/}" "${TZ-(unset)}" "${SLURM_TIME_FORMAT-(unset)}" $#; [ $# -gt 0 ] && printf '%s\n' "$@"; } >> "$d/argv"
+"""
+
 # the account's history, for `queue report`: FAKE_SACCT holds the records sacct prints (its -P lines, planted by
-# the test; nothing when unset, as for an account with no jobs), FAKE_SACCT_FAIL the message it fails with instead
+# the test; nothing when unset, as for an account with no jobs), FAKE_SACCT_FAIL the message it fails with instead.
+# A field written @SECONDS is an instant, printed the way sacct prints a time: in the zone of its own environment's TZ
+# and in the form SLURM_TIME_FORMAT names (standard or unset: YYYY-MM-DDTHH:MM:SS; relative: a short day and time;
+# anything else: a date format), so a test sees what a caller's zone and format would do to the report
 FAKE_SACCT = r"""#!/bin/bash
 d="${FAKE_SCHED_DIR:?}"
 echo "sacct $*" >> "$d/calls"
-if [ -n "${FAKE_SACCT_FAIL:-}" ]; then echo "$FAKE_SACCT_FAIL" >&2; exit 1; fi
-[ -n "${FAKE_SACCT:-}" ] && printf '%s\n' "$FAKE_SACCT"
+""" + FAKE_ARGV_LOG + r"""if [ -n "${FAKE_SACCT_FAIL:-}" ]; then echo "$FAKE_SACCT_FAIL" >&2; exit 1; fi
+[ -n "${FAKE_SACCT:-}" ] || exit 0
+case "${SLURM_TIME_FORMAT:-standard}" in standard) f='+%Y-%m-%dT%H:%M:%S';; relative) f='+%d %b %H:%M';; *) f="+$SLURM_TIME_FORMAT";; esac
+while IFS= read -r line; do
+  out=""
+  while [[ "$line" =~ ^([^@]*)@([0-9]+)(.*)$ ]]; do out="$out${BASH_REMATCH[1]}$(date -d "@${BASH_REMATCH[2]}" "$f")"; line="${BASH_REMATCH[3]}"; done
+  printf '%s%s\n' "$out" "$line"
+done <<< "$FAKE_SACCT"
 exit 0
 """
 
-# the partitions, for `queue report --limits`, discover and diag: FAKE_SINFO holds the lines sinfo prints (nothing when unset)
+# the partitions, for `queue report --limits` and diag's partition check: FAKE_SINFO holds the lines sinfo prints (nothing when unset)
 FAKE_SINFO = r"""#!/bin/bash
 d="${FAKE_SCHED_DIR:?}"
 echo "sinfo $*" >> "$d/calls"
-[ -n "${FAKE_SINFO:-}" ] && printf '%s\n' "$FAKE_SINFO"
+""" + FAKE_ARGV_LOG + r"""[ -n "${FAKE_SINFO:-}" ] && printf '%s\n' "$FAKE_SINFO"
 exit 0
 """
 
@@ -229,6 +245,21 @@ class Grid(object):
             return []
         with open(p) as fh:
             return fh.read().splitlines()
+
+    def argvs(self):
+        """the calls the fake sacct and sinfo logged with each argument kept apart, in order:
+        [{"cmd": NAME, "argv": [ARG, ...], "TZ": ..., "SLURM_TIME_FORMAT": ...}]"""
+        p = os.path.join(self.sched, "argv")
+        if not os.path.exists(p):
+            return []
+        with open(p, newline="") as fh:
+            lines = fh.read().split("\n")[:-1]
+        out, i = [], 0
+        while i < len(lines):
+            n = int(lines[i + 3])
+            out.append({"cmd": lines[i], "TZ": lines[i + 1], "SLURM_TIME_FORMAT": lines[i + 2], "argv": lines[i + 4:i + 4 + n]})
+            i += 4 + n
+        return out
 
     def jobs(self, lines=None):
         p = os.path.join(self.sched, "jobs")
