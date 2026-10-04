@@ -82,3 +82,7 @@ adapter_run_short() { # no non-interactive "run and wait" exists in PBS; use the
 
 adapter_partitions() { qstat -Q 2>/dev/null | awk 'NR>2 && $1!="" {print $1"||up"}'; }
 adapter_my_qos() { :; }
+adapter_partitions_query() { echo "qstat -Q"; }
+# `queue report` reads Slurm's sacct; PBS keeps its history in a form this tool does not read (nothing printed, exit 2)
+adapter_history_query() { :; }
+adapter_history() { return 2; }

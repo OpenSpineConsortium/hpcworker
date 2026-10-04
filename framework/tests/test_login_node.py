@@ -36,6 +36,7 @@ EXPECTED = {
     "connect, returning": [],
     "discover": [],
     "probe": [],
+    "queue report --limits": [],
     "login-setup": [],
     "browser-key add": [],
     "gate version": [],
@@ -119,6 +120,11 @@ class BannedPrograms(unittest.TestCase):
         run("connect, returning", "connect --profile testsite --login auto")
         run("discover", "discover")
         run("probe", "probe")
+        # a maintainer's report (2026-10-04): one sacct and one sinfo, the arithmetic in awk
+        run("queue report --limits", "queue report --limits",
+            FAKE_SACCT="40500001|reqp|requeue|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:00:30|2026-10-01T09:00:30|COMPLETED|08:00:00|asx10\n"
+                       "40500006|reqp|requeue|2026-10-04T07:00:00|2026-10-04T07:00:00|Unknown|Unknown|PENDING|08:00:00|None assigned",
+            FAKE_SINFO="reqp|14-00:00:00|up|100|allocated")
         if LOGIN_SETUP_OK:
             # in the student's own terminal (stood in for, as test_login_setup.py does), with no profile.json: every site profile is read
             os.rename(os.path.join(g.hpcw, "profile.json"), os.path.join(g.hpcw, "profile.json.aside"))
@@ -157,6 +163,10 @@ class BannedPrograms(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_each_verb_ran(self):
+        q = self.ran["queue report --limits"]
+        self.assertEqual(q["rc"], 0, q)
+        self.assertTrue(q["out"].startswith("queue report for st1234: 2 records "), q)
+        self.assertIn("partitions now (sinfo -h -o '%P|%l|%a|%D|%T'):", q["out"])
         for label, r in self.ran.items():
             self.assertEqual(r["rc"], 0, (label, r["out"], r["err"]))
         self.assertIn("HPCW-STEP signed-in st1234@wayne.edu max", self.ran["connect, first"]["out"])

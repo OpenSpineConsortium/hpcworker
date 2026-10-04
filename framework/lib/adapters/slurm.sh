@@ -127,5 +127,44 @@ adapter_run_short() { # PART QOS TIME NAME MEM -- CMD... : the same without a te
   srun -p "$part" ${qos:+-q "$qos"} -t "$time" -N1 -n1 --mem="$mem" -J "$name" --quiet "$@"
 }
 
-adapter_partitions() { timeout 10 sinfo -h -o '%P|%l|%a' 2>/dev/null | sort -u; }   # NAME(*=default)|TIMELIMIT|AVAIL (9 ms of CPU on warrior)
+# one line per partition and node state, so `queue report --limits` can count nodes by state (the three-field form
+# cost 9 ms of CPU on warrior; with %D and %T added, not measured there). The *_query twins print the command as a
+# person would type it, for the report's header: the format lives in one variable so the two cannot drift apart
+HPCW_SINFO_FORMAT='%P|%l|%a|%D|%T'
+# No free-text field: -P does not escape the '|' between fields, so a job name holding one shifted every field after
+# it. Eligible is when the scheduler first counted the job as waiting to run, free of its dependencies and its begin
+# time: a chain successor's is when its predecessor ended, not when it was submitted. It is not the moment a node
+# could be had: time held back by the account's own limits, or an array's (%N), comes after it
+HPCW_SACCT_FORMAT=JobID,Partition,QOS,Submit,Eligible,Start,End,State,Timelimit,NodeList
+adapter_partitions() { timeout 10 sinfo -h -o "$HPCW_SINFO_FORMAT" 2>/dev/null | sort -u; }   # NAME(*=default)|TIMELIMIT|AVAIL|NODES|NODE_STATE
+adapter_partitions_query() { printf "sinfo -h -o '%s'\n" "$HPCW_SINFO_FORMAT"; }
+# DAYS -> the line adapter_history runs, its two environment assignments first, so a person typing it sees what the report read
+adapter_history_query() { printf 'TZ=UTC0 SLURM_TIME_FORMAT=standard sacct -u %s -S now-%sdays -X -D -n -P --format=%s\n' "$USER" "$1" "$HPCW_SACCT_FORMAT"; }
+adapter_history() { # DAYS -> JobID|Partition|QOS|Submit|Eligible|Start|End|State|Timelimit|NodeList, one record per job and per earlier attempt of a requeued job
+  # ONE sacct, for `queue report` (a maintainer at a terminal). With -S and no -s, sacct lists the jobs that were
+  # eligible to run or running at any time between the start it is given and now: a job that became eligible
+  # before the window and was still in line or running when it began is listed, and a job held or waiting on a
+  # dependency since it was submitted (no eligible time yet, as the worker's queued successor has none) is not. One
+  # held after it became eligible keeps that time, as Slurm's source reads, and is listed as PENDING (not yet
+  # measured at Wayne State). -X keeps each job's allocation line and drops its .batch and
+  # .extern steps; -D (--duplicates) keeps every attempt of a job the scheduler requeued (a preemption on the
+  # requeue QoS) as its own record, where sacct would otherwise print the last one only; -n prints no header; -P
+  # puts a pipe between fields with nothing padded.
+  # The times: sacct prints them in its own environment's zone and in the form SLURM_TIME_FORMAT names, so it runs
+  # under TZ=UTC0 (UTC, with no daylight saving to make an hour read twice or not at all) and SLURM_TIME_FORMAT=standard
+  # (YYYY-MM-DDTHH:MM:SS), whatever the caller's own TZ or SLURM_TIME_FORMAT say; in the environment only, so the
+  # argv stays sacct's own. Start and End read "Unknown" while the job has not got there (Eligible too, though a job
+  # with no eligible time is not listed), and Start reads "None" for one cancelled before it started; State may
+  # carry a word after it ("CANCELLED by 12345").
+  # Bounded by `timeout 60`: the accounting database can be slow, and a person is waiting. Exit 1 with sacct's
+  # message on stderr when it failed. The argv and the two assignments are adapter_history_query's line, word for
+  # word, so the header's count can be checked against the grid by typing that line.
+  local days="$1" out rc
+  local -a cmd=(sacct -u "$USER" -S "now-${days}days" -X -D -n -P "--format=$HPCW_SACCT_FORMAT")
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C TZ=UTC0 SLURM_TIME_FORMAT=standard timeout 60 "${cmd[@]}" 2>&1); rc=$?
+  else out=$(LC_ALL=C TZ=UTC0 SLURM_TIME_FORMAT=standard "${cmd[@]}" 2>&1); rc=$?; fi
+  [ $rc = 124 ] && { echo "sacct did not answer within 60 s" >&2; return 1; }
+  [ $rc = 0 ] || { printf '%s\n' "$out" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 adapter_my_qos() { command -v sacctmgr >/dev/null 2>&1 && timeout 10 sacctmgr -n -P show assoc where user="$USER" format=qos 2>/dev/null | tr ',' '\n' | sort -u | tr '\n' ' '; }
