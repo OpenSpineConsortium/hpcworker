@@ -1,7 +1,8 @@
 """A scratch grid account for the framework 10 tests: the lab's shared copy (a copy of this checkout
 with a site profile, "testsite", that names it and keeps the state directory under a scratch home), and
-a fake scheduler on PATH: sbatch, squeue, scancel and scontrol that keep their jobs in a file, and an
-srun that plays the plain sign-in sitting (lib/login_plain.sh's lines) instead of allocating anything.
+a fake scheduler on PATH: sbatch, squeue, scancel and scontrol that keep their jobs in a file, an
+srun that plays the plain sign-in sitting (lib/login_plain.sh's lines) instead of allocating anything,
+and a sacct and sinfo that print what a test plants (FAKE_SACCT, FAKE_SINFO) for `queue report`.
 Every call is logged in <sched>/calls. Nothing here reaches a real scheduler or the network."""
 import json
 import os
@@ -64,6 +65,24 @@ FAKE_SCONTROL = r"""#!/bin/bash
 d="${FAKE_SCHED_DIR:?}"
 echo "scontrol $*" >> "$d/calls"
 [ "$1 $2" = "show job" ] && echo "JobId=$3 JobName=hpcw_worker UserId=st1234 SubmitTime=${FAKE_SUBMIT_TIME:-2026-10-01T08:00:00} StartTime=Unknown"
+exit 0
+"""
+
+# the account's history, for `queue report`: FAKE_SACCT holds the records sacct prints (its -P lines, planted by
+# the test; nothing when unset, as for an account with no jobs), FAKE_SACCT_FAIL the message it fails with instead
+FAKE_SACCT = r"""#!/bin/bash
+d="${FAKE_SCHED_DIR:?}"
+echo "sacct $*" >> "$d/calls"
+if [ -n "${FAKE_SACCT_FAIL:-}" ]; then echo "$FAKE_SACCT_FAIL" >&2; exit 1; fi
+[ -n "${FAKE_SACCT:-}" ] && printf '%s\n' "$FAKE_SACCT"
+exit 0
+"""
+
+# the partitions, for `queue report --limits`, discover and diag: FAKE_SINFO holds the lines sinfo prints (nothing when unset)
+FAKE_SINFO = r"""#!/bin/bash
+d="${FAKE_SCHED_DIR:?}"
+echo "sinfo $*" >> "$d/calls"
+[ -n "${FAKE_SINFO:-}" ] && printf '%s\n' "$FAKE_SINFO"
 exit 0
 """
 
@@ -178,7 +197,8 @@ class Grid(object):
         os.makedirs(self.sched)
         self.bin = os.path.join(td, "fakebin")
         os.makedirs(self.bin)
-        for name, text in (("sbatch", FAKE_SBATCH), ("squeue", FAKE_SQUEUE), ("scancel", FAKE_SCANCEL), ("scontrol", FAKE_SCONTROL), ("srun", FAKE_SRUN)):
+        for name, text in (("sbatch", FAKE_SBATCH), ("squeue", FAKE_SQUEUE), ("scancel", FAKE_SCANCEL), ("scontrol", FAKE_SCONTROL), ("srun", FAKE_SRUN),
+                           ("sacct", FAKE_SACCT), ("sinfo", FAKE_SINFO)):
             path = os.path.join(self.bin, name)
             with open(path, "w", newline="\n") as fh:
                 fh.write(text)

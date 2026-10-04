@@ -955,7 +955,8 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
   (60 s or more) is part of the schema. `worker start` asks the scheduler once about the running job
   and its queued successor together; `worker stop` waits for the job's own `stop.done`, asks once,
   and cancels in one call only what the scheduler still holds; `probe` asks once whether the last
-  probe is still queued or running before it submits another.
+  probe is still queued or running before it submits another; `queue report`, typed by a maintainer
+  now and then, makes one `sacct` (and one `sinfo` with `--limits`) and polls nothing.
 - Container temp and cache live on the compute node's local disk, in a directory named by the
   profile (`node_tmp`), removed by a trap however the job ends. `$TMPDIR` is not trusted unless the
   profile says it is node-local (at Wayne State it points at CephFS). Sockets and pipes go under
@@ -1019,6 +1020,7 @@ running for milliseconds):
 | `worker restrict` | none | nothing |
 | `login-setup` | none | nothing (`ssh-keygen`, `ssh -G`, `getent` under `timeout 5`, `restorecon` where present) |
 | `discover`, `probe`, `diag` | none | nothing (one `sinfo` under `timeout 10`; one `squeue` for a probe on record, one `sbatch`) |
+| `queue report` (a maintainer at a terminal, never the extension) | none | nothing (one `sacct` under `timeout 60`; one `sinfo` under `timeout 10` with `--limits`) |
 | `browser-key add` (version 11) | none | nothing (`sha256sum`, `base64`, two `ssh-keygen -l`, one `stat` over the copy's files, `restorecon` where present) |
 | gate `version`, `read`, `forget` | none | nothing |
 | gate `status`, `stop`, `restrict` | none | as `worker status`, `stop`, `restrict` |
@@ -1187,6 +1189,72 @@ the wrappers. A worker's Claude Code submitting a real job from a Remote Control
 run, nor a SIF image (the user lists are then read with one `cat` inside the image instead of from
 the image folder).
 
+## How long jobs waited: `hpcworker queue report` (maintainers and lab leads)
+
+greg, 2026-10-04 15:19Z: an allocation on the requeue partition "takes like forever", primary or
+secondary may be faster, and a requeue job could stay in line as a second option. Before the worker
+gets a two-queue policy the numbers have to come from the grid itself, so this verb reads the
+account's own scheduler history once and says how long its jobs waited, per partition and QoS. It is
+for the maintainer and the lab leads at a terminal; students never see it (no contract line, no panel
+words), and it is Slurm only (a PBS or LSF site is told so in one line, exit 1).
+
+```
+hpcworker queue report [--days N] [--limits]      # N from 1 to 90; 14 when not given
+```
+
+What it runs on the login node: one `sacct -u $USER -S now-Ndays -X -n -P --format=JobID,JobName,
+Partition,QOS,Submit,Start,End,State,Timelimit,NodeList` under `timeout 60` (`-X`: each job's
+allocation line only, no `.batch` or `.extern` steps), and with `--limits` one `sinfo -h -o
+'%P|%l|%a|%D|%T'` under `timeout 10`. Two queries typed by a person now and then is within the
+one-scheduler-command-per-action etiquette, as `discover` and `diag` keep it; the 60 s floor binds
+clients that poll, and nothing here polls. Nothing is written anywhere. The header names the account,
+the window, the number of records read and the `sacct` line word for word, so the count can be checked
+against the grid by typing that line.
+
+The arithmetic is POSIX awk (the login node's awk has no `mktime` or `strftime`): a Slurm time,
+`YYYY-MM-DDTHH:MM:SS` in the cluster's local clock with no zone, becomes seconds by the days-from-civil
+formula (`HPCW_QUEUE_AWK` in `bin/hpcworker`; `tests/test_queue.py` holds it to python's `calendar`
+over a sweep of dates), and only differences are used (Start minus Submit; End minus Start), so the
+zone never enters. Per partition and QoS: the jobs that started (a Start that is a time), the median,
+p90 (nearest rank: the value at ceil(0.9 n)) and maximum of their waits, written as `Nd Nh Nm`, `Nh Nm`
+or `Nm Ns`, whichever fits; the jobs pending now (State `PENDING`), preempted (`PREEMPTED`), cancelled
+(`CANCELLED`, with or without "by <uid>") and timed out (`TIMEOUT`); and the median run time (End minus
+Start) of the jobs that ended. A Start before its Submit (the clocks the scheduler recorded disagree)
+counts as no wait, and a line after the table says how many did. A line that is not a record (a notice
+the site prints first) is left out and counted. Rows are sorted by partition, then QoS. The footer is
+the one sentence the maintainer asked for, `shortest median wait: <partition> <qos> (<median>)`, over
+every row that started a job (a tie keeps the first in table order), and nothing more: the numbers
+decide. An account with no jobs in the window gets one line and exit 0; a failed query gets the
+scheduler's message on one line and exit 1; `hpcworker queue` alone, or with another word, a usage line
+and exit 2.
+
+A sample, made-up data for the shape of it, not a measurement (nothing has been measured on the grid
+yet: "not yet measured"):
+
+```
+queue report for st1234, the last 14 days: 13 records read by `sacct -u st1234 -S now-14days -X -n -P --format=JobID,JobName,Partition,QOS,Submit,Start,End,State,Timelimit,NodeList`
+
+partition  qos         started  median wait  p90 wait     max wait     pending  preempted  cancelled  timed out  median run
+gvohp      gpu               1  1m 0s        1m 0s        1m 0s              0          0          0          0  -
+reqp       requeue           5  10m 0s       2d 0h 0m     2d 0h 0m           1          1          1          1  2h 0m
+secp       secondary         5  0m 45s       6m 0s        6m 0s              0          0          0          0  30m 0s
+
+1 job started before being submitted, by the clocks the scheduler recorded; each counts as no wait
+shortest median wait: secp secondary (0m 45s)
+
+partitions now (sinfo -h -o '%P|%l|%a|%D|%T'):
+  gvohp             time limit 7-00:00:00    up     8 nodes: 6 allocated, 2 idle
+  reqp              time limit 14-00:00:00   up     115 nodes: 100 allocated, 15 mixed
+  secp (default)    time limit 7-00:00:00    up     44 nodes: 30 allocated, 2 drained, 12 idle
+```
+
+(The last block is `--limits`: one line per partition from `sinfo`, the time limit, whether it is up,
+and its nodes by state; `*` on the default partition is written "(default)".) Not yet measured on the
+grid: `sacct -S now-Ndays` and the field names against Wayne State's Slurm, the `Unknown` and `None`
+spellings in its `Start` and `End` columns, and `sinfo`'s `%D|%T` form there. The adapter calls are
+`adapter_history DAYS` and `adapter_partitions` with their `_query` twins, which print the line each
+runs (`lib/adapters/common.sh`); PBS and LSF define `adapter_history` as exit 2 and nothing printed.
+
 ## Files
 
 ```
@@ -1269,7 +1337,9 @@ Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R
 4. A scheduler other than Slurm, PBS or LSF: add `lib/adapters/<family>.sh` with the eight calls
    (`adapter_detect_scheduler`, `adapter_detect_runtime`, `adapter_submit`, `adapter_status`,
    `adapter_cancel`, `adapter_attach`, `adapter_node_tmp`, `adapter_runtime_exec`) plus
-   `adapter_interactive`, `adapter_run_short`, `adapter_status_many` and `adapter_submit_after`, a
+   `adapter_interactive`, `adapter_run_short`, `adapter_status_many`, `adapter_submit_after`,
+   `adapter_partitions` and `adapter_history` with their `_query` twins (`queue report`; a scheduler
+   whose history the tool does not read defines `adapter_history` as exit 2 with nothing printed), a
    header block in `profile.py:header_lines` and the same in `hpcw_render` (`lib/profile_sh.sh`;
    `tests/test_profile_awk.py` holds them together), and fixtures under `tests/fixtures/`.
 
@@ -1332,7 +1402,10 @@ never` last, 84 hostile lines under three locales, a hostile environment, `versi
 clearing them, a restrict of no run taking no name) and the watch slots (none for a run that does not
 exist); and the real verbs against the fake scheduler with no python3 on PATH),
 `test_profile_awk.py` (`lib/profile.awk` and `lib/profile_sh.sh` against `profile.py`, byte for byte, as
-"The login node" says), `test_watch_json.py` (each line of `worker watch --json`, the keepalive, a
+"The login node" says), `test_queue.py` (`queue report` against records planted in the fake
+scheduler's `sacct`: every row, count and the footer, the one exact `sacct` argv and nothing else run,
+`--limits`'s `sinfo`, the refusals, a PBS site, and the days-from-civil formula against python's
+`calendar`), `test_watch_json.py` (each line of `worker watch --json`, the keepalive, a
 heartbeat that is no change, the ends and their exit statuses, the poll floor, a reader that goes and a
 hang-up giving back the slot), `PlainExec` in `test_connect.py` (connect and `claude login --plain`
 with no terminal: no `--pty`, the code from standard input and never written back; the setup of an

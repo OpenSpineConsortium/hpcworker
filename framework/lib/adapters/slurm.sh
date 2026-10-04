@@ -127,5 +127,27 @@ adapter_run_short() { # PART QOS TIME NAME MEM -- CMD... : the same without a te
   srun -p "$part" ${qos:+-q "$qos"} -t "$time" -N1 -n1 --mem="$mem" -J "$name" --quiet "$@"
 }
 
-adapter_partitions() { timeout 10 sinfo -h -o '%P|%l|%a' 2>/dev/null | sort -u; }   # NAME(*=default)|TIMELIMIT|AVAIL (9 ms of CPU on warrior)
+# one line per partition and node state, so `queue report --limits` can count nodes by state (the three-field form
+# cost 9 ms of CPU on warrior; with %D and %T added, not measured there). The *_query twins print the command as a
+# person would type it, for the report's header: the format lives in one variable so the two cannot drift apart
+HPCW_SINFO_FORMAT='%P|%l|%a|%D|%T'
+HPCW_SACCT_FORMAT=JobID,JobName,Partition,QOS,Submit,Start,End,State,Timelimit,NodeList
+adapter_partitions() { timeout 10 sinfo -h -o "$HPCW_SINFO_FORMAT" 2>/dev/null | sort -u; }   # NAME(*=default)|TIMELIMIT|AVAIL|NODES|NODE_STATE
+adapter_partitions_query() { printf "sinfo -h -o '%s'\n" "$HPCW_SINFO_FORMAT"; }
+adapter_history_query() { printf 'sacct -u %s -S now-%sdays -X -n -P --format=%s\n' "$USER" "$1" "$HPCW_SACCT_FORMAT"; }   # DAYS -> the line adapter_history runs
+adapter_history() { # DAYS -> one record per job of this account's from the last DAYS days: JobID|JobName|Partition|QOS|Submit|Start|End|State|Timelimit|NodeList
+  # ONE sacct, for `queue report` (a maintainer at a terminal). -X keeps each job's allocation line and drops its
+  # .batch and .extern steps, -n prints no header, -P puts a pipe between fields with nothing padded. Submit, Start
+  # and End are YYYY-MM-DDTHH:MM:SS in the cluster's local time with no zone; Start and End read "Unknown" while a
+  # job has not started (or ended), and Start reads "None" for one cancelled before it started; State may carry a
+  # word after it ("CANCELLED by 12345"). Bounded by `timeout 60`: the accounting database can be slow, and a person
+  # is waiting. Exit 1 with sacct's message on stderr when it failed. The argv is adapter_history_query's line, word
+  # for word, so the header's count can be checked against the grid by typing that line.
+  local days="$1" out rc
+  local -a cmd=(sacct -u "$USER" -S "now-${days}days" -X -n -P "--format=$HPCW_SACCT_FORMAT")
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 60 "${cmd[@]}" 2>&1); rc=$?; else out=$(LC_ALL=C "${cmd[@]}" 2>&1); rc=$?; fi
+  [ $rc = 124 ] && { echo "sacct did not answer within 60 s" >&2; return 1; }
+  [ $rc = 0 ] || { printf '%s\n' "$out" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 adapter_my_qos() { command -v sacctmgr >/dev/null 2>&1 && timeout 10 sacctmgr -n -P show assoc where user="$USER" format=qos 2>/dev/null | tr ',' '\n' | sort -u | tr '\n' ' '; }

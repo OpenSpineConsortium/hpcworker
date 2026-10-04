@@ -63,3 +63,7 @@ adapter_run_short() { # bsub -I: interactive without a terminal
 
 adapter_partitions() { bqueues -w 2>/dev/null | awk 'NR>1 {print $1"||"($2=="Open:Active"?"up":"down")}'; }
 adapter_my_qos() { :; }
+adapter_partitions_query() { echo "bqueues -w"; }
+# `queue report` reads Slurm's sacct; LSF's bhist is not read by this tool (nothing printed, exit 2)
+adapter_history_query() { :; }
+adapter_history() { return 2; }

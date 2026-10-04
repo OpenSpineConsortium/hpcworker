@@ -17,6 +17,14 @@
 #   adapter_run_short   PART QOS TIME NAME MEM -- CMD...   the same without a terminal
 #   adapter_status_many ID[,ID...]  -> one line per id: ID|STATE|NODE|RAW, in ONE scheduler call where the scheduler allows it
 #   adapter_submit_after SCRIPT PARENT_ID [OPT...] -> id of a job the scheduler starts when PARENT_ID has ended (the always-on chain)
+#   adapter_partitions              -> NAME(*=default)|TIMELIMIT|AVAIL[|NODES|NODE_STATE] per line (diag, discover, queue report --limits)
+#   adapter_history DAYS            -> one record per job of this account's from the last DAYS days, for `queue report`:
+#                                      JobID|JobName|Partition|QOS|Submit|Start|End|State|Timelimit|NodeList; exit 1 with the
+#                                      scheduler's message on stderr when the query failed; exit 2 and nothing where the
+#                                      scheduler keeps no such history for this tool (PBS, LSF)
+#   adapter_partitions_query, adapter_history_query DAYS -> the command each of the two runs, as a person would type it
+#                                      (the report's header, so its count can be checked against the grid); nothing for a
+#                                      history the adapter does not read
 
 # every path pattern here carries $USER; a shell without it (Git Bash on a Windows checkout) gets the login name
 : "${USER:=$(id -un 2>/dev/null || echo unknown)}"

@@ -41,6 +41,9 @@
 #                     command is the gate (lib/browser_key.sh); check is read only, for the lab lead
 #   hpcworker gate    that line's forced command: SSH_ORIGINAL_COMMAND, eight fixed verbs, never a sign-in
 #   hpcworker diag [--json]                                      one line per check
+#   hpcworker queue report [--days N] [--limits]                 maintainers and lab leads: how long this account's jobs waited
+#                                                                per partition and QoS, from one sacct over the last N days
+#                                                                (default 14, up to 90); --limits adds one sinfo. Slurm sites only
 #   hpcworker version                                            the number; "(shared copy at DIR)" on the lab's copy
 #
 # Rules this command keeps: it never reads, copies or prints a Claude credential (Claude Code keeps
@@ -48,7 +51,8 @@
 # .claude.json: remoteDialogSeen and the workspace's hasTrustDialogAccepted); no token ever goes on
 # a command line or into a job file; the login node gets one sbatch/squeue/scancel per action and
 # never a loop (connect: one squeue, one sbatch, one srun; worker status: one squeue, only while the
-# worker is in line or, framework 13, ended naming a successor; worker watch: at most one a minute);
+# worker is in line or, framework 13, ended naming a successor; worker watch: at most one a minute;
+# queue report, typed by a maintainer now and then: one sacct, and one sinfo with --limits);
 # state is read from files the job writes;
 # nothing is ever deleted outside the run directories under the state directory and a job's own
 # node-local temp, except connect's own outcome file under ~/.hpcworker/log and, for login-setup
@@ -1889,6 +1893,156 @@ cmd_login_setup() {
   ls_stop 0 "Done. The grid will not ask again."
 }
 
+# ---- queue: how long this account's jobs waited, per partition and QoS ---------------------------------
+# For the maintainer and the lab leads, never the panel (no contract line, no student words). greg,
+# 2026-10-04 15:19Z: an allocation on the requeue partition "takes like forever", primary or secondary may
+# be faster, and a requeue job could stay in line as a second option; before the worker gets a two-queue
+# policy he wants the numbers from the grid itself. So: ONE sacct over the account's own history, and with
+# --limits ONE sinfo, both bounded by timeout; two queries on the login node for a report a person types
+# now and then is within the one-scheduler-command-per-action etiquette as discover and diag keep it (the
+# 60 s floor binds clients that poll, and nothing here polls). Nothing is written anywhere.
+#
+# The arithmetic is awk, POSIX only: the login node's awk has no mktime, strftime or systime, so a
+# Slurm time (YYYY-MM-DDTHH:MM:SS, the cluster's local clock, no zone) becomes seconds by the
+# days-from-civil formula below. The report uses differences only (Start minus Submit, End minus
+# Start), so the zone never enters it. Values reach awk in the environment and on stdin, never as
+# operands or -v (both read escapes), as HPCW_JSON_AWK has them.
+#   HPCW_Q_MODE=epoch   stdin: one time a line -> its seconds since 1970-01-01T00:00:00 of the same clock,
+#                       an empty line for anything that is not a time (the tests check the formula so)
+#   HPCW_Q_MODE=report  stdin: adapter_history's records -> the report; HPCW_Q_USER, HPCW_Q_DAYS and
+#                       HPCW_Q_QUERY fill the header
+# shellcheck disable=SC2016
+HPCW_QUEUE_AWK='
+function days_from_civil(y, m, d,   era, yoe, doy, doe) {
+  # days-from-civil (Howard Hinnant): the days from 1970-01-01 to a proleptic Gregorian date. The year
+  # is taken to start in March so the leap day is its last day, in 400-year eras of 146097 days;
+  # integer arithmetic throughout. 2026-10-04 -> 20730 (times 86400: 1791072000, the UTC epoch of
+  # that midnight; here the clock is the cluster clock, and only differences are used)
+  if (m <= 2) y--
+  era = int((y >= 0 ? y : y - 399) / 400)
+  yoe = y - era * 400
+  doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+}
+function epoch(t) { # YYYY-MM-DDTHH:MM:SS -> seconds; "" for Unknown, None, N/A or anything else
+  if (t !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/) return ""
+  return days_from_civil(substr(t, 1, 4) + 0, substr(t, 6, 2) + 0, substr(t, 9, 2) + 0) * 86400 + substr(t, 12, 2) * 3600 + substr(t, 15, 2) * 60 + substr(t, 18, 2)
+}
+function dur(s,   d, h, m) { # seconds -> "Nd Nh Nm", "Nh Nm" or "Nm Ns", whichever fits
+  s = int(s); d = int(s / 86400); s -= d * 86400; h = int(s / 3600); s -= h * 3600; m = int(s / 60); s -= m * 60
+  if (d > 0) return d "d " h "h " m "m"
+  if (h > 0) return h "h " m "m"
+  return m "m " s "s"
+}
+function ssort(a, n,   gap, i, j, t) { # a[1..n] ascending, in place (shell sort: no recursion, nothing beyond POSIX)
+  for (gap = int(n / 2); gap > 0; gap = int(gap / 2))
+    for (i = gap + 1; i <= n; i++) { t = a[i] + 0; for (j = i; j > gap && a[j - gap] + 0 > t; j -= gap) a[j] = a[j - gap]; a[j] = t }
+}
+function median(a, n) { return (n % 2) ? a[(n + 1) / 2] : int((a[n / 2] + a[n / 2 + 1]) / 2) }   # sorted a[1..n]; the two middle values averaged
+function p90(a, n,   i) { i = int(n * 9 / 10); if (i * 10 < n * 9) i++; return a[i] }        # nearest rank: the value at ceil(0.9 n)
+BEGIN { FS = "|"; mode = ENVIRON["HPCW_Q_MODE"]; if (mode != "epoch" && mode != "report") exit 3 }
+mode == "epoch" { print epoch($0); next }
+{
+  sub(/\r$/, "")
+  if ($0 ~ /^[ \t]*$/) next
+  if (NF < 8) { odd++; next }   # a line that is not a record (a notice sacct printed first): left out, counted
+  nrec++
+  part = $3; qos = $4; gsub(/^[ \t]+|[ \t]+$/, "", part); gsub(/^[ \t]+|[ \t]+$/, "", qos)
+  # SUBSEP sorts before every printable byte, so a plain string sort of the keys is partition first, then QoS
+  k = part SUBSEP qos
+  if (!(k in seen)) { seen[k] = 1; nk++; keys[nk] = k }
+  st = $8; sub(/ .*/, "", st)   # "CANCELLED by 12345" -> CANCELLED
+  if (st ~ /^PENDING/) pend[k]++
+  if (st ~ /^PREEMPTED/) pre[k]++
+  if (st ~ /^CANCELLED/) canc[k]++
+  if (st ~ /^TIMEOUT/) tout[k]++
+  es = epoch($5); eb = epoch($6); ee = epoch($7)
+  if (es != "" && eb != "") {
+    w = eb - es
+    # a Start before its Submit: the clocks of the submit host and the controller disagree, or the record
+    # is odd; it counts as no wait rather than a negative one, and the report says how many did
+    if (w < 0) { w = 0; before++ }
+    nw[k]++; wait[k, nw[k]] = w
+    if (ee != "" && ee >= eb) { nr[k]++; run[k, nr[k]] = ee - eb }
+  }
+}
+END {
+  if (mode != "report") exit
+  user = ENVIRON["HPCW_Q_USER"]; days = ENVIRON["HPCW_Q_DAYS"]; query = ENVIRON["HPCW_Q_QUERY"]
+  if (nrec == 0) { print "no jobs of " user " in the history the scheduler keeps for the last " days " days (" query ")"; exit 0 }
+  printf "queue report for %s, the last %s days: %d records read by `%s`\n\n", user, days, nrec, query
+  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %9s  %9s  %9s  %s\n"
+  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "preempted", "cancelled", "timed out", "median run"
+  for (i = 2; i <= nk; i++) { t = keys[i]; for (j = i - 1; j >= 1 && keys[j] > t; j--) keys[j + 1] = keys[j]; keys[j + 1] = t }
+  best = ""
+  for (i = 1; i <= nk; i++) {
+    k = keys[i]; split(k, kp, SUBSEP)
+    n = nw[k] + 0; md = "-"; p9 = "-"; mx = "-"; rm = "-"
+    if (n > 0) {
+      for (j = 1; j <= n; j++) a[j] = wait[k, j]
+      ssort(a, n); m = median(a, n); md = dur(m); p9 = dur(p90(a, n)); mx = dur(a[n])
+      # ties keep the first in table order: the numbers decide, and a tie is one to look at
+      if (best == "" || m < bestm) { best = kp[1] " " kp[2]; bestm = m }
+    }
+    n = nr[k] + 0
+    if (n > 0) { for (j = 1; j <= n; j++) a[j] = run[k, j]; ssort(a, n); rm = dur(median(a, n)) }
+    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, pre[k] + 0, canc[k] + 0, tout[k] + 0, rm
+  }
+  print ""
+  if (before > 0) printf "%d job%s started before being submitted, by the clocks the scheduler recorded; each counts as no wait\n", before, (before > 1 ? "s" : "")
+  if (odd > 0) printf "%d line%s that %s not a record left out\n", odd, (odd > 1 ? "s" : ""), (odd > 1 ? "were" : "was")
+  if (best == "") print "shortest median wait: none (no job in the window has started)"
+  else print "shortest median wait: " best " (" dur(bestm) ")"
+}'
+queue_usage() { echo "usage: hpcworker queue report [--days N] [--limits]   (N from 1 to 90; 14 when not given)" >&2; exit 2; }
+cmd_queue() {
+  local sub="${1:-}"; shift || true
+  [ "$sub" = report ] || queue_usage
+  local days=14 limits=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --days) [ $# -ge 2 ] || queue_usage; days="$2"; shift 2;;
+    --limits) limits=1; shift;;
+    *) queue_usage;; esac; done
+  [[ "$days" =~ ^[0-9]{1,2}$ ]] && [ "$days" -ge 1 ] && [ "$days" -le 90 ] || die "--days must be a whole number from 1 to 90"
+  load_profile
+  local hist rc
+  hist=$(adapter_history "$days" 2>&1); rc=$?
+  case $rc in
+    0) ;;
+    2) die "the queue report reads Slurm's history (sacct); this site's scheduler is $P_scheduler";;
+    *) die "the scheduler's history could not be read: $(printf '%s' "$hist" | tr '\n' ' ' | sed 's/[[:space:]]*$//')";;
+  esac
+  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_QUERY="$(adapter_history_query "$days")" LC_ALL=C awk "$HPCW_QUEUE_AWK" \
+    || die "the report could not be made from what the scheduler printed"
+  [ $limits = 1 ] || return 0
+  # the second query: what each partition allows now, so a wait can be read against its limit and its nodes
+  local parts; parts=$(adapter_partitions)
+  echo
+  if [ -z "$parts" ]; then say "partitions now: nothing from $(adapter_partitions_query)"; return 0; fi
+  say "partitions now ($(adapter_partitions_query)):"
+  # NAME(*=default)|TIMELIMIT|AVAIL|NODES|NODE_STATE, one line per partition and node state -> one line per partition
+  printf '%s\n' "$parts" | LC_ALL=C awk '
+    BEGIN { FS = "|" }
+    { sub(/\r$/, ""); if (NF < 3 || $1 == "") next
+      p = $1; d = ""; if (p ~ /\*$/) { d = " (default)"; sub(/\*$/, "", p) }
+      if (!(p in seen)) { seen[p] = 1; np++; names[np] = p }
+      lim[p] = $2; av[p] = $3; dflt[p] = d
+      if (NF >= 5 && $5 != "") { nodes[p] += $4; if (!((p, $5) in sseen)) { sseen[p, $5] = 1; ns[p]++; st[p, ns[p]] = $5 }; cnt[p, $5] += $4 }
+    }
+    END {
+      for (i = 2; i <= np; i++) { t = names[i]; for (j = i - 1; j >= 1 && names[j] > t; j--) names[j + 1] = names[j]; names[j + 1] = t }
+      for (i = 1; i <= np; i++) { p = names[i]; n = ns[p] + 0
+        for (x = 1; x <= n; x++) s[x] = st[p, x]
+        for (x = 2; x <= n; x++) { t = s[x]; for (y = x - 1; y >= 1 && s[y] > t; y--) s[y + 1] = s[y]; s[y + 1] = t }
+        list = ""; for (x = 1; x <= n; x++) list = list (x > 1 ? ", " : "") cnt[p, s[x]] " " s[x]
+        if (n > 0) printf "  %-16s  time limit %-12s  %-5s  %d nodes: %s\n", p dflt[p], lim[p], av[p], nodes[p], list
+        else printf "  %-16s  time limit %-12s  %s\n", p dflt[p], lim[p], av[p]
+      }
+    }'
+  return 0
+}
+
 # ---- diag: every assumption as one line ------------------------------------------------------------
 DIAG_FIRST=1; DIAG_JSON=0
 emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
@@ -1945,7 +2099,8 @@ cmd_diag() {
   else local n; n=$(ps -u "$USER" --no-headers 2>/dev/null | wc -l | tr -d ' '); local cap="$P_login_node_rules_max_processes"
     if [ "$n" -ge "$cap" ]; then emit hpcw.login-node false false false "$n processes of yours on $(hostname -s); the site's cap is $cap"; elif [ "$n" -ge $((cap * 3 / 4)) ]; then emit hpcw.login-node true true false "$n processes of yours on $(hostname -s) (cap $cap)"; else emit hpcw.login-node true false false "$n processes of yours on $(hostname -s) (cap $cap)"; fi; fi
   if [ "$fam" = slurm ]; then
-    local parts; parts=$(adapter_partitions | cut -d'|' -f1 | sed 's/\*$//' | tr '\n' ' ')
+    # one line per partition and node state since adapter_partitions carries both (queue report --limits): the names once
+    local parts; parts=$(adapter_partitions | cut -d'|' -f1 | sed 's/\*$//' | sort -u | tr '\n' ' ')
     local want="$P_partition_cpu $P_partition_cpu_batch $P_partitions_gpu" bad="" p; for p in $want; do case " $parts " in *" $p "*) ;; *) bad="$bad $p";; esac; done
     if [ -z "$bad" ]; then emit hpcw.partitions true false false "profile partitions exist: $want"; else emit hpcw.partitions false false false "not in sinfo:$bad (have: $parts)"; fi
     local q; q=$(adapter_my_qos); local qb="" x; for x in $P_qos_cpu $P_qos_batch; do case " $q " in *" $x "*) ;; *) qb="$qb $x";; esac; done
@@ -2007,6 +2162,7 @@ case "${1:-help}" in
   gate) shift; declare -F cmd_gate >/dev/null || { echo "HPCW-GATE refused"; exit 126; }; cmd_gate "$@";;
   claude) shift; cmd_claude "$@";;
   diag) shift; cmd_diag "$@";;
+  queue) shift; cmd_queue "$@";;
   _exec) shift; in_job_exec "$@";;
   version) if shared_mode; then printf '%s (shared copy at %s)\n' "$(read_version "$SHARED_DIR/VERSION" || echo "$VERSION")" "$SHARED_DIR"; else echo "$VERSION"; fi;;
   help|-h|--help) awk 'NR > 1 && /^# Rules/ { exit } NR > 1' "$SELF";;
