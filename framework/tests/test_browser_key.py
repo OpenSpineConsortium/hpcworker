@@ -568,7 +568,7 @@ class GateLines(Base):
                 self.assertEqual(got, want)
                 self.assertIn("ENV:HPCW_GATE=1", r.stdout)
                 self.assertIn("ENV:BASH_ENV=\n", r.stdout, "the verb starts without BASH_ENV")
-                for word in ("claude", "login-setup", "browser-key", "install", "--plain", "always", "fresh", "auto"):
+                for word in ("claude", "login-setup", "browser-key", "install", "--plain", "always", "auto"):
                     self.assertNotIn(word, got)
                 if got[0] == "connect":
                     self.assertEqual(got.count("--login"), 1)

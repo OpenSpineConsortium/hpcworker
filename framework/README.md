@@ -406,7 +406,7 @@ status` prints that link. Version 10's fields are in
 
 ```
 hpcworker connect [--name NAME] [--profile SITE] [--consent INSTALL_ID]
-                  [--login auto|always|fresh|never] [--permission-mode default|acceptEdits|plan] [--no-chain]
+                  [--login auto|always|never] [--permission-mode default|acceptEdits|plan] [--no-chain]
 ```
 
 Beethoven 11.0.0 types this one line into the portal's shell with `exec` (so the shell ends when
@@ -427,8 +427,12 @@ connect ends), naming the lab's shared copy by its full path. In order:
    carries Claude Code's answer says `loggedIn: true` (read before this start writes its queued file,
    so a returning Connect after a Stop does not sign in again; framework 17: written by a framework 17
    worker or newer, else the sitting runs); `always` runs it (Claude Code answers
-   at once when it is signed in); `fresh` runs `claude auth logout` first ("Use another account");
-   `never` skips it. The sitting is framework 9's plain one (`lib/login_plain.sh`), with the lines
+   at once when it is signed in); `never` skips it. `fresh`, which until framework 16 ran `claude auth
+   logout` first ("Use another account"), is refused at the flag check since framework 17, because
+   Beethoven never signs anyone out of Claude: `HPCW-STEP failed usage --login fresh is no longer
+   offered: Beethoven never signs anyone out of Claude; to use another account, sign out of Claude
+   Code yourself on a compute node, then sign in again`, exit 2, nothing done (the 15.0.0 extension
+   sends only the three values above). The sitting is framework 9's plain one (`lib/login_plain.sh`), with the lines
    listed under "The panel's sign-in" below, on `partition_cpu`.
 6. `HPCW-STEP done`, exit 0.
 

@@ -1,7 +1,7 @@
 """hpcworker connect (framework 10), against a scratch account and the fake scheduler of fakegrid.py:
 the HPCW-STEP lines in each order the contract allows (a first run, a returning run, a job already in
-line, a refusal, a restricted workspace, a usage error, a setup that cannot be done), the four --login
-modes, each sign-in failure code with its exit status, the keepalive while the sign-in computer is
+line, a refusal, a restricted workspace, a usage error, a setup that cannot be done), the three --login
+modes and the refused fourth, each sign-in failure code with its exit status, the keepalive while the sign-in computer is
 awaited, the pasted code never echoed, and the relay (lib/relay.sh, with its ticker) on its own."""
 import json
 import os
@@ -153,7 +153,7 @@ class Orders(Base):
 
     def test_usage(self):
         for flags, why in (("--bogus", "unknown option --bogus"), ("--consent nothex", "--consent needs this installation's 32-character id"),
-                           ("--login maybe", "--login must be auto, always, fresh or never"), ("--name 'a b'", "the worker name must be 1 to 32 letters, digits, _ or -"),
+                           ("--login maybe", "--login must be auto, always or never"), ("--name 'a b'", "the worker name must be 1 to 32 letters, digits, _ or -"),
                            ("--permission-mode yolo", "--permission-mode must be default, acceptEdits or plan"), ("--name", "--name needs a value")):
             rc, out, err = self.g.run("connect --profile testsite " + flags)
             self.assertEqual((rc, out.strip()), (2, "HPCW-STEP failed usage " + why), flags)
@@ -218,13 +218,15 @@ class LoginModes(Base):
         self.assertIn("HPCW-STEP signed-in st1234@wayne.edu max", out)
         self.assertNotIn("--fresh", " ".join(self.g.calls()))
 
-    def test_fresh_signs_out_first(self):
+    def test_fresh_is_refused_before_anything_runs(self):
+        # framework 17: Beethoven never signs anyone out of Claude. An older extension's "Use another account"
+        # still types `fresh`; it is refused at the flag check with the one sentence that says what to do
+        # instead, and no job is submitted and no sitting is run for it
         rc, out, err = self.connect("--login fresh")
-        self.assertEqual(rc, 0, (out, err))
-        srun = [c for c in self.g.calls() if c.startswith("srun ")]
-        self.assertEqual(len(srun), 1)
-        self.assertIn(" --fresh", srun[0])
-        self.assertIn("HPCW-STEP signed-in st1234@wayne.edu max", out)
+        self.assertEqual(rc, 2, (out, err))
+        self.assertEqual(out.strip(), "HPCW-STEP failed usage --login fresh is no longer offered: Beethoven never signs anyone out of Claude; "
+                                      "to use another account, sign out of Claude Code yourself on a compute node, then sign in again")
+        self.assertEqual(self.g.calls(), [], "no sbatch and no srun")
 
     def test_plan_word_and_empty_fields(self):
         rc, out, err = self.connect("--login always", FAKE_PLAN="-")
@@ -330,7 +332,7 @@ class PlainExec(Base):
     def test_never_a_sign_in_under_the_gate(self):
         for env in ({"HPCW_GATE": "1"}, {"SSH_ORIGINAL_COMMAND": "connect worker testsite - default chain"}):
             with self.subTest(env=env):
-                for login in ("always", "fresh", "auto"):
+                for login in ("always", "auto"):
                     rc, out, err = self.connect("--login %s" % login, **env)
                     self.assertEqual(rc, 0, (out, err))
                     self.assertEqual(steps(out)[-1], "done")

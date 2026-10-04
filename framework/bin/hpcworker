@@ -19,7 +19,7 @@
 #   hpcworker profile check [FILE]                               validate's verdict with no python3 (lib/profile.awk)
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
-#   hpcworker connect [--name N] [--profile SITE] [--consent INSTALL_ID] [--login auto|always|fresh|never]
+#   hpcworker connect [--name N] [--profile SITE] [--consent INSTALL_ID] [--login auto|always|never]
 #                     [--permission-mode M] [--no-chain]
 #                     the extension's one line (framework 10): set the account up if needed, record the
 #                     Remote Control answer, start the worker (or keep the one in line or running), and
@@ -1299,17 +1299,21 @@ in_job_exec() { # MODE [args]: inside an allocation, run claude inside the image
       if [ "$mode" = login ] && [ "${1:-}" = "--plain" ]; then
         # the panel's sitting (lib/login_plain.sh): Claude Code under a pty inside the image, a line
         # contract on stdout, the transcript under /dev/shm for this sitting only, removed with it.
-        # Framework 10's flags come only from connect: --keepalive S, --fresh, --deadline EPOCH; without
-        # them (`claude login --plain`, the 10.0.0 extension's line) the sitting is framework 9's
+        # Framework 10's flags come only from connect: --keepalive S, --deadline EPOCH; without them
+        # (`claude login --plain`, the 10.0.0 extension's line) the sitting is framework 9's. Framework
+        # 10's --fresh (a sign-out before the sign-in) is gone since framework 17, Beethoven's software
+        # never signing anyone out of Claude; typed anyway, it is skipped like any unknown flag
         shift
-        local ka=0 fresh="" dl=0
+        local ka=0 dl=0
         while [ $# -gt 0 ]; do case "$1" in
-          --keepalive) ka="${2:-0}"; shift 2;; --fresh) fresh=fresh; shift;; --deadline) dl="${2:-0}"; shift 2;; *) shift;; esac; done
+          --keepalive) ka="${2:-0}"; shift 2;; --deadline) dl="${2:-0}"; shift 2;; *) shift;; esac; done
         local lp="$LIB/login_plain.sh" sd="$P_ipc_dir/$USER/hpcw_login_$(hpcw_job_id)"
         [ -s "$lp" ] || { echo "HPCW-LOGIN-FAILED: the sign-in helper is missing from the installed copy; run hpcworker install again"; return 3; }
         mkdir -p "$sd" && chmod 700 "$sd" || { echo "HPCW-LOGIN-FAILED: this compute node has no writable $P_ipc_dir for the sitting"; return 3; }
         trap "hpcw_rm_own_tmp '$HPCW_NODE_TMP' '$sd'" EXIT
-        hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$(cat "$lp")" _ "$ws" "$P_claude_bin" "$sd" "$SEED" 600 live "$ka" "$fresh" "$dl"
+        # slot 8 is unused since framework 17 (it was `fresh`, the sign-out the sitting never runs now)
+        # and is passed empty so the deadline keeps its place as argument 9
+        hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$(cat "$lp")" _ "$ws" "$P_claude_bin" "$sd" "$SEED" 600 live "$ka" "" "$dl"
         return $?
       fi
       hpcw_runtime_exec "$P_image_store_path" "${ce[@]}" bash -c "$LOGIN_SITTING" _ "$ws" "$P_claude_bin" "$SEED" "$mode" "$(consent_markers | paste -sd: -)";;
@@ -1556,8 +1560,8 @@ connect_last_login() { # -> "LOGGEDIN|EMAIL|PLAN" from the newest status.json of
   printf '%s|%s|%s\n' "${li:-false}" "$em" "$pl"
 }
 one_token() { local v="${1:-}"; v="${v//[[:space:]]/}"; printf '%s' "${v:--}"; }   # an e-mail or a plan as one field, "-" when Claude Code did not say
-connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, relayed whole; ends with signed-in, or fails with its code
-  local fresh="$1" t0="$2" self sum rc signed failed ka="${HPCW_KEEPALIVE_S:-20}" tty_saved="" em pl pty=1
+connect_signin() { # START_EPOCH: the plain sitting on a compute node, relayed whole; ends with signed-in, or fails with its code
+  local t0="$1" self sum rc signed failed ka="${HPCW_KEEPALIVE_S:-20}" tty_saved="" em pl pty=1
   hpcw_signin_barred && step_fail other "the Claude sign-in never runs through Beethoven's browser key" 1
   self="$HPCW_HOME/bin/hpcworker"; [ -x "$self" ] || self="$SELF"
   [[ "$ka" =~ ^[0-9]+$ ]] && [ "$ka" -ge 1 ] || ka=20
@@ -1571,7 +1575,7 @@ connect_signin() { # FRESH START_EPOCH: the plain sitting on a compute node, rel
   # framework 11: with no terminal here (Beethoven's plain ssh exec), srun gets no --pty either: the code
   # then travels on a pipe from this standard input to the sitting's, where nothing echoes it
   if hpcw_have_terminal; then tty_saved=$(stty -g 2>/dev/null); stty -echo 2>/dev/null; else pty=0; fi
-  local -a extra=(--keepalive "$ka" --deadline "$(( t0 + CONNECT_BUDGET_S ))"); [ "$fresh" = fresh ] && extra+=(--fresh)
+  local -a extra=(--keepalive "$ka" --deadline "$(( t0 + CONNECT_BUDGET_S ))")
   # one writer: srun's output and its own messages go to the relay, which writes whole lines and the
   # keepalive; beside srun, the relay's ticker writes its once-a-second tick into the same pipe (never
   # to the terminal). Three things end the ticker: the kill after srun, the EXIT trap (this side
@@ -1629,7 +1633,15 @@ cmd_connect() {
   [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || connect_usage "the worker name must be 1 to 32 letters, digits, _ or -"
   [ -z "$site" ] || [[ "$site" =~ ^[a-z0-9-]{1,32}$ ]] || connect_usage "the site profile name must be lower-case letters, digits or -"
   [ -z "$cid" ] || [[ "$cid" =~ ^[0-9a-f]{32}$ ]] || connect_usage "--consent needs this installation's 32-character id"
-  case "$login" in auto|always|fresh|never) ;; *) connect_usage "--login must be auto, always, fresh or never";; esac
+  # framework 17 (greg, 2026-10-04): `fresh` ran `claude auth logout` before the sitting ("Use another
+  # account" in the extension before 15.0.0). Beethoven's software never signs anyone out of Claude (the
+  # credential rule), so the value is still recognised, only to be refused here with the one sentence
+  # that says what to do instead, before anything is set up or submitted
+  case "$login" in
+    auto|always|never) ;;
+    fresh) connect_usage "--login fresh is no longer offered: Beethoven never signs anyone out of Claude; to use another account, sign out of Claude Code yourself on a compute node, then sign in again";;
+    *) connect_usage "--login must be auto, always or never";;
+  esac
   case "$pm" in ""|default|acceptEdits|plan) ;; *) connect_usage "--permission-mode must be default, acceptEdits or plan";; esac
   # framework 11: through the browser key's gate there is never a Claude sign-in, whatever the line said
   hpcw_signin_barred && login=never
@@ -1651,15 +1663,14 @@ cmd_connect() {
   # 6. the sign-in. signin.pending tells a job of this worker that waits for the sign-in that one is
   # under way (its 20-minute abandon counts from here, and from the end of the sitting)
   local rdp; rdp=$(run_dir "$name")
-  case "$login" in always|fresh|auto) [ -d "$rdp" ] && touch "$rdp/signin.pending" 2>/dev/null;; esac
+  case "$login" in always|auto) [ -d "$rdp" ] && touch "$rdp/signin.pending" 2>/dev/null;; esac
   case "$login" in
     never) ;;
     auto)
       if [ "${last%%|*}" = true ]; then
         local rest="${last#*|}"; say "HPCW-STEP signed-in $(one_token "${rest%%|*}") $(one_token "${rest#*|}")"
-      else connect_signin "" "$t0"; fi;;
-    always) connect_signin "" "$t0";;
-    fresh) connect_signin fresh "$t0";;
+      else connect_signin "$t0"; fi;;
+    always) connect_signin "$t0";;
   esac
   [ -d "$rdp" ] && [ -e "$rdp/signin.pending" ] && touch "$rdp/signin.pending" 2>/dev/null
   say "HPCW-STEP done"
