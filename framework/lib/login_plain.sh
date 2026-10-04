@@ -5,14 +5,17 @@
 # and inside the worker image, started by `hpcworker _exec login --plain`, which passes this file's
 # text to bash -c (no bind mount is assumed for it):
 #
-#   bash -c "$(cat login_plain.sh)" _ WORKSPACE CLAUDE_BIN SITTING_DIR SEED_JS BUDGET_S [live|dry] [KEEPALIVE_S] [fresh] [DEADLINE]
+#   bash -c "$(cat login_plain.sh)" _ WORKSPACE CLAUDE_BIN SITTING_DIR SEED_JS BUDGET_S [live|dry] [KEEPALIVE_S] [UNUSED] [DEADLINE]
 #
 # The last three are framework 10's, given only by `hpcworker connect` (`claude login --plain`, which
 # the 10.0.0 extension types, gives none of them and behaves exactly as in framework 9):
 #   KEEPALIVE_S  when > 0, "HPCW-LOGIN: still waiting" once that many seconds pass with nothing
 #                printed while the sitting waits for the link and for the code (connect's relay
 #                covers the wait for the computer, before this script runs)
-#   fresh        `claude auth logout` first, so the sign-in is a new one ("Use another account")
+#   UNUSED       the eighth argument, unused since framework 17 and ignored: it was `fresh`, a
+#                `claude auth logout` before the sign-in ("Use another account"), which Beethoven's
+#                software never runs now (the credential rule); connect passes an empty string so
+#                that DEADLINE keeps its place
 #   DEADLINE     seconds since the epoch by which connect must have ended: the code budget becomes
 #                min(BUDGET_S, DEADLINE - now), never under 120 s
 #
@@ -110,7 +113,8 @@ hpcw_login_billed() { # stdin: stripped text (what Claude Code drew since the la
 }
 
 hpcw_login_main() {
-  local ws="$1" claude="$2" dir="$3" seed="${4:-}" budget="${5:-600}" mode="${6:-live}" keepalive="${7:-0}" fresh="${8:-}" deadline="${9:-0}"
+  # $8 is not read: it was `fresh` until framework 16 (the header says why it is gone and stays a slot)
+  local ws="$1" claude="$2" dir="$3" seed="${4:-}" budget="${5:-600}" mode="${6:-live}" keepalive="${7:-0}" deadline="${9:-0}"
   local fifo="$dir/stdin" log="$dir/login.log" launch="$dir/launch.sh"
   local spid=0 tty_saved="" url="" url_seen=0 url_at=0 prompt_seen=0 prompt_at=0 sent=0 sent_at=0 judged=0 invalid_n=0 enters=0 last_enter=0 stdin_eof=0 saw_select=0 tail_txt flags line out_json li em st i
   local last_out=0 now_s left subs=false how="" billed=0 enter_off=0 url_rc
@@ -161,8 +165,10 @@ hpcw_login_main() {
 
   if [ "$mode" != dry ]; then
     out "HPCW-LOGIN: on $(hostname -s 2>/dev/null || echo the compute node); checking whether you are signed in already"
-    # framework 10, "Use another account": Claude Code's own sign-out first; nothing of it is read
-    [ "$fresh" = fresh ] && timeout 60 "$claude" auth logout >/dev/null 2>&1
+    # framework 10 ran `claude auth logout` here under `fresh` ("Use another account"). Gone since
+    # framework 17 (greg, 2026-10-04): Beethoven's software never signs anyone out of Claude, the
+    # credential rule; a student who wants another account signs out of Claude Code themselves on a
+    # compute node, then signs in again
     auth_status
     if [ "$li" = true ]; then [ "$subs" = true ] || fail "$other_words"; out "SIGNED-IN ${em:--} ${st:--}"; cleanup; return 0; fi
     # the three settings Claude Code's screens ask about (onboarding done, a theme, trust for this
