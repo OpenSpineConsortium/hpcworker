@@ -5,14 +5,20 @@ hours before it could run), the two attempts of a requeued job, one whose Start 
 with no End. Then the per-partition lines, the counts, the footer, the header's count and query, the one exact sacct
 argv and its environment (and no sbatch, squeue or scancel), the sinfo `--limits` adds, the waits across a
 daylight-saving change and under a caller's own time format, nearest-rank p90 against the maximum, the sort of a
-partition whose name is a prefix of another's, every refusal, diag's partition check on the five-field sinfo, and the
-days-from-civil formula alone against dates python computes. Nothing reaches a real scheduler."""
+partition whose name is a prefix of another's, a wait that ended before the window, jobs not started counted as
+waiting at least so long (Kaplan-Meier, checked against the product-limit formula), a cancel before and after a
+start, array tasks, the later attempts of a requeued job in both shapes Slurm may record, every refusal, a notice
+with no record, diag's partition check on the five-field sinfo, and the days-from-civil formula alone against dates
+python computes. The report's clock is the fake grid's date at FAKE_NOW. Nothing reaches a real scheduler."""
 import calendar
 import datetime
 import os
+import random
 import re
+import shutil
 import tempfile
 import unittest
+from fractions import Fraction
 
 import fakegrid as G
 
@@ -29,10 +35,12 @@ RECORDS = [
     "40500014|reqp|requeue|2026-10-02T09:10:05|2026-10-02T17:10:00|2026-10-02T17:10:30|2026-10-03T01:10:30|COMPLETED|08:00:00|asx14",
     "40500006|reqp|requeue|2026-10-04T07:00:00|2026-10-04T07:00:00|Unknown|Unknown|PENDING|08:00:00|None assigned",
     "40500007|reqp|requeue|2026-10-03T07:00:00|2026-10-03T07:00:00|None|2026-10-03T07:05:00|CANCELLED by 1234|08:00:00|None assigned",
-    # one job requeued once (-D: each attempt its own record): 2 min then 3 h of running, requeued; eligible again at
-    # 11:04, started an hour later, ran 8 h. Two waits, 2 min and 1 h (from Submit the second would read 4 h 4 min)
+    # one job requeued once (-D: each attempt its own record): 2 min then 3 h of running, requeued at 11:02; the second
+    # attempt carries the requeue as its Submit and, two minutes and a second later (Slurm's hold after a requeue), its
+    # Eligible; started at 12:04, ran 8 h. Two waits, 2 min and 1 h 2 min (from the End of the first attempt, the hold
+    # included); its first run, cut short, is not a run in "median run"
     "40500015|reqp|requeue|2026-10-03T08:00:00|2026-10-03T08:00:00|2026-10-03T08:02:00|2026-10-03T11:02:00|REQUEUED|08:00:00|asx15",
-    "40500015|reqp|requeue|2026-10-03T08:00:00|2026-10-03T11:04:00|2026-10-03T12:04:00|2026-10-03T20:04:00|COMPLETED|08:00:00|asx16",
+    "40500015|reqp|requeue|2026-10-03T11:02:00|2026-10-03T11:04:01|2026-10-03T12:04:00|2026-10-03T20:04:00|COMPLETED|08:00:00|asx16",
     "40500008|secp|secondary|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:00:20|2026-10-01T08:10:20|COMPLETED|00:10:00|asx15",  # 20 s, 10 min
     "40500009|secp|secondary|2026-10-01T09:00:00|2026-10-01T09:00:00|2026-10-01T09:00:45|2026-10-01T09:20:45|COMPLETED|00:30:00|asx15",  # 45 s, 20 min
     "40500010|secp|secondary|2026-10-01T10:00:00|2026-10-01T10:00:00|2026-10-01T10:02:00|2026-10-01T10:32:00|COMPLETED|00:30:00|asx15",  # 2 min, 30 min
@@ -46,6 +54,26 @@ SINFO = [
     "gvohp|7-00:00:00|up|6|allocated", "gvohp|7-00:00:00|up|2|idle",
 ]
 SACCT_FORMAT = "--format=JobID,Partition,QOS,Submit,Eligible,Start,End,State,Timelimit,NodeList"
+
+
+def at(t):
+    """seconds since 1970 of a UTC time written YYYY-MM-DDTHH:MM:SS"""
+    return calendar.timegm(datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").timetuple())
+
+
+def iso(s):
+    return (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+# the report's clock, through the date of the fake grid (DATE below): the window of 14 days opens 2026-09-20T12:00:00,
+# and the job pending since 07:00 has waited 5 h so far
+NOW = at("2026-10-04T12:00:00")
+# date as the report reads its clock: FAKE_NOW, when set, for a call that names no time of its own (the fake sacct's
+# date -d @SECONDS, and every call of every other verb, go to the real one)
+DATE = r"""#!/bin/bash
+if [ -n "${FAKE_NOW:-}" ]; then for a in "$@"; do case "$a" in -d*|--date*|-r*|--reference*) exec '%s' "$@";; esac; done; exec '%s' -d "@$FAKE_NOW" "$@"; fi
+exec '%s' "$@"
+"""
 
 
 def sacct_argv(days):
@@ -66,17 +94,25 @@ def header(n, days=14):
     return "queue report for st1234: %d record%s of jobs eligible or running at any time in the last %d days, read by `%s`" % (n, "s" if n > 1 else "", days, query(days))
 
 
-SECOND = "one record per attempt of a requeued job; a wait is Start minus Eligible (minus Submit where Eligible is not a time); times in UTC"
-COLUMNS = ["partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "preempted", "requeued", "cancelled", "timed out", "median run"]
+# the lines that say how to read the table, every report the same
+HOW = ["one record per attempt of a requeued job; a wait runs from Eligible (Submit where Eligible is not a time; for a later attempt, the End of the one before) to Start; times in UTC",
+       "a job not started (pending, or cancelled in line) counts as waiting at least as long as it had: median and p90 are Kaplan-Meier estimates, \">T\" where one lies beyond T, the longest wait seen",
+       "gave up: cancelled before it started; cancelled: after it started; median run: End minus Start of the attempts not preempted or requeued",
+       "not listed by sacct: a job held, or waiting on a dependency (the successor a worker queued), since it was submitted; pending is State PENDING, a job held later among them"]
+COLUMNS = ["partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "gave up", "preempted", "requeued", "cancelled", "timed out", "median run"]
 ROWS = {
-    # partition, qos, started, median wait, p90 wait, max wait, pending, preempted, requeued, cancelled, timed out, median run
-    "gvohp": ["gvohp", "gpu", "1", "1m 0s", "1m 0s", "1m 0s", "0", "0", "0", "0", "0", "-"],
-    # waits 30, 30, 120, 300, 600, 3600, 14400, 172800: median (300 + 600) / 2 = 450; p90 (the value at ceil(0.9 * 8) = 8)
-    # 172800, here the maximum too (the p90 case is its own test); runs 1800 .. 28800: median (10800 + 10800) / 2
-    "reqp": ["reqp", "requeue", "8", "7m 30s", "2d 0h 0m", "2d 0h 0m", "1", "1", "1", "1", "1", "3h 0m"],
+    # partition, qos, started, median wait, p90 wait, max wait, pending, gave up, preempted, requeued, cancelled, timed out, median run
+    "gvohp": ["gvohp", "gpu", "1", "1m 0s", "1m 0s", "1m 0s", "0", "0", "0", "0", "0", "0", "-"],
+    # started 30, 30, 120, 300, 600, 3720, 14400, 172800, and two not started: 300 (cancelled in line) and 18000 (pending
+    # since 07:00). Kaplan-Meier: the share still waiting 9/10, 8/10, 7/10, 6/10, then at 600, with 5 still in line,
+    # 6/10 * 4/5 = 0.48: the median is 600 (the plain median of the eight starts would be 450); then 0.36, 0.24, and 0
+    # at 172800: p90 172800, here the maximum too (the p90 case is its own test). Runs of the attempts neither
+    # preempted nor requeued, 3600 .. 28800: median (10800 + 28800) / 2
+    "reqp": ["reqp", "requeue", "8", "10m 0s", "2d 0h 0m", "2d 0h 0m", "1", "1", "1", "1", "0", "1", "5h 30m"],
     # waits 0, 20, 45, 120, 360: median 45; runs 600..3000: median 1800
-    "secp": ["secp", "secondary", "5", "0m 45s", "6m 0s", "6m 0s", "0", "0", "0", "0", "0", "30m 0s"],
+    "secp": ["secp", "secondary", "5", "0m 45s", "6m 0s", "6m 0s", "0", "0", "0", "0", "0", "0", "30m 0s"],
 }
+LATER = "1 of the starts above is a later attempt of a requeued job"
 BEFORE = "1 record whose Start is before its Eligible (or Submit) time, by the clocks the scheduler recorded; each counts as no wait"
 
 
@@ -100,7 +136,41 @@ def tree(root, leave_out=()):
 
 def utc(t):
     """an instant the fake sacct prints in its own zone: @SECONDS"""
-    return "@%d" % calendar.timegm(datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").timetuple())
+    return "@%d" % at(t)
+
+
+def km(obs, q, avg):
+    """the q-quantile of the Kaplan-Meier estimate from the product-limit formula, in exact fractions: obs [(seconds,
+    started)]; at each distinct time, d starts among the r still in line make S = S * (r - d) / r, and every job seen
+    there leaves the line after. The first time S <= 1 - q; with avg, where S = 1 - q exactly, the mean of it and the
+    next start. None when S never gets there"""
+    starts = sorted(set(t for t, ran in obs if ran))
+    s, r, thr = Fraction(1), len(obs), 1 - Fraction(q).limit_denominator(10)
+    for t in sorted(set(t for t, _ in obs)):
+        d = sum(1 for o in obs if o == (t, True))
+        if d:
+            s = s * (r - d) / r
+            if s <= thr:
+                after = [x for x in starts if x > t]
+                return (t + after[0]) // 2 if avg and s == thr and after else t
+        r -= sum(1 for o in obs if o[0] == t)
+    return None
+
+
+def dur(s):
+    d, s = divmod(int(s), 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return "%dd %dh %dm" % (d, h, m) if d else ("%dh %dm" % (h, m) if h else "%dm %ds" % (m, s))
+
+
+def with_date(g):
+    """the fake grid's date, whose now is FAKE_NOW when a test sets it"""
+    real = G.posix(shutil.which("date"))
+    path = os.path.join(g.bin, "date")
+    with open(path, "w", newline="\n") as fh:
+        fh.write(DATE % (real, real, real))
+    os.chmod(path, 0o755)
 
 
 class Report(unittest.TestCase):
@@ -108,11 +178,13 @@ class Report(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.g = G.Grid(self.tmp.name)
         self.g.setup()
+        with_date(self.g)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def report(self, args="", records=None, **extra):
+        extra.setdefault("FAKE_NOW", str(NOW))
         rc, out, err = self.g.run("queue report " + args, FAKE_SACCT="\n".join(RECORDS if records is None else records), **extra)
         self.assertEqual(rc, 0, (out, err))
         self.assertEqual(err, "")
@@ -122,7 +194,7 @@ class Report(unittest.TestCase):
         got = {}
         for line in lines:
             c = cells(line)
-            if len(c) == 12 and c[0] != "partition":
+            if len(c) == 13 and c[0] != "partition":
                 got[c[0] if c[0] in ROWS else (c[0], c[1])] = c
         return got
 
@@ -135,35 +207,57 @@ class Report(unittest.TestCase):
     def test_the_table(self):
         lines = self.report()
         self.assertEqual(lines[0], header(16), "the header: account, count, window as sacct reads it, query")
-        self.assertEqual(lines[1], SECOND)
-        self.assertEqual(lines[2], "")
-        self.assertEqual(cells(lines[3]), COLUMNS)
-        self.assertEqual([cells(l)[0] for l in lines[4:7]], ["gvohp", "reqp", "secp"], "sorted by partition, then QoS")
+        self.assertEqual(lines[1:5], HOW, "how to read it, in the report itself")
+        self.assertEqual(lines[5], "")
+        self.assertEqual(cells(lines[6]), COLUMNS)
+        self.assertEqual([cells(l)[0] for l in lines[7:10]], ["gvohp", "reqp", "secp"], "sorted by partition, then QoS")
         self.assertEqual(self.rows(lines), ROWS)
-        self.assertEqual(lines[7], "")
-        self.assertEqual(lines[8], BEFORE)
-        self.assertEqual(lines[9], "shortest median wait: secp secondary (0m 45s)", "the one sentence the maintainer asked for")
-        self.assertEqual(len(lines), 10, "no recommendation beyond it")
+        self.assertEqual(lines[10], "")
+        self.assertEqual(lines[11:13], [LATER, BEFORE])
+        self.assertEqual(lines[13], "shortest median wait: secp secondary (0m 45s)", "the one sentence the maintainer asked for")
+        self.assertEqual(len(lines), 14, "no recommendation beyond it")
 
     def test_a_chained_successor_waits_from_eligible(self):
         # submitted at 08:00:05 while its predecessor ran; eligible at 16:00:00, when that one ended; started 30 s later
         succ = "40600001|reqp|requeue|2026-10-01T08:00:05|2026-10-01T16:00:00|2026-10-01T16:00:30|2026-10-02T00:00:30|COMPLETED|08:00:00|asx10"
         lines = self.report(records=[succ])
-        self.assertEqual(self.table(lines), [["reqp", "requeue", "1", "0m 30s", "0m 30s", "0m 30s", "0", "0", "0", "0", "0", "8h 0m"]], "Start minus Eligible, not minus Submit")
+        self.assertEqual(self.table(lines), [["reqp", "requeue", "1", "0m 30s", "0m 30s", "0m 30s", "0", "0", "0", "0", "0", "0", "8h 0m"]], "Start minus Eligible, not minus Submit")
         self.assertEqual(lines[-1], "shortest median wait: reqp requeue (0m 30s)")
         # Eligible not a time: Submit stands in, and the wait is the 8 h 0 min 25 s since it
         lines = self.report(records=[succ.replace("|2026-10-01T16:00:00|", "|Unknown|")])
         self.assertEqual(self.table(lines)[0][3:6], ["8h 0m", "8h 0m", "8h 0m"])
 
-    def test_each_attempt_of_a_requeued_job_is_its_own_record_and_wait(self):
-        # one job, three attempts: preempted, requeued, then completed; each waited for a node from its own Eligible
-        rec = ["40600010|reqp|requeue|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:02:00|2026-10-01T11:02:00|PREEMPTED|08:00:00|asx10",
-               "40600010|reqp|requeue|2026-10-01T08:00:00|2026-10-01T11:04:00|2026-10-01T11:34:00|2026-10-01T12:34:00|REQUEUED|08:00:00|asx11",
-               "40600010|reqp|requeue|2026-10-01T08:00:00|2026-10-01T12:36:00|2026-10-01T14:36:00|2026-10-01T22:36:00|COMPLETED|08:00:00|asx12"]
-        lines = self.report(records=rec)
-        self.assertEqual(lines[0], header(3), "three records of one job id: sacct -D keeps every attempt")
-        # waits 120, 1800, 7200: median 30 min, p90 at ceil(2.7) = 3; runs 3 h, 1 h, 8 h: median 3 h
-        self.assertEqual(self.table(lines), [["reqp", "requeue", "3", "30m 0s", "2h 0m", "2h 0m", "0", "1", "1", "0", "0", "3h 0m"]])
+    def test_each_attempt_of_a_requeued_job_waits_from_the_end_of_the_one_before(self):
+        # one job, three attempts: preempted at 11:02, requeued at 12:34, then completed. As Slurm's source reads, a
+        # requeue moves Submit to its own moment and Eligible two minutes and a second past it (its hold); a Slurm that
+        # did not would leave both at the first attempt's, and Eligible would count the earlier runs as wait. Either
+        # way each later attempt waits from the End of the one before, its hold included
+        reset = ["40600010|reqp|requeue|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:02:00|2026-10-01T11:02:00|PREEMPTED|08:00:00|asx10",
+                 "40600010|reqp|requeue|2026-10-01T11:02:00|2026-10-01T11:04:01|2026-10-01T11:34:00|2026-10-01T12:34:00|REQUEUED|08:00:00|asx11",
+                 "40600010|reqp|requeue|2026-10-01T12:34:00|2026-10-01T12:36:01|2026-10-01T14:36:00|2026-10-01T22:36:00|COMPLETED|08:00:00|asx12"]
+        kept = [r.replace("|2026-10-01T11:02:00|2026-10-01T11:04:01|", "|2026-10-01T08:00:00|2026-10-01T08:00:00|")
+                 .replace("|2026-10-01T12:34:00|2026-10-01T12:36:01|", "|2026-10-01T08:00:00|2026-10-01T08:00:00|") for r in reset]
+        self.assertNotEqual(kept, reset)
+        for shape, rec in (("reset", reset), ("kept", kept)):
+            lines = self.report(records=rec)
+            self.assertEqual(lines[0], header(3), "three records of one job id: sacct -D keeps every attempt")
+            # waits 120, 1920, 7320: median 32 min, p90 at ceil(2.7) = 3; the runs cut short by the preemption and the
+            # requeue are not runs: the one of 8 h
+            self.assertEqual(self.table(lines), [["reqp", "requeue", "3", "32m 0s", "2h 2m", "2h 2m", "0", "0", "1", "1", "0", "0", "8h 0m"]], shape)
+            self.assertEqual(lines[-2:], ["2 of the starts above are later attempts of a requeued job", "shortest median wait: reqp requeue (32m 0s)"], shape)
+        # the verifier's case: eligible at 08:00, two preemptions, then a run of 8 h; a secp job waited 20 min. Waits
+        # 5, 7 and 7 min, the requeue holds (2 min each) included, in both shapes
+        rec = ["43000001|reqp|requeue|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:05:00|2026-10-01T08:35:00|PREEMPTED|08:00:00|asx10",
+               "43000001|reqp|requeue|2026-10-01T08:35:00|2026-10-01T08:37:01|2026-10-01T08:42:00|2026-10-01T09:02:00|PREEMPTED|08:00:00|asx11",
+               "43000001|reqp|requeue|2026-10-01T09:02:00|2026-10-01T09:04:01|2026-10-01T09:09:00|2026-10-01T17:09:00|COMPLETED|08:00:00|asx12",
+               "43000002|secp|secondary|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:20:00|2026-10-01T16:20:00|COMPLETED|08:00:00|asx13"]
+        for r in (rec, [x.replace("|2026-10-01T08:35:00|2026-10-01T08:37:01|", "|2026-10-01T08:00:00|2026-10-01T08:00:00|")
+                         .replace("|2026-10-01T09:02:00|2026-10-01T09:04:01|", "|2026-10-01T08:00:00|2026-10-01T08:00:00|") for x in rec]):
+            self.assertEqual(self.table(self.report(records=r))[0], ["reqp", "requeue", "3", "7m 0s", "7m 0s", "7m 0s", "0", "0", "2", "0", "0", "0", "8h 0m"])
+        # a later attempt still in line waits from the End of the one before, so far
+        rec = ["40600011|reqp|requeue|2026-10-04T08:00:00|2026-10-04T08:00:00|2026-10-04T08:10:00|2026-10-04T11:00:00|PREEMPTED|08:00:00|asx10",
+               "40600011|reqp|requeue|2026-10-04T11:00:00|2026-10-04T11:02:01|Unknown|Unknown|PENDING|08:00:00|None assigned"]
+        self.assertEqual(self.table(self.report(records=rec)), [["reqp", "requeue", "1", "10m 0s", ">1h 0m", ">1h 0m", "1", "0", "1", "0", "0", "0", "-"]])
 
     def test_p90_is_the_nearest_rank_not_the_maximum_and_a_prefix_partition_sorts_first(self):
         # "sec": 11 waits of 1 .. 11 min (p90 at ceil(9.9) = 10: 10 min, the maximum 11); "secp": 10 waits of 1 .. 10 min
@@ -175,8 +269,8 @@ class Report(unittest.TestCase):
                 rec.append("4060%02d%02d|%s|normal|2026-10-01T%02d:00:00|2026-10-01T%02d:00:00|2026-10-01T%02d:%02d:00|2026-10-01T%02d:%02d:00|COMPLETED|01:00:00|asx1"
                            % (n, i, part, i, i, i, i, i + 1, i))
         lines = self.report(records=rec)
-        self.assertEqual(self.table(lines), [["sec", "normal", "11", "6m 0s", "10m 0s", "11m 0s", "0", "0", "0", "0", "0", "1h 0m"],
-                                             ["secp", "normal", "10", "5m 30s", "9m 0s", "10m 0s", "0", "0", "0", "0", "0", "1h 0m"]])
+        self.assertEqual(self.table(lines), [["sec", "normal", "11", "6m 0s", "10m 0s", "11m 0s", "0", "0", "0", "0", "0", "0", "1h 0m"],
+                                             ["secp", "normal", "10", "5m 30s", "9m 0s", "10m 0s", "0", "0", "0", "0", "0", "0", "1h 0m"]])
 
     def test_two_qos_on_one_partition_are_two_rows(self):
         extra = ["40500020|secp|primary|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:30:00|2026-10-01T09:30:00|COMPLETED|08:00:00|asx16",
@@ -199,7 +293,8 @@ class Report(unittest.TestCase):
         system_tmp = (lambda: sorted(n for n in os.listdir("/tmp") if n.startswith("hpcw"))) if os.path.isdir("/tmp") else (lambda: [])
         before, before_tmp = tree(self.tmp.name, leave_out), system_tmp()
         # a caller's own zone and time format are not what sacct runs under
-        lines = self.report(TMPDIR=tmpd, TZ="America/Detroit", SLURM_TIME_FORMAT="relative")
+        lines = self.report(TMPDIR=tmpd, TZ="America/Detroit", SLURM_TIME_FORMAT="relative", FAKE_NOW="")
+        self.assertEqual(lines[0], header(16), "the real clock: a report made now, whatever the records say")
         self.assertEqual(self.g.argvs(), [dict(cmd="sacct", argv=sacct_argv(14), **SACCT_ENV)],
                          "one sacct with exactly these arguments (-X -D -n -P, the format, -S now-14days), TZ=UTC0 and SLURM_TIME_FORMAT=standard")
         self.assertEqual(self.g.calls(), [" ".join(["sacct"] + sacct_argv(14))], "no sbatch, squeue, scancel, srun or scontrol")
@@ -224,9 +319,9 @@ class Report(unittest.TestCase):
         rec = ["40600020|reqp|requeue|%s|%s|%s|%s|COMPLETED|10:00:00|asx10" % (utc("2026-11-01T05:50:00"), utc("2026-11-01T05:50:00"), utc("2026-11-01T06:10:00"), utc("2026-11-01T15:10:00")),
                "40600021|reqp|requeue|%s|%s|%s|%s|COMPLETED|10:00:00|asx11" % (utc("2026-11-01T04:00:00"), utc("2026-11-01T04:00:00"), utc("2026-11-01T04:00:30"), utc("2026-11-01T13:00:30"))]
         for fmt in ("standard", "%F %T", "relative"):
-            lines = self.report(records=rec, TZ="America/Detroit", SLURM_TIME_FORMAT=fmt)
+            lines = self.report(records=rec, TZ="America/Detroit", SLURM_TIME_FORMAT=fmt, FAKE_NOW=str(at("2026-11-02T00:00:00")))
             # waits 1200 and 30: median 615; runs 9 h and 9 h
-            self.assertEqual(self.table(lines), [["reqp", "requeue", "2", "10m 15s", "20m 0s", "20m 0s", "0", "0", "0", "0", "0", "9h 0m"]], fmt)
+            self.assertEqual(self.table(lines), [["reqp", "requeue", "2", "10m 15s", "20m 0s", "20m 0s", "0", "0", "0", "0", "0", "0", "9h 0m"]], fmt)
             self.assertNotIn(BEFORE, lines, fmt)
         self.assertEqual({(a["TZ"], a["SLURM_TIME_FORMAT"]) for a in self.g.argvs()}, {("UTC0", "standard")})
 
@@ -236,7 +331,7 @@ class Report(unittest.TestCase):
                "40600031|reqp|requeue|01 Oct 10:00|01 Oct 10:00|Unknown|Unknown|PENDING|08:00:00|None assigned"]
         lines = self.report(records=rec)
         self.assertEqual(lines[0], header(2))
-        self.assertEqual(self.table(lines), [["reqp", "requeue", "0", "-", "-", "-", "1", "0", "0", "0", "0", "-"]])
+        self.assertEqual(self.table(lines), [["reqp", "requeue", "0", "-", "-", "-", "1", "0", "0", "0", "0", "0", "-"]])
         self.assertEqual(lines[-2:], ["2 records whose times are not in the form this report reads (YYYY-MM-DDTHH:MM:SS): counted by state, their wait and run time left out",
                                       "shortest median wait: not known (the times of 2 records could not be read)"])
 
@@ -260,7 +355,8 @@ class Report(unittest.TestCase):
         rc, out, err = self.g.run("help")
         self.assertEqual(rc, 0, err)
         self.assertIn("hpcworker queue report [--days N] [--limits]", out, "the usage header at the top of the file")
-        self.assertIn("Start minus Eligible", out)
+        self.assertIn("from Eligible (or Submit where Eligible", out)
+        self.assertIn("a job not started counted as", out)
 
     def test_limits_adds_one_sinfo(self):
         lines = self.report("--limits", FAKE_SINFO="\n".join(SINFO))
@@ -292,14 +388,128 @@ class Report(unittest.TestCase):
         rc, out, err = self.g.run("queue report", FAKE_SACCT_FAIL="line one\nline two")
         self.assertEqual(err.splitlines(), ["hpcworker: the scheduler's history could not be read: line one line two"], "one line")
 
-    def test_only_started_jobs_have_waits(self):
-        # every record pending or cancelled before a start: rows with counts and dashes, and a footer that says so
+    def test_no_job_started_yet(self):
+        # every record pending or cancelled before a start: each waited at least its time in line, and no median is
+        # reached (pending since 00:00, 01:00 and 02:00, 12, 11 and 10 h at noon; one cancelled after 5 min in line)
         pend = ["4050010%d|reqp|requeue|2026-10-04T0%d:00:00|2026-10-04T0%d:00:00|Unknown|Unknown|PENDING|08:00:00|None assigned" % (i, i, i) for i in range(3)]
         canc = ["40500110|secp|secondary|2026-10-03T07:00:00|2026-10-03T07:00:00|None|2026-10-03T07:05:00|CANCELLED by 1234|00:10:00|None assigned"]
         lines = self.report(records=pend + canc)
-        self.assertEqual(self.table(lines), [["reqp", "requeue", "0", "-", "-", "-", "3", "0", "0", "0", "0", "-"],
-                                             ["secp", "secondary", "0", "-", "-", "-", "0", "0", "0", "1", "0", "-"]])
-        self.assertEqual(lines[-1], "shortest median wait: none (no job in the window has started)")
+        self.assertEqual(self.table(lines), [["reqp", "requeue", "0", ">12h 0m", ">12h 0m", ">12h 0m", "3", "0", "0", "0", "0", "0", "-"],
+                                             ["secp", "secondary", "0", ">5m 0s", ">5m 0s", ">5m 0s", "0", "1", "0", "0", "0", "0", "-"]])
+        self.assertEqual(lines[-1], "shortest median wait: not known (no median is reached: in each row more than half of the jobs were still waiting at its longest wait)")
+        # nothing in the window at all to wait on (every job started before it): a footer that says so
+        early = "40400002|reqp|requeue|2026-09-10T08:00:00|2026-09-10T08:00:00|2026-09-12T08:00:00|Unknown|RUNNING|14-00:00:00|asx10"
+        self.assertEqual(self.report(records=[early])[-1], "shortest median wait: none (no job in the window has started)")
+
+    def test_a_wait_that_ended_before_the_window_is_left_out(self):
+        # sacct lists a job running when the window opened (2026-09-20T12:00:00 for 14 days at noon of 2026-10-04): its
+        # wait of 2 days ended on 2026-09-12, outside the report. A wait that began before the window and ended in it
+        # (eligible 09-18, started 09-21) counts whole
+        rec = ["40400001|reqp|requeue|2026-09-10T08:00:00|2026-09-10T08:00:00|2026-09-12T08:00:00|2026-09-25T08:00:00|COMPLETED|14-00:00:00|asx10",
+               "40500001|reqp|requeue|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:00:30|2026-10-01T09:00:30|COMPLETED|08:00:00|asx10"]
+        lines = self.report(records=rec)
+        self.assertEqual(lines[0], header(2), "both are records sacct listed")
+        self.assertEqual(self.table(lines), [["reqp", "requeue", "1", "0m 30s", "0m 30s", "0m 30s", "0", "0", "0", "0", "0", "0", "1h 0m"]])
+        self.assertEqual(lines[-2:], ["1 record of jobs that started before the window began (running when it opened): its wait and run left out",
+                                      "shortest median wait: reqp requeue (0m 30s)"])
+        rec.append("40450001|reqp|requeue|2026-09-18T12:00:00|2026-09-18T12:00:00|2026-09-21T12:00:00|2026-09-21T13:00:00|COMPLETED|08:00:00|asx10")
+        self.assertEqual(self.table(self.report(records=rec))[0][2:6], ["2", "1d 12h 0m", "3d 0h 0m", "3d 0h 0m"])
+        # the edge is the report's own clock: one second later the same job is in, one second before it is out
+        edge = ["40450002|reqp|requeue|2026-09-20T11:00:00|2026-09-20T11:00:00|2026-09-20T12:00:00|2026-09-20T13:00:00|COMPLETED|08:00:00|asx10"]
+        self.assertEqual(self.table(self.report(records=edge))[0][2:4], ["1", "1h 0m"])
+        self.assertEqual(self.table(self.report(records=edge, FAKE_NOW=str(NOW + 1)))[0][2:4], ["0", "-"])
+
+    def test_jobs_not_started_count_as_waiting_at_least_so_long(self):
+        # the verifier's case: on reqp three jobs waited 5 min, one is pending since 09-28T08:00 (6 d 4 h at noon of
+        # 10-04), three were cancelled after 2 days in line; on secp three waited 30 min. Four of seven reqp jobs never
+        # got a node: its median is not reached, and secp is the shorter
+        rec = ["4100000%d|reqp|requeue|2026-10-01T%02d:00:00|2026-10-01T%02d:00:00|2026-10-01T%02d:05:00|2026-10-01T%02d:05:00|COMPLETED|08:00:00|asx10" % (i, 8 + i, 8 + i, 8 + i, 9 + i) for i in range(3)]
+        rec += ["41000004|reqp|requeue|2026-09-28T08:00:00|2026-09-28T08:00:00|Unknown|Unknown|PENDING|08:00:00|None assigned"]
+        rec += ["4100001%d|reqp|requeue|2026-09-29T0%d:00:00|2026-09-29T0%d:00:00|None|2026-10-01T0%d:00:00|CANCELLED by 1234|08:00:00|None assigned" % (i, 7 + i, 7 + i, 7 + i) for i in range(3)]
+        rec += ["4100002%d|secp|secondary|2026-10-01T%02d:00:00|2026-10-01T%02d:00:00|2026-10-01T%02d:30:00|2026-10-01T%02d:30:00|COMPLETED|08:00:00|asx10" % (i, 8 + i, 8 + i, 8 + i, 9 + i) for i in range(3)]
+        lines = self.report(records=rec)
+        self.assertEqual(self.table(lines), [["reqp", "requeue", "3", ">6d 4h 0m", ">6d 4h 0m", ">6d 4h 0m", "1", "3", "0", "0", "0", "0", "1h 0m"],
+                                             ["secp", "secondary", "3", "30m 0s", "30m 0s", "30m 0s", "0", "0", "0", "0", "0", "0", "1h 0m"]])
+        self.assertEqual(lines[-1], "shortest median wait: secp secondary (30m 0s)")
+        # a job submitted a minute ago is not a one-minute wait: three waits of 1 h and one pending for 1 min, median 1 h
+        rec = ["4110000%d|secp|secondary|2026-10-03T0%d:00:00|2026-10-03T0%d:00:00|2026-10-03T0%d:00:00|2026-10-03T0%d:30:00|COMPLETED|08:00:00|asx10" % (i, i, i, i + 1, i + 1) for i in range(3)]
+        rec += ["41100009|secp|secondary|2026-10-04T11:59:00|2026-10-04T11:59:00|Unknown|Unknown|PENDING|08:00:00|None assigned"]
+        self.assertEqual(self.table(self.report(records=rec))[0][2:7], ["3", "1h 0m", "1h 0m", "1h 0m", "1"])
+        # a median not reached below the shortest one is not ranked: one start at 1 min and three pending 10 min on reqp
+        rec += ["4120000%d|reqp|requeue|2026-10-04T11:50:00|2026-10-04T11:50:00|Unknown|Unknown|PENDING|08:00:00|None assigned" % i for i in range(3)]
+        rec += ["41200009|reqp|requeue|2026-10-04T11:00:00|2026-10-04T11:00:00|2026-10-04T11:01:00|2026-10-04T11:30:00|COMPLETED|08:00:00|asx10"]
+        lines = self.report(records=rec)
+        self.assertEqual(self.table(lines)[0][2:7], ["1", ">10m 0s", ">10m 0s", ">10m 0s", "3"])
+        self.assertEqual(lines[-1], "shortest median wait: secp secondary (1h 0m); not known against reqp requeue (more than 10m 0s), whose median is not reached")
+
+    def test_kaplan_meier_against_the_product_limit_formula(self):
+        # rows of 1 to 12 jobs, waits drawn with ties, about two in five not started (cancelled in line): median and p90
+        # as the formula in exact fractions gives them, "> longest" where it is not reached
+        rnd = random.Random(20261004)
+        rec, want = [], {}
+        el = NOW - 2 * 86400
+        for row in range(40):
+            part, obs = "p%02d" % row, []
+            for i in range(rnd.randint(1, 12)):
+                t, ran = rnd.choice([0, 30, 60, 60, 120, 300, 600, 600, 3600, 7200]), rnd.random() < 0.6
+                obs.append((t, ran))
+                if ran:
+                    rec.append("5%02d%04d|%s|q|%s|%s|%s|%s|COMPLETED|01:00:00|asx1" % (row, i, part, iso(el), iso(el), iso(el + t), iso(el + t + 60)))
+                else:
+                    rec.append("5%02d%04d|%s|q|%s|%s|None|%s|CANCELLED by 1|01:00:00|None assigned" % (row, i, part, iso(el), iso(el), iso(el + t)))
+            longest = ">" + dur(max(t for t, _ in obs))
+            m, p = km(obs, 0.5, True), km(obs, 0.9, False)
+            want[part] = [dur(m) if m is not None else longest, dur(p) if p is not None else longest]
+        got = {c[0]: c[3:5] for c in self.table(self.report(records=rec))}
+        self.assertEqual(got, want)
+        # by hand: a start at 1 and 3 min, one cancelled at 2: the share 3/4, then 3/4 * 1/2 at 3 min, the median 3 min
+        # (taken as four starts it would be 2 min 30 s); and at one time a start comes before a job leaving the line,
+        # so the share falls exactly to 1/2 at 2 min and the median is the mean of 2 and 3 min (taken the other way, 2 min)
+        self.assertEqual(km([(60, True), (120, False), (180, True), (240, True)], 0.5, True), 180)
+        self.assertEqual(km([(60, True), (120, True), (120, False), (180, True)], 0.5, True), 150)
+        for obs, median in (([(60, True), (120, False), (180, True), (240, True)], "3m 0s"), ([(60, True), (120, True), (120, False), (180, True)], "2m 30s")):
+            rec = []
+            for i, (t, ran) in enumerate(obs):
+                rec.append("6000%d|r|q|%s|%s|%s|%s|%s|01:00:00|%s" % (i, iso(el), iso(el), iso(el + t) if ran else "None", iso(el + t + (60 if ran else 0)),
+                                                                     "COMPLETED" if ran else "CANCELLED by 1", "asx1" if ran else "None assigned"))
+            self.assertEqual(self.table(self.report(records=rec))[0][3], median)
+
+    def test_cancelled_before_and_after_a_start(self):
+        # one job ran 55 min and was cancelled (a worker taken down); one sat 2 days in line and was cancelled; one ran
+        # 8 h. "gave up" and "cancelled" apart, and the 2 days in line are a wait known to be at least that long
+        rec = ["42000001|reqp|requeue|2026-10-01T08:00:00|2026-10-01T08:00:00|2026-10-01T08:05:00|2026-10-01T09:00:00|CANCELLED by 1234|08:00:00|asx10",
+               "42000002|reqp|requeue|2026-09-29T08:00:00|2026-09-29T08:00:00|None|2026-10-01T08:00:00|CANCELLED by 1234|08:00:00|None assigned",
+               "42000003|reqp|requeue|2026-10-01T10:00:00|2026-10-01T10:00:00|2026-10-01T10:10:00|2026-10-01T18:10:00|COMPLETED|08:00:00|asx11"]
+        want = [["reqp", "requeue", "2", "10m 0s", ">2d 0h 0m", ">2d 0h 0m", "0", "1", "0", "0", "1", "0", "4h 27m"]]
+        self.assertEqual(self.table(self.report(records=rec)), want)
+        # where Slurm records a cancel in line as Start and End both, or names no node, it is still a cancel before a start
+        both = rec[1].replace("|None|", "|2026-10-01T08:00:00|")
+        self.assertEqual(self.table(self.report(records=[rec[0], both, rec[2]])), want, "Start = End")
+        self.assertEqual(self.table(self.report(records=[rec[0], both.replace("|None assigned", "|"), rec[2]])), want, "Start = End, the node field empty")
+        self.assertEqual(self.table(self.report(records=[rec[0], both.replace("|CANCELLED by 1234|", "|FAILED|"), rec[2]]))[0][2:8],
+                         ["2", "10m 0s", ">2d 0h 0m", ">2d 0h 0m", "0", "0"], "no node: not started, whatever the state")
+        # and a pending record with an expected Start is still in line
+        pend = "42000004|reqp|requeue|2026-10-04T10:00:00|2026-10-04T10:00:00|2026-10-04T14:00:00|Unknown|PENDING|08:00:00|asx12"
+        self.assertEqual(self.table(self.report(records=[pend]))[0][2:7], ["0", ">2h 0m", ">2h 0m", ">2h 0m", "1"])
+
+    def test_array_tasks_are_left_out(self):
+        # an --array=0-19%2 of 1 h tasks: every task eligible at 08:00, two at a time by the array's own limit, the last
+        # two not yet split off; three workers on reqp waited 5 min, three on secp 30 min. The array would read as reqp's
+        # waits of up to 8 h, and its unsplit record as one pending job for two
+        rec = ["41100000_%d|reqp|requeue|2026-10-02T08:00:00|2026-10-02T08:00:00|2026-10-02T%02d:00:00|2026-10-02T%02d:00:00|COMPLETED|01:00:00|asx1%d" % (i, 8 + i // 2, 9 + i // 2, i % 2) for i in range(18)]
+        rec += ["41100000_[18-19%2]|reqp|requeue|2026-10-02T08:00:00|2026-10-02T08:00:00|Unknown|Unknown|PENDING|01:00:00|None assigned"]
+        rec += ["4120000%d|reqp|requeue|2026-10-01T0%d:00:00|2026-10-01T0%d:00:00|2026-10-01T0%d:05:00|2026-10-01T0%d:05:00|COMPLETED|08:00:00|asx10" % (i, i, i, i, i + 1) for i in range(1, 4)]
+        rec += ["4130000%d|secp|secondary|2026-10-01T0%d:00:00|2026-10-01T0%d:00:00|2026-10-01T0%d:30:00|2026-10-01T0%d:30:00|COMPLETED|08:00:00|asx10" % (i, i, i, i, i + 1) for i in range(1, 4)]
+        lines = self.report(records=rec)
+        self.assertEqual(lines[0], header(25))
+        self.assertEqual([c[:7] for c in self.table(lines)], [["reqp", "requeue", "3", "5m 0s", "5m 0s", "5m 0s", "0"], ["secp", "secondary", "3", "30m 0s", "30m 0s", "30m 0s", "0"]])
+        self.assertEqual(lines[-2:], ["19 records of array tasks (20 tasks) left out: a task waits on the limit of its array (%N) as well as for a node",
+                                      "shortest median wait: reqp requeue (5m 0s)"])
+        # the tasks of an unsplit record, counted from its brackets
+        for ids, n in ((["7_[0-199%10]"], 200), (["7_[1,3,5-7]"], 5), (["7_[4]"], 1), (["7_1", "7_[2-3]"], 3)):
+            rec = ["%s|reqp|requeue|2026-10-02T08:00:00|2026-10-02T08:00:00|Unknown|Unknown|PENDING|01:00:00|None assigned" % i for i in ids]
+            self.assertIn("%d record%s of array tasks (%d task%s) left out: a task waits on the limit of its array (%%N) as well as for a node"
+                          % (len(ids), "s" if len(ids) > 1 else "", n, "s" if n > 1 else ""), self.report(records=rec), ids)
 
     def test_a_line_that_is_not_a_record_is_left_out(self):
         # a notice sacct printed first, and a line with one field too many (a '|' where none belongs): left out and
@@ -308,12 +518,20 @@ class Report(unittest.TestCase):
         lines = self.report(records=["sacct: a notice the site prints first"] + RECORDS + [shifted, "", "\r"])
         self.assertEqual(lines[0], header(16))
         self.assertEqual(self.rows(lines), ROWS)
-        self.assertIn("2 lines that were not a record left out", lines)
+        self.assertIn("2 lines that were not a record left out, the first: sacct: a notice the site prints first", lines)
 
-    def test_nothing_but_lines_that_are_not_records_is_a_failure(self):
-        rc, out, err = self.g.run("queue report", FAKE_SACCT="sacct: a notice the site prints first\nsomething|else")
+    def test_a_notice_and_no_record_is_no_jobs(self):
+        # a site whose sacct prints a notice first (or a warning on stderr, which adapter_history keeps): an account with
+        # no jobs is still one line, the notice said, and exit 0
+        rc, out, err = self.g.run("queue report", FAKE_SACCT="sacct: a notice the site prints first", FAKE_NOW=str(NOW))
+        self.assertEqual((rc, err), (0, ""), out)
+        self.assertEqual(out.splitlines(), ["no jobs of st1234 eligible or running at any time in the last 14 days, in the history the scheduler keeps (%s)" % query(14),
+                                            "1 line that was not a record left out, the first: sacct: a notice the site prints first"])
+
+    def test_lines_shaped_like_records_of_another_form_are_a_failure(self):
+        rc, out, err = self.g.run("queue report", FAKE_SACCT="sacct: a notice the site prints first\nsomething|else", FAKE_NOW=str(NOW))
         self.assertEqual((rc, out), (1, ""))
-        self.assertEqual(err.splitlines(), ["hpcworker: none of the lines sacct printed is a record this report reads; the first: sacct: a notice the site prints first"])
+        self.assertEqual(err.splitlines(), ["hpcworker: none of the lines sacct printed is a record this report reads (ten fields between '|'); the first shaped like one: something|else"])
 
 
 class OtherSchedulers(unittest.TestCase):

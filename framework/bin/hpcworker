@@ -42,11 +42,14 @@
 #   hpcworker gate    that line's forced command: SSH_ORIGINAL_COMMAND, eight fixed verbs, never a sign-in
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker queue report [--days N] [--limits]                 maintainers and lab leads: how long this account's jobs waited
-#                                                                per partition and QoS (Start minus Eligible, or minus Submit
-#                                                                where Eligible is not a time; each attempt of a requeued job
-#                                                                its own), from one sacct of the jobs eligible or running at
-#                                                                any time in the last N days (default 14, up to 90), times in
-#                                                                UTC; --limits adds one sinfo. Slurm sites only
+#                                                                per partition and QoS, from Eligible (or Submit where Eligible
+#                                                                is not a time; for a later attempt of a requeued job, the End
+#                                                                of the one before) to Start, a job not started counted as
+#                                                                waiting at least its time in line (Kaplan-Meier), array tasks
+#                                                                left out; from one sacct of the jobs eligible or running at any
+#                                                                time in the last N days (default 14, up to 90), a wait that
+#                                                                ended before them left out; times in UTC; --limits adds one
+#                                                                sinfo. Slurm sites only
 #   hpcworker version                                            the number; "(shared copy at DIR)" on the lab's copy
 #
 # Rules this command keeps: it never reads, copies or prints a Claude credential (Claude Code keeps
@@ -1904,14 +1907,28 @@ cmd_login_setup() {
 # --limits ONE sinfo, both bounded by timeout; two queries on the login node for a report a person types
 # now and then is within the one-scheduler-command-per-action etiquette as discover and diag keep it (the
 # 60 s floor binds clients that poll, and nothing here polls). The report itself writes nothing; load_profile,
-# as for every verb, may write its cache ~/.hpcworker/profile.env (on the first load after an install, or
-# after the profile changed).
+# as for every verb, may write its cache ~/.hpcworker/profile.env: whenever there is none, it is not a plain file
+# of this account's that no one else may write, or it was made from other inputs (the account's profile, the site
+# profile, this copy's directory or its profile.awk and profile_sh.sh, as a new version published changes them,
+# $HOME or $USER: prof_env_key).
 #
-# The wait is Start minus Eligible, the moment the job could first run: a chain successor is submitted while its
-# predecessor runs and becomes eligible only when that one ends, so Start minus Submit counted the predecessor's
-# whole run as queue time on every link of an always-on chain. Submit stands in only where Eligible is not a
-# time. Each attempt of a requeued job is its own record (adapter_history's -D) and
-# its own wait: each attempt waited for a node.
+# The wait runs from Eligible to Start. Eligible is when the scheduler first counted the job as waiting to run, free
+# of its dependencies and its begin time: a chain successor is submitted while its predecessor runs and becomes
+# eligible only when that one ends, so Start minus Submit counted the predecessor's whole run as queue time on every
+# link of an always-on chain. Submit stands in only where Eligible is not a time. Time a job is held back by the
+# account's own limits (a QoS's caps per user) sacct does not tell apart, and it stays in the wait; an array's
+# tasks also wait on the array's own limit (%N) and would each count as a job, so they are left out and said.
+# Each attempt of a requeued job is its own record (adapter_history's -D). A later attempt waits from the End of
+# the one before, the requeue's own short hold included, the same whether or not this Slurm resets Eligible at a
+# requeue: from an Eligible that was not reset, the earlier attempts' runs would count as wait, the chain fault again.
+# A job that has not started (still pending, or cancelled in line) waited at least its time in line so far: left
+# out, a partition where most jobs never got a node read as the fastest; counted as a finished wait, a job
+# submitted a minute ago read as a one-minute wait. So the median and p90 are Kaplan-Meier estimates, a job not
+# started being censored at its time in line (to its End, or to now); with nothing censored they are the plain
+# median and the nearest-rank p90. One that is not reached (more than half, or a tenth, of the jobs still waiting at
+# the longest wait seen) is written ">T", and the footer does not rank a row it cannot. sacct lists the jobs eligible
+# or running at any time in the window: one that started before the window began is listed because it was running
+# when it opened, and its wait, which ended before the window, is left out and said.
 #
 # The arithmetic is awk, POSIX only, like lib/profile.awk: one text that runs the same under mawk (the ubuntu
 # CI lane, a laptop) and gawk 4.0.2 (warrior, the centos 7 lane). mktime, strftime and systime are extensions
@@ -1923,8 +1940,10 @@ cmd_login_setup() {
 # environment and on stdin, never as operands or -v (both read escapes), as HPCW_JSON_AWK has them.
 #   HPCW_Q_MODE=epoch   stdin: one time a line -> its seconds since 1970-01-01T00:00:00 UTC, an empty line for
 #                       anything that is not a time (the tests check the formula so)
-#   HPCW_Q_MODE=report  stdin: adapter_history's records -> the report; HPCW_Q_USER, HPCW_Q_DAYS and
-#                       HPCW_Q_QUERY fill the header. Exit 4 and nothing printed when lines came and none was a record
+#   HPCW_Q_MODE=report  stdin: adapter_history's records -> the report; HPCW_Q_USER, HPCW_Q_DAYS and HPCW_Q_QUERY
+#                       fill the header, HPCW_Q_NOW (date +%s, taken just before sacct ran) is now and, less
+#                       HPCW_Q_DAYS days, the start of the window. Exit 4 and nothing printed when no line was a
+#                       record and one was shaped like a record of another form; exit 3 when HPCW_Q_NOW is not a number
 # shellcheck disable=SC2016
 HPCW_QUEUE_AWK='
 function days_from_civil(y, m, d,   era, yoe, doy, doe) {
@@ -1954,69 +1973,144 @@ function ssort(a, n,   gap, i, j, t) { # a[1..n] ascending, in place (shell sort
     for (i = gap + 1; i <= n; i++) { t = a[i] + 0; for (j = i; j > gap && a[j - gap] + 0 > t; j -= gap) a[j] = a[j - gap]; a[j] = t }
 }
 function median(a, n) { return (n % 2) ? a[(n + 1) / 2] : int((a[n / 2] + a[n / 2 + 1]) / 2) }   # sorted a[1..n]; the two middle values averaged
-function p90(a, n,   i) { i = int(n * 9 / 10); if (i * 10 < n * 9) i++; return a[i] }        # nearest rank: the value at ceil(0.9 n)
-BEGIN { FS = "|"; mode = ENVIRON["HPCW_Q_MODE"]; if (mode != "epoch" && mode != "report") exit 3 }
+function kmq(a, n, q, avg,   s, i, j, t, thr) {
+  # a[1..n] ascending codes, 2 * seconds, plus 1 for a job not started (censored), so at one time the starts come
+  # first, as Kaplan-Meier takes them. The q-quantile: the first start at which the share still waiting falls to
+  # 1 - q or below (a start takes one of the n - i + 1 still in line; a censored job leaves the line without a
+  # step). avg: where the share falls exactly to 1 - q, the mean of that start and the next one, which is the plain
+  # median when nothing is censored (without avg, the nearest rank). "" when the share never falls that far
+  s = 1; thr = 1 - q
+  for (i = 1; i <= n; i++) {
+    if (a[i] % 2) continue
+    s = s * (1 - 1 / (n - i + 1))
+    if (s > thr + 1e-9) continue
+    t = int(a[i] / 2)
+    if (avg && s > thr - 1e-9) for (j = i + 1; j <= n; j++) if (a[j] % 2 == 0) return int((t + int(a[j] / 2)) / 2)
+    return t
+  }
+  return ""
+}
+function tasks(id,   r, i, n, pc, b, ab) { # an array record -> its tasks: 41100000_7 1, 41100000_[18-19%2] 2, 41100000_[1,3,5-7] 5
+  i = index(id, "["); if (!i) return 1
+  r = substr(id, i + 1); i = index(r, "]"); if (i) r = substr(r, 1, i - 1); i = index(r, "%"); if (i) r = substr(r, 1, i - 1)
+  n = split(r, pc, ","); b = 0
+  for (i = 1; i <= n; i++) if (pc[i] ~ /^[0-9]+-[0-9]+$/) { split(pc[i], ab, "-"); b += ab[2] - ab[1] + 1 } else b++
+  return b
+}
+BEGIN {
+  FS = "|"; mode = ENVIRON["HPCW_Q_MODE"]; now = ENVIRON["HPCW_Q_NOW"]; days = ENVIRON["HPCW_Q_DAYS"]
+  if (mode != "epoch" && mode != "report") { bad = 1; exit 3 }
+  if (mode == "report" && (now !~ /^[0-9]+$/ || days !~ /^[0-9]+$/)) { bad = 1; exit 3 }
+  now += 0; days += 0; since = now - days * 86400   # sacct -S now-Ndays, from the moment just before it ran
+}
 mode == "epoch" { print epoch($0); next }
 {
   sub(/\r$/, "")
   if ($0 ~ /^[ \t]*$/) next
-  # the ten fields adapter_history asks for, none of them free text: any other count is not a record (a notice
-  # sacct printed first, or fields that do not line up), left out and counted rather than read one column off
-  if (NF != 10) { odd++; next }
+  # the ten fields adapter_history asks for, none of them free text: any other count is not a record, left out and
+  # counted rather than read one column off. One with a "|" in it is shaped like a record of another form (the
+  # format was not what was asked); one without is a notice sacct or the site printed (stderr comes along)
+  if (NF != 10) { odd++; if (odd == 1) oddone = $0; if (index($0, "|")) shaped++; next }
   nrec++
-  part = $2; qos = $3; gsub(/^[ \t]+|[ \t]+$/, "", part); gsub(/^[ \t]+|[ \t]+$/, "", qos)
+  id = $1; part = $2; qos = $3; gsub(/^[ \t]+|[ \t]+$/, "", id); gsub(/^[ \t]+|[ \t]+$/, "", part); gsub(/^[ \t]+|[ \t]+$/, "", qos)
+  # an array task (41100000_7, or 41100000_[18-19%2] for tasks not yet split off): it waits on the limit of its
+  # array as well as for a node, and one array would outweigh every other job of its row
+  if (id ~ /_/) { arr++; arrt += tasks(id); next }
   # SUBSEP sorts before every printable byte, so a plain string sort of the keys is partition first, then QoS
   k = part SUBSEP qos
   if (!(k in seen)) { seen[k] = 1; nk++; keys[nk] = k }
   st = $8; sub(/ .*/, "", st)   # "CANCELLED by 12345" -> CANCELLED
+  es = epoch($4); el = epoch($5); eb = epoch($6); ee = epoch($7)
+  # started: a Start that is a time, on a record that is not PENDING (whose Start may be an expected one) and that
+  # got a node ("None assigned" never did); a job cancelled in line may carry the cancel as both Start and End, as
+  # some Slurm versions record it. Where the times cannot be read, the Start field and the node decide
+  nonode = ($10 ~ /^[ \t]*None/)
+  ran = (eb != "" && st !~ /^PENDING/ && !nonode && !(st ~ /^CANCELLED/ && eb == ee))
+  if (es == "") ran = (st !~ /^PENDING/ && !nonode && $6 !~ /^[ \t]*(Unknown|None)?[ \t]*$/)
   if (st ~ /^PENDING/) pend[k]++
   if (st ~ /^PREEMPTED/) pre[k]++
   if (st ~ /^REQUEUE/) req[k]++   # REQUEUED, and REQUEUE_HOLD or REQUEUE_FED where a site has them
-  if (st ~ /^CANCELLED/) canc[k]++
+  if (st ~ /^CANCELLED/) { if (ran) canc[k]++; else gave[k]++ }
   if (st ~ /^TIMEOUT/) tout[k]++
-  es = epoch($4); el = epoch($5); eb = epoch($6); ee = epoch($7)
   # Submit is a time on every record sacct keeps; when it is not, sacct printed a form this awk does not read, and
   # the record is counted by its state and said, never quietly read as a job that did not start
   if (es == "") { notime++; next }
-  if (eb != "") {
-    w = eb - (el != "" ? el : es)
+  nrc++; rk[nrc] = k; rst[nrc] = st; rid[nrc] = id; rws[nrc] = (el != "" ? el : es); rb[nrc] = (ran ? eb : ""); re[nrc] = ee
+  na[id]++; att[id, na[id]] = nrc
+}
+END {
+  if (bad) exit 3
+  if (mode != "report") exit
+  user = ENVIRON["HPCW_Q_USER"]; query = ENVIRON["HPCW_Q_QUERY"]
+  # no record and a line shaped like one: a form this report does not read, where "no jobs" would be untrue
+  if (nrec == 0 && shaped > 0) exit 4
+  if (nrec == 0) {
+    print "no jobs of " user " eligible or running at any time in the last " days " days, in the history the scheduler keeps (" query ")"
+    if (odd > 0) printf "%d line%s that %s not a record left out, the first: %s\n", odd, (odd > 1 ? "s" : ""), (odd > 1 ? "were" : "was"), oddone
+    exit 0
+  }
+  for (i = 1; i <= nrc; i++) {
+    k = rk[i]; b = rb[i]; ws = rws[i]
+    # a later attempt of a requeued job waits from the End of the one before: the latest End of an attempt of the
+    # same job that ran and ended no later than this one started (or than now, for one still in line)
+    p = ""; lim = (b != "" ? b : now)
+    for (x = 1; x <= na[rid[i]]; x++) { j = att[rid[i], x]; if (j != i && rb[j] != "" && re[j] != "" && re[j] <= lim && (p == "" || re[j] > p)) p = re[j] }
+    if (p != "") ws = p
+    if (b == "") {
+      # not started: censored at its time in line, to its End (cancelled in line) or to now
+      w = (re[i] != "" ? re[i] : now) - ws; if (w < 0) w = 0
+      no[k]++; ob[k, no[k]] = 2 * w + 1
+      continue
+    }
+    if (b < since) { early++; continue }
+    if (p != "") later++
+    w = b - ws
     # a Start before its Eligible (or Submit): the clocks of the submit host and the controller disagree, or the
     # record is odd; it counts as no wait rather than a negative one, and the report says how many did
     if (w < 0) { w = 0; before++ }
-    nw[k]++; wait[k, nw[k]] = w
-    if (ee != "" && ee >= eb) { nr[k]++; run[k, nr[k]] = ee - eb }
+    nw[k]++; no[k]++; ob[k, no[k]] = 2 * w
+    # a run cut short by a preemption or a requeue says nothing of how long a job runs: its next attempt runs on
+    if (re[i] != "" && re[i] >= b && rst[i] !~ /^(PREEMPTED|REQUEUE)/) { nr[k]++; run[k, nr[k]] = re[i] - b }
   }
-}
-END {
-  if (mode != "report") exit
-  user = ENVIRON["HPCW_Q_USER"]; days = ENVIRON["HPCW_Q_DAYS"]; query = ENVIRON["HPCW_Q_QUERY"]
-  if (nrec == 0 && odd > 0) exit 4
-  if (nrec == 0) { print "no jobs of " user " eligible or running at any time in the last " days " days, in the history the scheduler keeps (" query ")"; exit 0 }
   printf "queue report for %s: %d record%s of jobs eligible or running at any time in the last %s days, read by `%s`\n", user, nrec, (nrec > 1 ? "s" : ""), days, query
-  print "one record per attempt of a requeued job; a wait is Start minus Eligible (minus Submit where Eligible is not a time); times in UTC"
+  print "one record per attempt of a requeued job; a wait runs from Eligible (Submit where Eligible is not a time; for a later attempt, the End of the one before) to Start; times in UTC"
+  print "a job not started (pending, or cancelled in line) counts as waiting at least as long as it had: median and p90 are Kaplan-Meier estimates, \">T\" where one lies beyond T, the longest wait seen"
+  print "gave up: cancelled before it started; cancelled: after it started; median run: End minus Start of the attempts not preempted or requeued"
+  print "not listed by sacct: a job held, or waiting on a dependency (the successor a worker queued), since it was submitted; pending is State PENDING, a job held later among them"
   print ""
-  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %9s  %8s  %9s  %9s  %s\n"
-  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "preempted", "requeued", "cancelled", "timed out", "median run"
+  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %7s  %9s  %8s  %9s  %9s  %s\n"
+  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "gave up", "preempted", "requeued", "cancelled", "timed out", "median run"
   for (i = 2; i <= nk; i++) { t = keys[i]; for (j = i - 1; j >= 1 && keys[j] > t; j--) keys[j + 1] = keys[j]; keys[j + 1] = t }
-  best = ""
+  best = ""; nopen = 0
   for (i = 1; i <= nk; i++) {
     k = keys[i]; split(k, kp, SUBSEP)
-    n = nw[k] + 0; md = "-"; p9 = "-"; mx = "-"; rm = "-"
+    n = no[k] + 0; md = "-"; p9 = "-"; mx = "-"; rm = "-"
     if (n > 0) {
-      for (j = 1; j <= n; j++) a[j] = wait[k, j]
-      ssort(a, n); m = median(a, n); md = dur(m); p9 = dur(p90(a, n)); mx = dur(a[n])
-      # ties keep the first in table order: the numbers decide, and a tie is one to look at
-      if (best == "" || m < bestm) { best = kp[1] " " kp[2]; bestm = m }
+      for (j = 1; j <= n; j++) a[j] = ob[k, j]
+      ssort(a, n); m = kmq(a, n, 0.5, 1); m9 = kmq(a, n, 0.9, 0); last = int(a[n] / 2)
+      md = (m == "" ? ">" dur(last) : dur(m)); p9 = (m9 == "" ? ">" dur(last) : dur(m9)); mx = (a[n] % 2 ? ">" : "") dur(last)
+      # ties keep the first in table order: the numbers decide, and a tie is one to look at. A median not reached is
+      # more than the longest wait of its row, which ranks it only against a median no longer than that
+      if (m == "") { nopen++; olab[nopen] = kp[1] " " kp[2]; olast[nopen] = last }
+      else if (best == "" || m < bestm) { best = kp[1] " " kp[2]; bestm = m }
     }
     n = nr[k] + 0
     if (n > 0) { for (j = 1; j <= n; j++) a[j] = run[k, j]; ssort(a, n); rm = dur(median(a, n)) }
-    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, pre[k] + 0, req[k] + 0, canc[k] + 0, tout[k] + 0, rm
+    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, gave[k] + 0, pre[k] + 0, req[k] + 0, canc[k] + 0, tout[k] + 0, rm
   }
   print ""
+  if (early > 0) printf "%d record%s of jobs that started before the window began (running when it opened): %s wait and run left out\n", early, (early > 1 ? "s" : ""), (early > 1 ? "their" : "its")
+  if (later > 0) printf "%d of the starts above %s later attempt%s of a requeued job\n", later, (later > 1 ? "are" : "is a"), (later > 1 ? "s" : "")
   if (before > 0) printf "%d record%s whose Start is before %s Eligible (or Submit) time, by the clocks the scheduler recorded; each counts as no wait\n", before, (before > 1 ? "s" : ""), (before > 1 ? "their" : "its")
+  if (arr > 0) printf "%d record%s of array tasks (%d task%s) left out: a task waits on the limit of its array (%%N) as well as for a node\n", arr, (arr > 1 ? "s" : ""), arrt, (arrt > 1 ? "s" : "")
   if (notime > 0) printf "%d record%s whose times are not in the form this report reads (YYYY-MM-DDTHH:MM:SS): counted by state, %s wait and run time left out\n", notime, (notime > 1 ? "s" : ""), (notime > 1 ? "their" : "its")
-  if (odd > 0) printf "%d line%s that %s not a record left out\n", odd, (odd > 1 ? "s" : ""), (odd > 1 ? "were" : "was")
-  if (best != "") print "shortest median wait: " best " (" dur(bestm) ")"
+  if (odd > 0) printf "%d line%s that %s not a record left out, the first: %s\n", odd, (odd > 1 ? "s" : ""), (odd > 1 ? "were" : "was"), oddone
+  if (best != "") {
+    s = ""
+    for (x = 1; x <= nopen; x++) if (olast[x] < bestm) s = s (s == "" ? "" : ", ") olab[x] " (more than " dur(olast[x]) ")"
+    print "shortest median wait: " best " (" dur(bestm) ")" (s == "" ? "" : "; not known against " s ", whose median is not reached")
+  }
+  else if (nopen > 0) print "shortest median wait: not known (no median is reached: in each row more than half of the jobs were still waiting at its longest wait)"
   else if (notime > 0) print "shortest median wait: not known (the times of " notime " record" (notime > 1 ? "s" : "") " could not be read)"
   else print "shortest median wait: none (no job in the window has started)"
 }'
@@ -2031,17 +2125,19 @@ cmd_queue() {
     *) queue_usage;; esac; done
   [[ "$days" =~ ^[0-9]{1,2}$ ]] && [ "$days" -ge 1 ] && [ "$days" -le 90 ] || die "--days must be a whole number from 1 to 90"
   load_profile
-  local hist rc
+  local hist rc now
+  # now, just before sacct reads its window from its own: the window's start for the report, and the end of a wait not over yet
+  now=$(date +%s)
   hist=$(adapter_history "$days" 2>&1); rc=$?
   case $rc in
     0) ;;
     2) die "the queue report reads Slurm's history (sacct); this site's scheduler is $P_scheduler";;
     *) die "the scheduler's history could not be read: $(printf '%s' "$hist" | tr '\n' ' ' | sed 's/[[:space:]]*$//')";;
   esac
-  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_QUERY="$(adapter_history_query "$days")" LC_ALL=C awk "$HPCW_QUEUE_AWK"
+  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_NOW="$now" HPCW_Q_QUERY="$(adapter_history_query "$days")" LC_ALL=C awk "$HPCW_QUEUE_AWK"
   case $? in
     0) ;;
-    4) die "none of the lines sacct printed is a record this report reads; the first: $(printf '%s\n' "$hist" | grep -m1 '[^[:space:]]' | tr -d '\r')";;
+    4) die "none of the lines sacct printed is a record this report reads (ten fields between '|'); the first shaped like one: $(printf '%s\n' "$hist" | grep -m1 '|' | tr -d '\r')";;
     *) die "the report could not be made from what the scheduler printed";;
   esac
   [ $limits = 1 ] || return 0

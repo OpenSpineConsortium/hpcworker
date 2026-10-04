@@ -132,8 +132,9 @@ adapter_run_short() { # PART QOS TIME NAME MEM -- CMD... : the same without a te
 # person would type it, for the report's header: the format lives in one variable so the two cannot drift apart
 HPCW_SINFO_FORMAT='%P|%l|%a|%D|%T'
 # No free-text field: -P does not escape the '|' between fields, so a job name holding one shifted every field after
-# it. Eligible is the moment the job could first run: a chain successor's is when its predecessor ended, not when it
-# was submitted
+# it. Eligible is when the scheduler first counted the job as waiting to run, free of its dependencies and its begin
+# time: a chain successor's is when its predecessor ended, not when it was submitted. It is not the moment a node
+# could be had: time held back by the account's own limits, or an array's (%N), comes after it
 HPCW_SACCT_FORMAT=JobID,Partition,QOS,Submit,Eligible,Start,End,State,Timelimit,NodeList
 adapter_partitions() { timeout 10 sinfo -h -o "$HPCW_SINFO_FORMAT" 2>/dev/null | sort -u; }   # NAME(*=default)|TIMELIMIT|AVAIL|NODES|NODE_STATE
 adapter_partitions_query() { printf "sinfo -h -o '%s'\n" "$HPCW_SINFO_FORMAT"; }
@@ -143,7 +144,9 @@ adapter_history() { # DAYS -> JobID|Partition|QOS|Submit|Eligible|Start|End|Stat
   # ONE sacct, for `queue report` (a maintainer at a terminal). With -S and no -s, sacct lists the jobs that were
   # eligible to run or running at any time between the start it is given and now: a job that became eligible
   # before the window and was still in line or running when it began is listed, and a job held or waiting on a
-  # dependency (no eligible time yet, as the worker's queued successor has none) is not. -X keeps each job's allocation line and drops its .batch and
+  # dependency since it was submitted (no eligible time yet, as the worker's queued successor has none) is not. One
+  # held after it became eligible keeps that time, as Slurm's source reads, and is listed as PENDING (not yet
+  # measured at Wayne State). -X keeps each job's allocation line and drops its .batch and
   # .extern steps; -D (--duplicates) keeps every attempt of a job the scheduler requeued (a preemption on the
   # requeue QoS) as its own record, where sacct would otherwise print the last one only; -n prints no header; -P
   # puts a pipe between fields with nothing padded.
