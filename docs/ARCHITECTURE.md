@@ -366,11 +366,17 @@ AUTH-URL: <https://claude.ai/oauth/authorize?...>   the page Claude Code printed
 HPCW-LOGIN: paste the code from that page
 HPCW-LOGIN: code received, checking            a fixed line; never the code itself
 HPCW-LOGIN: that code was not accepted; paste it again      when Claude Code rejects a code
-SIGNED-IN <email> <plan>                       `claude auth status` after the exchange: loggedIn true,
-                                               with the account and plan it reports; never the token
+SIGNED-IN <email> <plan>                       `claude auth status` after the exchange: loggedIn true
+                                               with a Claude subscription (authMethod claude.ai,
+                                               apiProvider firstParty or none, no apiKeySource;
+                                               framework 17), with the account and plan it
+                                               reports; never the token
 HPCW-LOGIN-FAILED: <one plain sentence>        exit 3: no link within two minutes, no code within
                                                the ten-minute budget, the shell closed, the image
-                                               lacks `script` or `setsid`, an interruption
+                                               lacks `script` or `setsid`, an interruption; framework
+                                               17: a way to sign in that bills by use was offered (a
+                                               menu with it highlighted, a link on the Console's
+                                               host), or the sign-in is not a Claude subscription
 ```
 
 `login_plain.sh` keeps a dry mode (`HPCW-LOGIN-DRY: url_seen=.. prompt_seen=.. ..`) for the
@@ -396,6 +402,21 @@ workspace before the sign-in (the SEED in `bin/hpcworker`: `hasCompletedOnboardi
 file). The sitting never runs `claude remote-control`: the Remote Control question is answered by the
 worker job from the student's recorded statement (4.4), so there is no `y` to type and no Ctrl-C.
 
+Only the Claude subscription (framework 17, greg's rule of 2026-10-04: no API key anywhere). The
+sitting asks for it by name (`claude auth login --claudeai`) when Claude Code's `auth login --help`
+lists that flag; presses no Enter on a screen that offers the Anthropic Console, an API key or a
+third-party platform unless the highlighted entry is "Claude account with subscription", and ends in
+words instead (no digit or arrow key is ever sent); prints `AUTH-URL:` only for a link whose host is
+`claude.ai` or `claude.com` (a link on `platform.claude.com` or `console.anthropic.com`, the Console's
+page, ends the sitting; a subscription link names `platform.claude.com` in its query, so the host
+decides, not a substring); and prints `SIGNED-IN` only when `claude auth status` shows `authMethod`
+`claude.ai` with `apiProvider` `firstParty` or none and no `apiKeySource`. A sign-in of another kind,
+already there or just made, ends in `HPCW-LOGIN-FAILED`; the sitting never signs out to mend it. The worker job and the probe
+apply the same test and write such a sign-in as none (`need_login`, `loggedIn` false), so Remote
+Control never starts on it. How the real menu looks under the sitting on the grid (its pointer, the
+entry's words, whether 2.1.283 lists `--claudeai`) is not yet measured; an unexpected screen ends the
+sitting rather than being guessed at.
+
 The person's form of the same sitting, `hpcworker claude login` typed in the portal's own Shell tab,
 still exists: it prints sentences instead of marker lines, skips its own Remote Control step when
 Claude Code's record or the marker already answers it, and the extension learns of the sign-in from
@@ -414,7 +435,8 @@ does not open it. Because the sitting starts an `srun` on the login node, the st
 scheduler-facing call under the 60 s floor and waits the floor out rather than refusing. A student
 whose sign-in holds sees, at most, the sitting's first `SIGNED-IN` line and no page to open (the
 framework answers it from a worker heartbeat younger than 15 minutes that already says `loggedIn`,
-without an allocation; that heartbeat may be a stopped job's last one, which after a credential loss
+without an allocation, when a framework 17 worker or newer wrote it (framework 17); that heartbeat
+may be a stopped job's last one, which after a credential loss
 would answer `SIGNED-IN` once until the next worker says `need_login`). A worker started seconds after a
 sign-in asks `claude auth status` four times, ten seconds apart, before it says `need_login`, and a
 worker waiting in `need_login` asks again every minute (`LOGIN_RECHECK_S`, 60 s); its `status.json`
@@ -585,7 +607,10 @@ The worker is always on. The successor queued with `afterany` reconnects the sam
 hours (the documented recovery window), else a fresh registration, which lands in the same
 environment. Whether `--continue` survives a Slurm requeue is open question 4. If `rc.log` shows the
 full-scope-token error, the job writes `need_login` and the strip runs the sign-in step again; a
-Remote Control session that outlives the login stops making progress.
+Remote Control session that outlives the login stops making progress. Framework 17: the job counts
+only a Claude subscription as signed in (`hpcw_claude_signin`), writes a sign-in of another kind as
+`need_login` with a message that says so, never starts Remote Control on it, and ends a running
+session when its periodic `claude auth status` finds one.
 
 Whether `claude remote-control` stays registered from an `sbatch` job at all was open question 1. It
 was answered yes on 2026-09-29 (02:22 UTC): Ashley's phone host, Slurm job 40496445 on `asx15`, `sbatch`

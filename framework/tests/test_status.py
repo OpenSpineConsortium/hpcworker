@@ -431,7 +431,9 @@ class Framework9Compat(Base):
         self.assertEqual(self.g.status(), self.F9, "worker start leaves a live worker's status alone")
 
     def test_plain_sitting_is_framework_9s(self):
-        # `claude login --plain` (10.0.0's line): no keepalive, no framework 10 flag, and the 15-minute shortcut kept
+        # `claude login --plain` (10.0.0's line): no keepalive, no framework 10 flag, and the 15-minute shortcut kept, for a
+        # heartbeat of a framework 17 worker or newer (framework 17: an older one wrote loggedIn for any sign-in, one that
+        # bills by use included, so its word is checked in a sitting)
         rc, out, err = self.g.run("claude login --plain", stdin_text=G.CODE + "\n", HPCW_KEEPALIVE_S="1", FAKE_SRUN_DELAY="2.5")
         self.assertEqual(rc, 0, (out, err))
         self.assertNotIn("still waiting", out)
@@ -440,12 +442,18 @@ class Framework9Compat(Base):
         self.assertEqual(len(srun), 1)
         self.assertTrue(srun[0].endswith("_exec login --plain"), srun[0])
         self.assertEqual(out.splitlines()[-1], "SIGNED-IN st1234@wayne.edu max")
-        self.g.write_status(self.F9)
+        self.g.write_status(dict(self.F9, version=17))
         rc, out, err = self.g.run("claude login --plain")
         self.assertEqual(rc, 0, (out, err))
         self.assertTrue(out.splitlines()[0].startswith("HPCW-LOGIN: already signed in (a worker confirmed it "), out)
         self.assertEqual(out.splitlines()[1], "SIGNED-IN go2432@wayne.edu max")
         self.assertEqual(len([c for c in self.g.calls() if c.startswith("srun ")]), 1, "no allocation for the shortcut")
+        self.g.write_status(self.F9)
+        rc, out, err = self.g.run("claude login --plain", FAKE_SRUN="already")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertNotIn("a worker confirmed it", out)
+        self.assertEqual(out.splitlines()[-1], "SIGNED-IN st1234@wayne.edu max")
+        self.assertEqual(len([c for c in self.g.calls() if c.startswith("srun ")]), 2, "framework 9's word goes through a sitting")
 
     def test_marker_of_any_content_and_the_stop_file(self):
         # 10.0.0 writes the consent marker and the stop file through Files; both still count
@@ -462,10 +470,10 @@ class Framework9Compat(Base):
         self.assertTrue(os.path.exists(os.path.join(rd, "stop")), "the stop file is the job's signal, as before")
         self.assertRegex(out, r"^worker worker: stopped \(no word from job 40500019 within 1s")
 
-    def test_version_says_16(self):
+    def test_version_says_17(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "16")
+        self.assertEqual(G.CURRENT_VERSION, "17")
 
 
 class SuccessorOfAnEndedJob(Base):

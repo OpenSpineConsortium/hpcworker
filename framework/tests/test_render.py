@@ -54,6 +54,46 @@ class Render(RenderBase):
         for m in re.finditer(r"CLAUDE_CODE_OAUTH_TOKEN", text):
             self.assertEqual(text[m.start() - 3:m.start()], "-u ", text[m.start() - 20:m.end() + 5])
 
+    def test_every_key_token_gateway_and_provider_switch_is_unset(self):
+        # framework 17 (greg, 2026-10-04: no API key anywhere): each environment our code starts Claude Code in drops
+        # every variable that would put it on a key, a token, a gateway or a cloud provider, and sets none of them
+        names = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+                 "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                 # read from the local Claude Code 2.1.289 binary (2026-10-04): four more provider switches, and the refresh token
+                 # `auth login` signs in from, with the scopes it needs
+                 "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY",
+                 "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES")
+        texts = {"the rendered job": self.rendered()}
+        for rel in ("jobs/probe.sbatch", "bin/hpcworker"):
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+                texts[rel] = fh.read()
+        for where, text in texts.items():
+            for n in names:
+                self.assertRegex(text, r"-u %s\b" % n, "%s does not unset %s" % (where, n))
+                self.assertNotRegex(text, r"(?<![\w-])%s=" % n, "%s sets %s" % (where, n))
+
+    def test_the_probe_counts_a_claude_subscription_only(self):
+        # framework 17: the probe's block that reads `claude auth status`, run as written with the answer stood in: loggedIn is
+        # true only for a Claude subscription, and the sign-in's kind goes on the job's line beside it
+        with open(os.path.join(ROOT, "jobs", "probe.sbatch"), encoding="utf-8") as fh:
+            probe = fh.read()
+        start = probe.index('  AUTH=$(in_image 45 "$CLAUDE_BIN" auth status')
+        block = probe[start:probe.index("\n", probe.index("  AUTH_METHOD=", start))]
+        cases = (
+            ('{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "a@b.edu", "subscriptionType": "max"}', "true subscription claude.ai max"),
+            ('{"loggedIn": true, "authMethod": "api_key", "apiProvider": "firstParty", "apiKeySource": "/login managed key", "email": "a@b.edu"}', "false other api_key "),
+            ('{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "apiKeySource": "/login managed key", "email": "a@b.edu", "subscriptionType": null}',
+             "false other claude.ai "),
+            ('{"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"}', "false other oauth_token "),
+            ('{"loggedIn": false}', "false none  "),
+        )
+        for auth, want in cases:
+            script = ("source '%s/lib/adapters/common.sh'; CLAUDE_BIN=claude; in_image() { printf '%%s\\n' \"$FAKE_AUTH\"; }; %s\n"
+                      "echo \"$LOGGED_IN $SIGNIN $AUTH_METHOD $AUTH_SUB\"" % (ROOT.replace("\\", "/"), block))
+            p = subprocess.run(["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+                               env=dict(os.environ, FAKE_AUTH=auth))
+            self.assertEqual((p.returncode, p.stdout.rstrip("\n")), (0, want), (auth, p.stderr))
+
     def test_remote_control_needs_feature_flags(self):
         text = self.rendered()
         self.assertNotRegex(text, r"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\s*=")

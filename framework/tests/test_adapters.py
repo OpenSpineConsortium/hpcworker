@@ -149,6 +149,38 @@ class Common(unittest.TestCase):
         self.assertEqual(rc, 97)
         self.assertIn("REFUSING", err)
 
+    def test_claude_signin_counts_a_claude_subscription_only(self):
+        # framework 17 (greg, 2026-10-04: no API key anywhere): the subscription sign-in `claude auth login` makes reads
+        # authMethod "claude.ai" with Anthropic's own API and no apiKeySource; the Console, a token from the environment
+        # and a cloud provider are signed in too, and count as "other". The shapes are the ones the local Claude Code
+        # 2.1.289 binary and the 2.1.42 npm package build in `auth status` (read from their code, 2026-10-04; the
+        # grid's 2.1.283 is not measured): 2.1.289 adds analyticsDisabled and the two directories, 2.1.42 does not
+        sub_289 = ('{\n  "loggedIn": true,\n  "authMethod": "claude.ai",\n  "apiProvider": "firstParty",\n  "analyticsDisabled": false,\n'
+                   '  "projectsDirectory": "/h/.beethoven/claude/projects",\n  "configDirectory": "/h/.beethoven/claude",\n  "email": "a@b.edu",\n'
+                   '  "orgId": "o",\n  "orgName": "a@b.edu\'s Organization",\n  "subscriptionType": "max"\n}')
+        cases = (
+            (sub_289, "subscription"),
+            ('{\n  "loggedIn": true,\n  "authMethod": "claude.ai",\n  "apiProvider": "firstParty",\n  "email": "a@b.edu",\n  "orgId": "o",\n'
+             '  "orgName": "x",\n  "subscriptionType": "pro"\n}', "subscription"),
+            ('{"loggedIn": true, "authMethod": "claude.ai", "email": "a@b.edu"}', "subscription"),
+            # the Console's own key: 2.1.289 says "api_key"; 2.1.42 says "claude.ai", and only apiKeySource tells it apart
+            ('{\n  "loggedIn": true,\n  "authMethod": "api_key",\n  "apiProvider": "firstParty",\n  "analyticsDisabled": false,\n'
+             '  "apiKeySource": "/login managed key",\n  "email": "a@b.edu",\n  "orgId": "o",\n  "orgName": "x"\n}', "other"),
+            ('{\n  "loggedIn": true,\n  "authMethod": "claude.ai",\n  "apiProvider": "firstParty",\n  "apiKeySource": "/login managed key",\n'
+             '  "email": "a@b.edu",\n  "orgId": "o",\n  "orgName": "x",\n  "subscriptionType": null\n}', "other"),
+            # a key in the environment beside a subscription sign-in is a key all the same
+            (sub_289.replace('"analyticsDisabled"', '"apiKeySource": "ANTHROPIC_API_KEY",\n  "analyticsDisabled"'), "other"),
+            ('{"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"}', "other"),
+            ('{"loggedIn": true, "authMethod": "third_party", "apiProvider": "bedrock"}', "other"),
+            ('{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "gateway", "email": "a@b.edu"}', "other"),
+            ('{"loggedIn": true}', "other"),
+            ('{\n  "loggedIn": false,\n  "authMethod": "none",\n  "apiProvider": "firstParty"\n}', "none"),
+            ("", "none"),
+        )
+        for text, want in cases:
+            rc, out, _ = run("slurm", "hpcw_claude_signin", stdin_text=text)
+            self.assertEqual((rc, out), (0, want), text)
+
     def test_json_str_escapes(self):
         rc, out, _ = run("slurm", 'hpcw_json_str "a\\"b\\\\c"')
         self.assertEqual((rc, out), (0, '"a\\"b\\\\c"'))

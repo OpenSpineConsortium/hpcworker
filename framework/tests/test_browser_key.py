@@ -626,8 +626,12 @@ class GateLines(Base):
         self.set_up_account()
         os.makedirs(os.path.join(self.state, "worker"))
         with open(os.path.join(self.state, "worker", "status.json"), "w") as fh:
-            fh.write('{"state":"online","claude_login":{"loggedIn": true,"email":"a@b.c","subscriptionType":"max"}}\n')
+            fh.write('{"version":17,"state":"online","claude_login":{"loggedIn": true,"email":"a@b.c","subscriptionType":"max"}}\n')
         self.assertEqual(self.gate("version").stdout, "HPCW-GATE ok %s never %s claude=yes\n" % (G.CURRENT_VERSION, user))
+        # framework 17: a worker before it wrote loggedIn true for any sign-in, one that bills by use included: not known
+        with open(os.path.join(self.state, "worker", "status.json"), "w") as fh:
+            fh.write('{"version":16,"state":"online","claude_login":{"loggedIn": true,"email":"a@b.c","subscriptionType":"max"}}\n')
+        self.assertTrue(self.gate("version").stdout.endswith(" claude=unknown\n"))
         with open(os.path.join(self.state, "worker", "status.json"), "w") as fh:
             fh.write('{"state":"stopped","claude_login":{"loggedIn": false}}\n')
         self.assertTrue(self.gate("version").stdout.endswith(" claude=no\n"))

@@ -15,6 +15,36 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**Framework 17: a Claude subscription, and no other way to sign in.** greg's rule of 2026-10-04: no
+API key anywhere. Claude Code's sign-in offers the Claude subscription, the Anthropic Console (billed by
+use) and third-party platforms (Bedrock, Foundry, Vertex); framework 16's sitting pressed Enter on
+whatever entry was highlighted. Now the panel's sitting (`lib/login_plain.sh`) asks for the
+subscription by name (`claude auth login --claudeai`) when Claude Code's `auth login --help` lists the
+flag (2.1.289's does; the image's 2.1.283 is not measured), never presses Enter on a screen that offers
+the Console, an API key or a cloud platform unless the highlighted entry is the Claude subscription,
+takes a sign-in link only when its host is `claude.ai` or `claude.com` (the Console's
+`platform.claude.com` and `console.anthropic.com` end the sitting; the host decides, never a substring,
+since a subscription link names `platform.claude.com` in its query), and prints `SIGNED-IN` only when
+`claude auth status` shows a Claude subscription: `authMethod` `claude.ai` with `apiProvider`
+`firstParty` or none, and no `apiKeySource` (Claude Code 2.1.42 reports the Console's own key as
+`authMethod` `claude.ai` beside one; `docs/OPEN_QUESTIONS.md`). Anything else ends in one
+`HPCW-LOGIN-FAILED` sentence; no line format changed.
+The same rule (`hpcw_claude_signin` in `lib/adapters/common.sh`) holds everywhere the sign-in is read:
+the worker job writes a sign-in of another kind exactly as no sign-in (`need_login`,
+`claude_login.loggedIn` false, the message says why), never starts Remote Control on it and ends a
+session when its periodic check finds one; the probe's `claude_auth.loggedIn` follows it, with
+`authMethod` beside it; the terminal sitting (`hpcworker claude login` and `consent`) ends with exit 4
+before Remote Control. Nothing signs out to mend it: the student does, with their lead. A worker
+heartbeat counts as a sign-in (the 15-minute shortcut of `claude login --plain`, `connect --login
+auto`, the gate's `claude=`) only when a framework 17 worker or newer wrote it: an older chain, which
+keeps its code, wrote `loggedIn` true for any sign-in, so its word goes through a sitting (and the
+gate says `claude=unknown`). Every environment Claude Code is started in also drops
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and the four switches
+Claude Code 2.1.289 adds (`CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`,
+`CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_GATEWAY`), and `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` with
+`CLAUDE_CODE_OAUTH_SCOPES` (from which its `auth login` signs in with no page), beside the key, token
+and gateway variables. `VERSION` is 17.
+
 **Framework 16: the deleter's one guard is as narrow as its comment claimed.** `hpcw_rm_own_tmp`, the
 one place the framework deletes anything, promised to act only when a path's LAST component is
 `hpcworker_<id>` or `hpcw_<id>` — but its glob matched that prefix anywhere on the way, so a folder
@@ -300,7 +330,7 @@ HPCW-LOGIN: requesting a compute node
 HPCW-LOGIN: on asx1; checking whether you are signed in already
 HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link
 HPCW-LOGIN: a menu appeared; chose the first entry         only when a screen asked for Enter first
-AUTH-URL: https://claude.ai/oauth/authorize?...            Anthropic's public authorize page
+AUTH-URL: https://claude.ai/oauth/authorize?...            Anthropic's public authorize page (claude.ai or claude.com only)
 HPCW-LOGIN: paste the code from that page
 HPCW-LOGIN: code received, checking                        a fixed line, never the code
 HPCW-LOGIN: that code was not accepted; paste it again     once per code Claude Code rejected
@@ -327,10 +357,28 @@ sign-in then goes wrong, the guess is the first suspect. Enter is pressed at mos
 six times in all, never while the link is up; a repeat prints `the menu is still up; pressed Enter
 again`.
 
+**Only the Claude subscription (framework 17).** The guess is fenced in. When Claude Code's
+`auth login --help` lists `--claudeai`, the sitting runs `claude auth login --claudeai`, so the
+method is named and no menu should offer another. A screen before the link that names the Anthropic
+Console, API usage billing, an API key or a third-party platform (Bedrock, Vertex, Foundry) gets no
+Enter unless its highlighted entry, the last line led by the menu's pointer (`❯` or `›`, read as `>`),
+is "Claude account with subscription"; otherwise the sitting ends with `HPCW-LOGIN-FAILED: Claude Code
+offered a sign-in that bills by use instead of your Claude subscription, ...`. It never sends a digit or
+an arrow key: how Claude Code's menu takes them is not measured, and neither is the pointer it draws on
+the grid or that entry's exact words, so an unexpected screen ends the sitting rather than being
+guessed at. The link is judged by its host: only `claude.ai` and `claude.com` are shown; one on the
+Console's host ends the sitting the same way. And `SIGNED-IN` needs `claude auth status` to show a
+Claude subscription (`authMethod` `claude.ai`, `apiProvider` `firstParty` or none, no
+`apiKeySource`); a sign-in of any other kind, already there or just made, ends with `HPCW-LOGIN-FAILED: Claude Code on the grid is signed
+in in a way that bills by use or is not a Claude subscription, ...`. The sitting never signs out to mend
+it.
+
 The sitting times out after ten minutes, the wait for a node after ten more, and both end in a
 `HPCW-LOGIN-FAILED` sentence. `--plain` never runs `claude remote-control`: the worker job answers
 that question itself (next paragraph). A worker heartbeat younger than 15 minutes that already says
-`loggedIn` answers `SIGNED-IN` without an allocation. The probe job does not run the sitting:
+`loggedIn` answers `SIGNED-IN` without an allocation, when a framework 17 worker or newer wrote it
+(only those write `loggedIn` for a Claude subscription alone; an older one's word goes through the
+sitting, which asks Claude Code). The probe job does not run the sitting:
 `probe.json` records `login_flow` as not probed, and the sitting itself is the test (a dry run in
 an unseeded throwaway directory measured Claude Code's first-run screens, not the student's sitting,
 and it pushed two probes past their wall time; dry mode stays in `lib/login_plain.sh` for the unit
@@ -343,7 +391,8 @@ writes a timestamp. When Claude Code asks "Enable Remote Control?" in the worker
 answers y once from that marker or from Claude Code's own `remoteDialogSeen`; the workspace trust is
 pre-accepted as before. `need_consent` is written only when neither exists. A worker started seconds
 after a sign-in finished asks `claude auth status` four times, 10 s apart, before saying `need_login`,
-and then again every minute while it waits.
+and then again every minute while it waits. A sign-in that is not a Claude subscription (framework 17)
+is `need_login` at once, with a message that says so, and is never retried as if still being written.
 
 **`status.json` for the panel.** Besides the fields below, every heartbeat carries `needs` (one of
 `login`, `consent`, `nothing`: the one thing the student must do now; `consent` is set as soon as no
@@ -376,7 +425,8 @@ connect ends), naming the lab's shared copy by its full path. In order:
    <run dir>`; the running one is named when there are two).
 5. **The sign-in**, by `--login`: `auto` skips it when the newest `status.json` of any run that
    carries Claude Code's answer says `loggedIn: true` (read before this start writes its queued file,
-   so a returning Connect after a Stop does not sign in again); `always` runs it (Claude Code answers
+   so a returning Connect after a Stop does not sign in again; framework 17: written by a framework 17
+   worker or newer, else the sitting runs); `always` runs it (Claude Code answers
    at once when it is signed in); `fresh` runs `claude auth logout` first ("Use another account");
    `never` skips it. The sitting is framework 9's plain one (`lib/login_plain.sh`), with the lines
    listed under "The panel's sign-in" below, on `partition_cpu`.
@@ -385,7 +435,9 @@ connect ends), naming the lab's shared copy by its full path. In order:
 Each `HPCW-STEP` line appears at most once, whole, at the start of a line, in that order. A failure
 ends connect with `HPCW-STEP failed <code> <sentence>` and the code's exit status: `usage` 2 (nothing
 done), `setup` 3, `restricted` 4, `refused` 5 (sbatch's message on one line), `signin-node` 6 (no
-computer for the sitting within 600 s), `signin-code`, `signin-timeout` and `signin` 7 (after the
+computer for the sitting within 600 s), `signin-code`, `signin-timeout`, `signin-billed` and
+`signin-method` (framework 17: the sitting refused a sign-in that is not a Claude subscription's, a
+page that bills by use or a sign-in of another kind already there) and `signin` 7 (after the
 sitting's own `HPCW-LOGIN-FAILED:` line; the worker keeps its place in line), `other` 1. Under connect
 anything that would have been an `hpcworker: ...` error becomes `failed other`.
 
@@ -848,8 +900,8 @@ version 10. Every verb, flag, file and output line 10.0.0 uses is unchanged: `in
 ID (STATE); nothing submitted", one squeue; a scheduler that does not answer is never read as "no job
 alive": nothing is submitted then, and two starts at once wait for one lock, so a worker is never
 submitted beside one still in line), `worker stop` ("worker
-N: stopped (...)"), `claude login --plain` (every line, the 15-minute "already signed in" shortcut, no
-keepalive), every framework 9 field of `status.json` and `connection.json`, `next.id`, the consent
+N: stopped (...)"), `claude login --plain` (every line, the 15-minute "already signed in" shortcut,
+from framework 17 only on a framework 17 worker's heartbeat, no keepalive), every framework 9 field of `status.json` and `connection.json`, `next.id`, the consent
 marker of any content and the stop file 10.0.0 writes through Files. A framework 9 `status.json`,
 without the new fields, is read by `worker status` as it is ("Your worker is online."), with no
 scheduler call. 10.0.0 does not know `queued`: it treats such a run as not live, and its automatic
@@ -906,7 +958,16 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
   `/dev/shm`, because `/tmp` is swept on a schedule the job does not control.
 - Claude Code gets a clean environment: its own `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER=1`, no
   `ANTHROPIC_*` or `CLAUDE_CODE_OAUTH_TOKEN*` variable (one would outrank the sign-in and switch
-  Remote Control off), and the feature-flag variables left alone (Remote Control needs them).
+  Remote Control off; `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` and `CLAUDE_CODE_OAUTH_SCOPES` with them), no
+  `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` and none of `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`,
+  `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_GATEWAY` (framework 17: a key, a gateway or a cloud
+  provider is paid use, which Beethoven never runs on), and the feature-flag variables left alone
+  (Remote Control needs them).
+- Only a Claude subscription counts as signed in (framework 17; `hpcw_claude_signin`): `claude auth
+  status` showing `authMethod` `claude.ai` with `apiProvider` `firstParty` or none, and no
+  `apiKeySource`. A sign-in of any
+  other kind is reported as none, and nothing of ours signs out or reads a sign-in file to change it.
 - No token on a command line, in argv, in a job file, in a log, or in `--export`. The per-job token
   the worker mints is written 0600 into the run directory and referenced by path only. `probe.json`
   (it carries the plan and the e-mail of the sign-in) is 0600 in a 0700 directory.
@@ -1162,7 +1223,9 @@ the id that queued it), `chain.log`, `node`, `progress.log` (version 10), `statu
 (version 10), `starting`, `need_login`,
 `need_consent`, `running`, `online`, `stopped`, `preempted`, `error`; `needs` and `hint` for the
 panel; heartbeat every 30 s;
-`claude_login` carries `loggedIn`, `email`, `subscriptionType` and nothing else; `session_name`,
+`claude_login` carries `loggedIn`, `email`, `subscriptionType` and nothing else (framework 17: `loggedIn`
+true only for a Claude subscription; a sign-in of another kind is written as `false` with both others
+empty); `session_name`,
 `session_url` (framework 14: the link printed, either form), `environment_url` (the environment link, or
 ""), `environment_id`, `requested_name`, `consent`, `consent_source`,
 `workspace_trusted`, `chain`, `next_job`, `chain_note`), `connection.json` (the same session fields

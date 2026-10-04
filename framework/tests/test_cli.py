@@ -268,6 +268,17 @@ class NeedsAndHint(unittest.TestCase):
         self.assertEqual(bash(with_common("hpcw_hint starting nothing ''"))[1], "Your worker has a computer and is connecting to Claude.")
 
 
+# what `claude auth status` prints, in the shapes the local Claude Code 2.1.289 binary and 2.1.42 npm package build
+# (read from their code, 2026-10-04): a Claude subscription, and three sign-ins that are not one (the Console's own
+# key as 2.1.289 and as 2.1.42 report it, and a token from the environment)
+SUBSCRIPTION = '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "a@b.edu", "subscriptionType": "max"}'
+NOT_A_SUBSCRIPTION = (
+    '{"loggedIn": true, "authMethod": "api_key", "apiProvider": "firstParty", "apiKeySource": "/login managed key", "email": "a@b.edu"}',
+    '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "apiKeySource": "/login managed key", "email": "a@b.edu", "subscriptionType": null}',
+    '{"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"}',
+)
+
+
 class PlainLogin(unittest.TestCase):
     def test_outcome_codes(self):
         # 0 signed in; 3 the sitting already printed its own failure line; anything else is the scheduler's
@@ -286,7 +297,7 @@ class PlainLogin(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fake = os.path.join(td, "claude")
             with open(fake, "w") as fh:
-                fh.write('#!/bin/bash\ncase "$1" in auth) echo \'{"loggedIn": true}\';; remote-control) touch "$FAKE_WITNESS";; esac\n')
+                fh.write('#!/bin/bash\ncase "$1" in auth) echo \'{"loggedIn": true, "authMethod": "claude.ai"}\';; remote-control) touch "$FAKE_WITNESS";; esac\n')
             os.chmod(fake, 0o755)
             cfg = os.path.join(td, "cfg")
             ws = os.path.join(td, "ws")
@@ -313,6 +324,92 @@ class PlainLogin(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertIn("already on record with Claude Code", out)
             self.assertFalse(os.path.exists(witness))
+
+
+    def test_interactive_sitting_never_goes_on_with_a_sign_in_that_is_not_a_subscription(self):
+        # framework 17: signed in by the Console (or a token): exit 4 in words, never Remote Control, never a sign-out;
+        # and the login sitting asks for the subscription by name when Claude Code's help lists --claudeai
+        with tempfile.TemporaryDirectory() as td:
+            fake = os.path.join(td, "claude")
+            with open(fake, "w") as fh:
+                fh.write('#!/bin/bash\n'
+                         'case "$1 ${2:-} ${3:-}" in\n'
+                         '  "auth login --help") echo "  --claudeai  Use Claude subscription (default)";;\n'
+                         '  "auth login"*) echo "$*" > "$FAKE_ARGS";;\n'
+                         '  "auth status"*) printf "%s\\n" "$FAKE_AUTH";;\n'
+                         '  "auth logout"*) touch "$FAKE_LOGOUT";;\n'
+                         '  remote-control*) touch "$FAKE_WITNESS";;\n'
+                         'esac\n')
+            os.chmod(fake, 0o755)
+            cfg = os.path.join(td, "cfg")
+            ws = os.path.join(td, "ws")
+            os.makedirs(cfg)
+            os.makedirs(ws)
+            witness, args, logout = os.path.join(td, "rc-started"), os.path.join(td, "args"), os.path.join(td, "logged-out")
+            for mode in ("consent", "login"):
+                for method in NOT_A_SUBSCRIPTION:
+                    env = {"CLAUDE_CONFIG_DIR": posix(cfg), "FAKE_WITNESS": posix(witness), "FAKE_ARGS": posix(args), "FAKE_LOGOUT": posix(logout), "FAKE_AUTH": method}
+                    call = "bash -c \"$LOGIN_SITTING\" _ '%s' '%s' '' %s ''" % (posix(ws), posix(fake), mode)
+                    rc, out, err = bash(with_cli(call, td), env=env)
+                    self.assertEqual(rc, 4, (mode, method, out, err))
+                    self.assertIn("not with a Claude subscription", out)
+                    self.assertFalse(os.path.exists(witness), "remote-control never runs on it")
+                    self.assertFalse(os.path.exists(logout), "and nothing signs out")
+            with open(args) as fh:
+                self.assertEqual(fh.read().split(), ["auth", "login", "--claudeai"])
+            env["FAKE_AUTH"] = SUBSCRIPTION
+            rc, out, err = bash(with_cli("bash -c \"$LOGIN_SITTING\" _ '%s' '%s' '' login ''" % (posix(ws), posix(fake)), td), env=env)
+            self.assertEqual(rc, 0, (out, err))
+            self.assertTrue(os.path.exists(witness), "a Claude subscription goes on to the one question")
+
+    def test_a_worker_s_word_counts_from_framework_17_on(self):
+        # framework 17: connect --login auto and the gate's claude= take loggedIn from a heartbeat a framework 17 worker or
+        # newer wrote; an older one wrote it for any sign-in, one that bills by use included, so its "true" is not known
+        with tempfile.TemporaryDirectory() as td:
+            sd = os.path.join(td, "state", "worker")
+            os.makedirs(sd)
+            for text, want in (('{"version":17,"claude_login":{"loggedIn":true,"email":"a@b.edu","subscriptionType":"max"}}', "true|a@b.edu|max"),
+                               ('{"version":18,"claude_login":{"loggedIn":false,"email":"","subscriptionType":""}}', "false||"),
+                               ('{"version":16,"claude_login":{"loggedIn":true,"email":"a@b.edu","subscriptionType":"max"}}', "unknown|a@b.edu|max"),
+                               ('{"version":9,"claude_login":{"loggedIn":false}}', "false||"),
+                               ('{"claude_login":{"loggedIn":true,"email":"a@b.edu"}}', "unknown|a@b.edu|")):
+                with open(os.path.join(sd, "status.json"), "w") as fh:
+                    fh.write(text + "\n")
+                rc, out, err = bash(with_cli("STATE_DIR='%s/state'; connect_last_login" % posix(td), td))
+                self.assertEqual((rc, out), (0, want), (text, err))
+
+    def stubbed(self, td, body, **env):
+        # the CLI sourced, with the profile, the account set-up and the scheduler stood in for: what a person's
+        # `claude login`, `claude consent` and `claude status --alloc` do with what the compute node answered
+        stubs = ("load_profile() { P_partition_cpu=secp; P_qos_cpu=secondary; CCD='%s/cfg'; STATE_DIR='%s/state'; }; "
+                 "claude_login_setup() { return 0; }; consent_source() { echo none; }; hpcw_consent_seen() { return 1; }; "
+                 "adapter_interactive() { return \"$FAKE_RC\"; }; adapter_run_short() { printf '%%s\\n' \"$FAKE_AUTH\"; }; " % (posix(td), posix(td)))
+        return bash(with_cli(stubs + body, td), env=env)
+
+    def test_a_person_s_sitting_that_ended_on_another_sign_in_says_nothing_more(self):
+        # framework 17: the terminal sitting's exit 4 (signed in, but not with a Claude subscription; it said so itself)
+        # is a failure, with no "Done: signed in" after it and no question about a Remote Control answer
+        with tempfile.TemporaryDirectory() as td:
+            for sub in ("login", "consent"):
+                rc, out, err = self.stubbed(td, "cmd_claude %s; echo rc=$?" % sub, FAKE_RC="4")
+                self.assertEqual(out.splitlines()[-1], "rc=1", (sub, out, err))
+                self.assertNotIn("Done:", out)
+                self.assertNotIn("Signed in", out)
+                self.assertNotIn("Did you answer y", out)
+            rc, out, err = self.stubbed(td, "cmd_claude login; echo rc=$?", FAKE_RC="0")
+            self.assertIn("Signed in (if the steps above completed)", out, err)
+
+    def test_status_alloc_says_when_the_sign_in_is_not_a_subscription(self):
+        with tempfile.TemporaryDirectory() as td:
+            note = "signed in, but not with a Claude subscription"
+            for auth in NOT_A_SUBSCRIPTION:
+                rc, out, err = self.stubbed(td, "cmd_claude status --alloc", FAKE_AUTH=auth)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(note, out, auth)
+                self.assertIn("your workers wait as if you were not signed in", out)
+            for auth in (SUBSCRIPTION, '{"loggedIn": false}'):
+                rc, out, err = self.stubbed(td, "cmd_claude status --alloc", FAKE_AUTH=auth)
+                self.assertNotIn(note, out, auth)
 
 
 class WorkerStop(unittest.TestCase):

@@ -69,7 +69,9 @@ exit 0
 
 # srun as the sign-in sitting plays out. FAKE_SRUN: signin (the link, a code read from stdin, SIGNED-IN
 # or a refusal), already (signed in at once), nonode (no computer in time), timeout (no code arrived),
-# other (an unexplained failure). FAKE_SRUN_DELAY: seconds of silence first (the wait for a computer).
+# other (an unexplained failure), billed (framework 17: Claude Code offered a sign-in that bills by use),
+# othersignin (framework 17: already signed in, not with a Claude subscription). FAKE_SRUN_DELAY:
+# seconds of silence first (the wait for a computer).
 # FAKE_SRUN_CRLF=1: lines end in CR LF, as a pseudo-terminal sends them.
 FAKE_SRUN = r"""#!/bin/bash
 d="${FAKE_SCHED_DIR:?}"
@@ -85,6 +87,8 @@ case "${FAKE_SRUN:-signin}" in
   already) p "SIGNED-IN st1234@wayne.edu max"; exit 0;;
   timeout) p "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"; p "HPCW-LOGIN-FAILED: no code arrived within 10 minutes; start the sign-in again"; exit 3;;
   other) p "HPCW-LOGIN-FAILED: the sign-in did not complete; start it again"; exit 3;;
+  billed) p "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"; p "HPCW-LOGIN-FAILED: Claude Code offered a sign-in that bills by use instead of your Claude subscription, and Beethoven signs in only with a Claude subscription; start the sign-in again, and if it repeats ask your lead"; exit 3;;
+  othersignin) p "HPCW-LOGIN-FAILED: Claude Code on the grid is signed in in a way that bills by use or is not a Claude subscription, and Beethoven never runs on that; ask your lead to help you sign in again with your Claude subscription"; exit 3;;
   silentok) exit 0;;
 esac
 p "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"

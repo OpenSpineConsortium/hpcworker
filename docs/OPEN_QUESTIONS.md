@@ -62,6 +62,32 @@ closes a sitting while a slow student is on Anthropic's page, and how long a wor
 `need_login` takes to notice a new sign-in); `GET /rnode/asx1/1/` for the compute-node half of
 question 6.
 
+Not yet measured for framework 17's subscription-only sign-in (greg, 2026-10-04: no API key
+anywhere): whether the image's Claude Code 2.1.283 lists `--claudeai` in `claude auth login --help`
+(2.1.289 does, and the sitting uses it only when listed); whether a login-method menu appears under
+the seeded sitting at all, and if it does, which pointer glyph marks its highlighted entry (the
+sitting reads `❯` and `›` as `>`) and whether that entry reads "Claude account with subscription"
+(the sitting refuses a menu it cannot read that way, so a mismatch ends the sign-in in words rather
+than choosing the Console); and the exact `authMethod`, `apiProvider` and `apiKeySource` that
+2.1.283's `claude auth status` prints after a subscription sign-in on the grid (the rule is
+`claude.ai`, `firstParty` or none, and no `apiKeySource`).
+
+Read from the code of the local Claude Code 2.1.42 (npm package) and 2.1.289 (native binary) on
+2026-10-04, not measured on the grid, and 2.1.283 in between not read: `claude auth login` draws no
+menu in either. 2.1.42's takes only `--email` and `--sso` and always signs in with the subscription;
+2.1.289's prints plain lines ("If the browser didn't open, visit: ...", "Paste code here if
+prompted >"), reads the code line by line, and defaults to the subscription, but a `forceLoginMethod`
+of `console` in Claude Code's settings decides over `--claudeai` (managed settings among them), and
+`CLAUDE_CODE_OAUTH_REFRESH_TOKEN` in the environment signs it in with no page at all. The menu is
+the interactive `/login`'s. So the defence that matters under the sitting is the link's host and the
+`claude auth status` check after it, not the menu rule. That check reads `apiKeySource` for a
+reason: 2.1.42 reports the Console's own key (created by a Console `/login`) as `authMethod`
+`claude.ai` with `apiKeySource` `/login managed key`, where 2.1.289 reports it as `api_key` with the
+same `apiKeySource`; neither adds `apiKeySource` for a sign-in with no key behind it. 2.1.289 also
+reads four provider switches beyond Bedrock, Vertex and Foundry (`CLAUDE_CODE_USE_ANTHROPIC_AWS`,
+`CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_GATEWAY`), which
+every environment the framework starts Claude Code in removes with the refresh-token variables.
+
 ## The lab's shared copy of the framework (decided 2026-09-29, evening)
 
 Since framework 5 a site profile may name `shared_install`, one copy of the framework the lab keeps

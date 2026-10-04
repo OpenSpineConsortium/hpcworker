@@ -53,6 +53,15 @@ name and identifier carry no university name.
   Code where its own credential already is (`claude_config_dir` in the profile) and reads `claude
   auth status`. Every credential variable is removed from the worker's environment; `claude auth
   logout` is never run. One person, one account.
+- **No API key anywhere** (greg, 2026-10-04 13:27Z: "no api key anywhere thats the only fundamental
+  rule of this software"). No Anthropic Console or API key, no `apiKeyHelper`, no Bedrock, Vertex or
+  Foundry route, no `ANTHROPIC_BASE_URL` gateway, no CI on a key or a token held as a secret, no usage
+  credits: not in the product, the texts, the documents or the maintainer's own tooling. The framework
+  signs in only with a Claude subscription and refuses any other sign-in method: `claude auth status`
+  must show `authMethod` `claude.ai` with `apiProvider` `firstParty` or none and no `apiKeySource`
+  (`hpcw_claude_signin`); anything else counts as no sign-in, and every environment Claude Code starts
+  in drops the key, token, gateway and provider variables. Code that refuses, strips or warns against
+  a key is the rule working.
 - **Tokens and secrets never appear on command lines, in argv, in logs, in job files or in
   `sbatch --export`.** Never echo one. The per-job token is a mode-0600 file.
 - **No code on claude.ai.** No content script, no host permission, no fetch patch. The extension's only
