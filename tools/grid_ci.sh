@@ -31,6 +31,12 @@ GHBIN=$(command -v gh || true); [ -n "$GHBIN" ] || GHBIN="$HOME/.local/bin/gh"
 [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once)"
 GH() { env -u GITHUB_TOKEN -u GH_TOKEN "$GHBIN" "$@"; }
 SBATCH=$(command -v sbatch || echo /opt/hpcw/slurm/bin/sbatch); [ -x "$SBATCH" ] || die "no sbatch here"
+# the jobs' own headers name the site's short-test partition; when that queue starves a five-minute
+# test for hours (secp, 2026-10-03: job 40555652 sat from 16:27 past 21:00 on Priority), these steer
+# both jobs without editing the scripts — sbatch's flags outrank a file's #SBATCH lines
+SB_ARGS=()
+[ -n "${HPCW_CI_PARTITION:-}" ] && SB_ARGS+=(--partition "$HPCW_CI_PARTITION")
+[ -n "${HPCW_CI_QOS:-}" ] && SB_ARGS+=(--qos "$HPCW_CI_QOS")
 SACCT=$(command -v sacct || echo /opt/hpcw/slurm/bin/sacct)
 
 # one clone per repository (--repo after a first run must not fetch from the wrong origin), and
@@ -71,7 +77,7 @@ wait_job() { # JOB -> the job's final sacct state, asked at most once a minute
 
 FAILED=0
 post grid/framework-suite-py36 pending "suite queued on the grid"
-OUT=$("$SBATCH" --parsable -D "$RUN" "$RUN/src/tools/grid_ci.sbatch") || { post grid/framework-suite-py36 error "the scheduler refused the job"; die "sbatch refused: $OUT"; }
+OUT=$("$SBATCH" --parsable ${SB_ARGS[@]+"${SB_ARGS[@]}"} -D "$RUN" "$RUN/src/tools/grid_ci.sbatch") || { post grid/framework-suite-py36 error "the scheduler refused the job"; die "sbatch refused: $OUT"; }
 JOB=${OUT%%;*}; LOG="$RUN/ci-$JOB.log"
 say "suite is job $JOB (log $LOG)"
 ST=$(wait_job "$JOB"); say "job $JOB: $ST"; [ -f "$LOG" ] && tail -3 "$LOG"
@@ -88,7 +94,7 @@ fi
 
 if [ "$CONTAINER" = 1 ]; then
   post grid/slurm-in-container pending "container check queued on the grid"
-  OUT=$("$SBATCH" --parsable -D "$RUN" "$RUN/src/framework/tests/grid/slurm_in_container.sbatch" "$RUN/src/framework") \
+  OUT=$("$SBATCH" --parsable ${SB_ARGS[@]+"${SB_ARGS[@]}"} -D "$RUN" "$RUN/src/framework/tests/grid/slurm_in_container.sbatch" "$RUN/src/framework") \
     || { post grid/slurm-in-container error "the scheduler refused the job"; die "sbatch refused: $OUT"; }
   JOB2=${OUT%%;*}
   say "container check is job $JOB2 (log $RUN/slurm_check_$JOB2.out)"
