@@ -1,0 +1,44 @@
+# Lines that spelled a site's value when the lint landed (tests/test_site_literals.py). Each is fixed
+# by BEE-202 (framework/) or BEE-205 (tools/): read the value from the profile, or mark a measured comment
+# 'measured at <site>:'. The list only shrinks; an entry whose line no longer trips the lint fails the test.
+# Format: the path from the repository's root, a tab, the line with its indent stripped.
+framework/bin/hpcworker	#       nothing is written. A job preempted under --qos=requeue is listed again under its own id and writes its
+framework/bin/hpcworker	# /rs/rs_grp_oschome/shared/ashley -> beethoven), and extensions built before the rename (Beethoven 4.0.0
+framework/bin/hpcworker	# CI lane, a laptop) and gawk 4.0.2 (warrior, the centos 7 lane). mktime, strftime and systime are extensions
+framework/bin/hpcworker	# Measured on warrior (2026-09-29): `module -t avail` alone cost 0.76 s of CPU and sinfo 9 ms, so the
+framework/bin/hpcworker	# State /rs/rs_grp_oschome is itself a link to the volume's physical path, which must not end up in
+framework/bin/hpcworker	# builtins: warrior's banner bans python3, which relayed it in the first framework 10 build); and the
+framework/bin/hpcworker	# framework 11: python3 is found, never run (warrior's banner bans it); only `profile show|set|validate` and discover's seed use it
+framework/bin/hpcworker	# node's banned list runs (warrior's /etc/motd names python3, node, make, md5sum, rsync and others), and
+framework/bin/hpcworker	[ -s "$PROFILE" ] || die "no profile at $PROFILE: run 'hpcworker install --profile wayne' (or 'hpcworker install --discover')"
+framework/jobs/build_image.sbatch	# (an image exists there: the shared sandbox of Beethoven for VS Code named in profiles/wayne.json); written from
+framework/jobs/probe.sbatch	case "$TMPDIR_DEV" in *:*|ceph*|/rs/*) TMPDIR_LOCAL=false;; esac
+framework/jobs/worker.sbatch.tpl	# a long job: 15 MB of redraws on go2432's wayne-worker; live on job 40554631 and in test_job, 2026-10-03)
+framework/lib/adapters/common.sh	# byte range in the bracket expression follows the locale's collation (measured on warrior, 2026-09-29).
+framework/lib/adapters/common.sh	# on warrior); `module -t avail`, which costs 0.76 s of CPU there, runs only with "full".
+framework/lib/adapters/slurm.sh	# cost 9 ms of CPU on warrior; with %D and %T added, not measured there). The *_query twins print the command as a
+framework/lib/browser_key.sh	# restorecon where present. Nothing on warrior's banned list, and nothing here runs python3.
+framework/lib/login_plain.sh	# every plain read returns nothing at once; measured on warrior 2026-09-29. Then a wide terminal
+framework/lib/profile.awk	# warrior's banner bans python3 by name ("terminated on sight"), and Beethoven 12's ssh path runs this
+framework/lib/profile.py	("site", str, True, None, "short site id used in session names, e.g. wayne"),
+framework/lib/profile.py	("ssh_host", str, False, "", "the login node's public ssh name, for Beethoven's ssh path (grid.wayne.edu); empty = no ssh path"),
+framework/lib/profile.py	("vpn_portal", str, False, "", "the VPN portal address a student types into the VPN app (protect.wayne.edu)"),
+framework/lib/profile.py	as spelled (/rs/rs_grp_oschome is itself a link at Wayne State)."""
+framework/lib/profile_sh.sh	# Sourced by bin/hpcworker. warrior's banner bans python3 by name, and Beethoven 12.0.0 reaches the login
+framework/lib/relay.sh	# The login node's rules: warrior's banner bans python3 (which relayed the sitting in the first
+tools/deploy_shared.sh	#   tools/deploy_shared.sh [--site wayne] [--host wsu-grid] [--root DIR] [--group NAME] [--dry-run] [--replace]
+tools/deploy_shared.sh	# each site profile, checked with framework 11's awk reader (no python3: warrior's login banner bans it)
+tools/deploy_shared.sh	# never with python3, which warrior's login banner bans.
+tools/deploy_shared.sh	# shared_install; at Wayne State /rs/rs_grp_oschome/shared/beethoven/hpcworker, which was .../shared/ashley
+tools/deploy_shared.sh	# the group: given, or (empty) the group of the directory above ROOT on the cluster, oschome at Wayne State
+tools/deploy_shared.sh	site=wayne host=wsu-grid root="" group="" dry=0 replace=0 local_run=0
+tools/grid_access.sh	#   tools/grid_access.sh [--site wayne] [--host wsu-grid] [--root DIR] [--roster-file FILE]
+tools/grid_access.sh	# The list IS the set of named-user ACL entries `user:<id>:rwx` on the volume root (/rs/rs_grp_oschome
+tools/grid_access.sh	# stay closed by their own modes. The Unix group (oschome) is C&IT's to change and is not the list.
+tools/grid_access.sh	site=wayne host=wsu-grid root="" roster_file="" dry=0 force=0 quiet=0 open=0 check=0 local_run=0
+tools/grid_access_task.ps1	$Site = 'wayne'   # grid_access.sh's default site; the task runs it without --site
+tools/grid_access_task.ps1	<vendor>\state\grid_access.wayne.ids exists (grid_access.sh writes it only after the grid
+tools/grid_ci.sbatch	#SBATCH --partition=reqp
+tools/grid_ci.sbatch	#SBATCH --qos=requeue
+tools/grid_ci.sh	# test for hours (secp, 2026-10-03: job 40555652 sat from 16:27 past 21:00 on Priority), these steer
+tools/grid_ci.sh	CIROOT="${HPCW_CI_DIR:-/rs/rs_grp_oschome/$USER/hpcworker-ci}"

@@ -780,7 +780,7 @@ ok <copy>` (exit 0) or `HPCW-KEY check refused <copy>` (exit 8). Withdrawing a s
 access service does not remove the line: the gate never asks the access service. The student's Forget,
 `browser-key remove`, or removing the line by hand does.
 
-An expiry is the site's choice: `browser_key_days` in the site profile (none at Wayne State). Past it the
+An expiry is the lab's choice: `browser_key_days` in its lab module (none in Wayne State's). Past it the
 gate removes the line on the key's next use and answers `HPCW-KEY expired` (exit 125).
 
 ## The gate: what the browser's key may do (version 11)
@@ -1362,7 +1362,11 @@ lib/adapters/common.sh   scheduler and runtime detection, node-local temp, the c
 lib/adapters/slurm.sh    Slurm (run for real on the Wayne State grid)
 lib/adapters/pbs.sh      PBS Pro / OpenPBS (documented commands; fixture-tested only)
 lib/adapters/lsf.sh      IBM Spectrum LSF (documented commands; fixture-tested only)
-profiles/wayne.json      Wayne State University
+profiles/wayne.json      Wayne State University's profile, composed from the two modules below (never edited by hand)
+sites/wayne/site.json    the site module: Wayne State's grid (scheduler, hosts, partitions, node temp, runtime, portal, VPN, ssh)
+sites/wayne/labs/oschome.json  the lab module: the oschome lab's deployment there (its volume, shared copy, image, claude, binds)
+sites/README.md          the three layers, who owns each field, compose, compose-all, show --layers
+sites/ORIGIN, pull.sh    the modules are a pinned copy of OpenSpineConsortium/beethoven-sites; pull.sh refreshes it
 jobs/probe.sbatch        the ten-minute probe (five minutes of budgets inside the container) -> <state_dir>/probe/probe.json
 jobs/worker.sbatch.tpl   the worker job, rendered per start from the profile
 jobs/workspace-guide.md.tpl  the CLAUDE.md a new worker workspace gets, filled from the profile (see below)
@@ -1417,7 +1421,11 @@ Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R
 
 ## Adding a university
 
-1. `hpcworker install --discover` on its login node, or copy `profiles/wayne.json` and edit. The
+1. Write a site module for the university's cluster and a lab module for the group that hosts the
+   shared copy in `OpenSpineConsortium/beethoven-sites` (its README; `hpcworker install --discover` on
+   the login node seeds the values), then `bash sites/pull.sh` copies them here and
+   `python3 lib/profile.py compose-all` writes `profiles/<id>.json` from them. In an account,
+   `~/.hpcworker/profile.json` is still one file, copied from a composed profile at install. The
    schema is `hpcworker profile schema`; `hpcworker profile validate` must pass. A field the file
    carries that the installed version does not know (written by an older or a newer release) is
    not an error: `validate` names it once (`ok: ...; ignored 1 field(s) this version does not know: ...`)
@@ -1438,19 +1446,26 @@ Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R
 
 ## What is Wayne-State-specific
 
-Only `profiles/wayne.json`: partitions `secp/secondary` (starts at once) and `reqp/requeue`, GPU
+The values are in two modules, written in `OpenSpineConsortium/beethoven-sites` and pinned under
+`sites/wayne/` (the site `wayne` and the lab `oschome`), which compose `profiles/wayne.json`;
+`python3 lib/profile.py show --layers wayne` says which of them set each value. Lines of the code that
+still spell one are listed in `tests/site_literals_known.txt` until BEE-202 and BEE-205 remove them,
+and no new one may join them (`tests/test_site_literals.py`). Between the two modules: partitions `secp/secondary` (starts at once) and `reqp/requeue`, GPU
 partitions `gmsap` and `gvohp`, `module load apptainer/1.2.2` at `/wsu/el7/gnu7/apptainer/1.2.2/bin`,
 the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/beethoven`, the lab's shared
 copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/beethoven/hpcworker/current`, which
 an account reaches only when its AccessID is on the lab's list on the volume's root, kept by
 `tools/grid_access.sh`, like everything else on that volume), the CephFS state
 directory `/rs/rs_grp_oschome/$USER/hpcworker`, node temp at `/tmp/$USER/hpcworker_$SLURM_JOB_ID`
-(never `$TMPDIR`), `claude_config_dir` `$HOME/.beethoven/claude` (the sign-in Beethoven for VS Code
-already made; the framework starts Claude Code there, reads `claude auth status` and the two consent
-booleans), that tool's consent markers (`.beethoven-remote-consent`, and `.ashley-remote-consent`, its
-name before the rename) honoured beside hpcworker's own, the portal
-`https://ondemand.grid.wayne.edu` behind the VPN, the 20-process login-node cap, and the Panasas home
-(new images at this site should be SIF).
+(never `$TMPDIR`), the portal `https://ondemand.grid.wayne.edu` behind the VPN, the 20-process
+login-node cap, and the Panasas home (new images at this site should be SIF).
+
+Not Wayne State's, though every profile carries them: `claude_config_dir` `$HOME/.beethoven/claude`
+(the sign-in Beethoven for VS Code already made; the framework starts Claude Code there, reads
+`claude auth status` and the two consent booleans), that tool's consent markers
+(`.beethoven-remote-consent`, and `.ashley-remote-consent`, its name before the rename) honoured
+beside hpcworker's own, and `$HOME` as the first bind. They are the product's own values (`PRODUCT`
+in `lib/profile.py`), and no module may change them.
 
 `scheduler_in_worker` is on: the host's Slurm client is bound into the worker's container (the set
 measured on asx1 for the lab's VS Code tool; see "Slurm inside the worker").
@@ -1507,6 +1522,17 @@ hang-up giving back the slot), `PlainExec` in `test_connect.py` (connect and `cl
 with no terminal: no `--pty`, the code from standard input and never written back; the setup of an
 account never set up; no sign-in under the gate), the gate's verbs and `browser-key add` in the
 login-node audit, and the new profile keys in `test_profile.py`.
+
+`test_sites.py` (the site and lab modules): Wayne State's two modules compose `profiles/wayne.json`
+byte for byte, and every profile in `profiles/` is what its modules compose (`compose-all --check`);
+the pinned copy is what its `ORIGIN` records; every schema field has the layers that may set it, and a
+module that sets another layer's field, the product's own, an unknown key (inside an object field too)
+or a wrong type is refused; `binds` add up, objects merge, everything else is replaced; a profile two
+labs name is never written; and `show --layers` names the layer and the file behind every value.
+`test_site_literals.py` builds the list of each site's hosts, path roots, partitions, QoS, links, host
+key, runtime module and ids from the modules and fails on a new line of `bin/`, `lib/`, `jobs/` or the
+tools that spells one; a comment that records a measurement keeps its values with the marker
+`measured at <site>:`.
 
 Version 13 adds `SuccessorOfAnEndedJob` in `test_status.py` (a job that ended naming a successor, asked
 about with the job in one call: a successor the fake scheduler no longer lists, one listed as ended, one
