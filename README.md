@@ -1,7 +1,7 @@
 # Beethoven
 
 > **This repository** is the **server half** of the 2026-10-03 split of
-> `OpenSpineConsortium/beethoven`: `framework/` (hpcworker, the cluster side), `tools/` (the
+> `OpenSpineConsortium/beethoven` (since 2026-10-05 the project hub, which holds no product code): `framework/` (hpcworker, the cluster side), `tools/` (the
 > maintainer's deploy, access and grid-CI scripts) and the shared documents. The browser extension,
 > the bridge helper and the store releases live in the sibling repository,
 > `OpenSpineConsortium/beethoven-extension`. The text below predates the split and describes the
@@ -9,8 +9,10 @@
 
 The public name is **Beethoven** (decided 2026-09-29): the extension, its private store listing, its
 pages at `https://openspineconsortium.com/beethoven/`, its texts and every screen a student or a
-reviewer sees say Beethoven, and it is not an Anthropic product. The repository is
-`OpenSpineConsortium/beethoven` (it was called ashley-bridge until 2026-09-30), and a few internal
+reviewer sees say Beethoven, and it is not an Anthropic product. The code is in
+`OpenSpineConsortium/hpcworker` and `OpenSpineConsortium/beethoven-extension` (one repository,
+`OpenSpineConsortium/beethoven`, called ashley-bridge until 2026-09-30, until the split of
+2026-10-03; that name is now the project hub), and a few internal
 names stay because changing them would break something installed or show nothing: the kill-list's
 format tag `ASHLEYREV1`, the cluster utility `hpcworker` and its paths on the cluster (never shown
 to a student), the storage keys `bridge.*`, and the value `product: "bridge"` the extension sends to
@@ -210,8 +212,9 @@ downloaded at run time by the product; the build needs the network only for `npm
 site pages; `bash`; `pandoc` only for the site pages; `unzip`/`sha256sum` (Git Bash has both). No
 cluster account is needed for any test: the tests run against the mock portal in `extension/mock-ood`.
 
-**Clone.** `git clone https://github.com/OpenSpineConsortium/beethoven.git` (the organisation's
-private repository, the only remote since 2026-09-30; the personal copy
+**Clone.** `git clone https://github.com/OpenSpineConsortium/hpcworker.git` for the cluster side and
+`git clone https://github.com/OpenSpineConsortium/beethoven-extension.git` for the extension (the
+organisation's private repositories since the split of 2026-10-03; the personal copy
 `GregorySchwing/ashley-bridge` is retired). Keep the line endings as they are in the repository
 (LF); Windows Git may warn about CRLF and is harmless.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RETIRED 2026-09-30: the personal repository this pushed to is being deleted; the remote is
-# OpenSpineConsortium/beethoven, pushed with tools/push_org.sh from a shell whose git credential
+# OpenSpineConsortium/hpcworker (OpenSpineConsortium/beethoven until the split of 2026-10-03), pushed with tools/push_org.sh from a shell whose git credential
 # can reach the organisation (on the maintainer's machine, WSL). Kept for the record only.
 echo "retired: use tools/push_org.sh (see its header)" >&2; exit 1
 # Push this repository to GitHub through the grid, where a repo-scoped GITHUB_TOKEN already lives in

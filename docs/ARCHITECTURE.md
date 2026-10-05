@@ -1,6 +1,6 @@
 # Beethoven: architecture
 
-Public name Beethoven since 7.0.0; the repository is `OpenSpineConsortium/beethoven` since 2026-09-30 (`CLAUDE.md`).
+Public name Beethoven since 7.0.0; the code was in `OpenSpineConsortium/beethoven` from 2026-09-30 and is in `OpenSpineConsortium/hpcworker` and `OpenSpineConsortium/beethoven-extension` since the split of 2026-10-03 (`CLAUDE.md`); `OpenSpineConsortium/beethoven` is the project hub since 2026-10-05.
 
 **12.0.0 (2026-10-02).** This document describes the portal path as built up to 11.0.0, which 12.0.0 keeps as its fallback. 12.0.0 first tries a direct way: ssh to the login node with no VPN, through a helper that ships inside the extension, a sign-in sheet for the first password-and-code sign-in, and a key in the browser whose one line on the grid runs only framework 11's gate. For that, read `V12_CONTRACT.md` (the contract), `V12_STATUS.md` (where the build stands) and `guides/` (install, use, accounts, lab lead).
 
