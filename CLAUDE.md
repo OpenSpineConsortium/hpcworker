@@ -167,7 +167,9 @@ name and identifier carry no university name.
 
 - `framework/`: bash 4.2 plus Python 3.6 standard library only (the Wayne State login node is CentOS
   7). `lib/profile.py` (site profile schema and CLI), `lib/adapters/{common,slurm,pbs,lsf}.sh` (the
-  eight-call adapter interface), `profiles/<site>.json`, the job template and probe job,
+  eight-call adapter interface), `profiles/<id>.json` (composed by `profile.py compose-all` from
+  `sites/<site>/site.json`, the university's cluster, and `sites/<site>/labs/<lab>.json`, one lab's
+  deployment there; never edited by hand; `framework/sites/README.md`), the job template and probe job,
   `bin/hpcworker` (the one command) and `tests/` (`run.sh`, six unittest files, fixtures). Two
   install modes since framework 5 (`docs/ARCHITECTURE.md` 2.1): the lab's shared copy, kept once per
   site where the profile names `shared_install` (Wayne State:

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """hpcworker site profile: schema, load/validate, render helpers.
 
-One JSON file per university describes everything the job templates need to
-know about a cluster. It is seeded by hand (profiles/<site>.json) or by
-`hpcworker discover`, and corrected by the probe job. Only the standard library
+One JSON file per deployment describes everything the job templates need to
+know about a cluster. It is seeded by hand or by `hpcworker discover`, and
+corrected by the probe job. In this repository profiles/<id>.json is composed
+from a site module (the university's cluster, sites/<site>/site.json) and a lab
+module (one group's deployment there, sites/<site>/labs/<lab>.json) over the
+product's own values; `compose-all` writes it and the tests hold it to them. Only the standard library
 is used, and only syntax that Python 3.6 accepts: the login node this was
 written against runs CentOS 7, whose system python3 is 3.6.
 
@@ -18,6 +21,10 @@ a scheduler):
     profile.py get <profile> <dotted.key>
     profile.py shellenv <profile>                 # P_key=value lines for bash eval
     profile.py show <profile>
+    profile.py show --layers <id> | <site.json> <lab.json>   # each composed value with the layer and file that set it
+    profile.py compose <site.json> <lab.json>      # a site module and a lab module composed, on stdout
+    profile.py compose-all [--check] [--root DIR]  # sites/*/labs/*.json -> profiles/<id>.json (--check: compare only)
+    profile.py module-schema                       # what a module may carry, as JSON (beethoven-sites pins it)
     profile.py set <profile> <dotted.key> <json-or-string>
     profile.py from-discovery <discover.json> [site]   # a seed profile on stdout
     profile.py render <template> <profile> KEY=VALUE...  # rendered text on stdout
@@ -219,7 +226,7 @@ def validate(prof):
                 errs.append("login_node_rules.%s must be an integer" % k)
         if isinstance(rules.get("poll_floor_seconds"), int) and rules["poll_floor_seconds"] < 60:
             errs.append("login_node_rules.poll_floor_seconds must be at least 60")
-    if isinstance(prof.get("site"), str) and not re.match(r"^[a-z0-9][a-z0-9-]{0,31}$", prof["site"]):
+    if isinstance(prof.get("site"), str) and not ID.fullmatch(prof["site"]):
         errs.append("site must be lower-case letters, digits and dashes (it goes into session names)")
     if isinstance(prof.get("node_tmp"), str):
         nt = prof["node_tmp"]
@@ -370,6 +377,475 @@ def save(prof, path):
         json.dump(prof, fh, indent=1, sort_keys=True)
         fh.write("\n")
     os.replace(tmp, path)
+
+
+# ----------------------------------------------------------------------------
+# site and lab modules (BEE-199): a university's cluster and one lab's deployment on it, kept apart
+# and composed into the profiles/<id>.json every consumer reads
+# ----------------------------------------------------------------------------
+
+# The layers a composed profile is made of, in the order they are laid down: the product's own values
+# (PRODUCT below), the site (a university's cluster, whoever uses it: sites/<site>/site.json) and the
+# lab (one group's deployment there: sites/<site>/labs/<lab>.json).
+LAYERS = ("product", "site", "lab")
+
+# Which layers may set each field of SCHEMA, the owner first. A module that sets a field its layer may
+# not set is refused, so a lab cannot pin another host key and a site cannot name a lab's volume.
+FIELD_LAYERS = {
+    "schema_version": ("product",),
+    "site": ("site",),
+    "display_name": ("site",),
+    "scheduler": ("site",),
+    "submit_host": ("site",),
+    "bin_dir": ("site",),
+    # the site's partition for short and test work; a lab may send its own elsewhere
+    "partition_cpu": ("site", "lab"),
+    "qos_cpu": ("site", "lab"),
+    # the long worker's partition is the lab lead's choice (Wayne State's notes say so since framework 10)
+    "partition_cpu_batch": ("lab",),
+    "qos_batch": ("lab",),
+    # the site's catalogue; the engine's own jobs choose from it even where a lab runs no GPU worker
+    "partitions_gpu": ("site",),
+    "account": ("lab",),
+    "max_walltime": ("site",),
+    "node_tmp": ("site",),
+    "node_tmp_var": ("site",),
+    "tmpdir_is_node_local": ("site",),
+    "ipc_dir": ("product", "site"),
+    "shared_state_dir": ("lab",),
+    "shared_install": ("lab",),
+    "runtime": ("site",),
+    "runtime_module": ("site",),
+    "runtime_bin": ("site",),
+    "image_store": ("lab",),
+    "claude_bin": ("lab",),
+    "binds": ("product", "site", "lab"),
+    "cache_dir": ("site",),
+    "fakeroot_rung": ("site",),
+    "egress": ("site",),
+    # the student's own sign-in and Remote Control answer: never a site's or a lab's to move
+    "claude_config_dir": ("product",),
+    "consent_markers": ("product",),
+    "ood_base_url": ("site",),
+    "ood_shell_host": ("site",),
+    "ood_rnode_enabled": ("site",),
+    "ood_auth": ("site",),
+    "vpn_required": ("site",),
+    "vpn_portal": ("site",),
+    "vpn_app": ("site",),
+    "vpn_help_url": ("site",),
+    "grid_account_help_url": ("site",),
+    "grid_2fa_help_url": ("site",),
+    "ssh_host": ("site",),
+    "ssh_port": ("site",),
+    "ssh_host_key": ("site",),
+    "ssh_relay": ("site",),
+    "browser_key_days": ("lab",),
+    "session_title": ("site", "lab"),
+    "login_abandon_s": ("product", "lab"),
+    "restricted": ("lab",),
+    "restricted_workspaces": ("lab",),
+    # the poll floor is the product's; the process cap a site states (validate keeps the floor >= 60 s)
+    "login_node_rules": ("product", "site"),
+    "xdg_runtime_fix": ("site",),
+    "scheduler_in_worker": ("site",),
+    "home_filesystem": ("site",),
+    "worker_defaults": ("product", "lab"),
+    "notes": ("site", "lab"),
+}
+
+# Lists that add up across the layers (the product's $HOME, then the site's, then the lab's volumes);
+# every other list a later layer sets replaces the earlier one.
+ADDITIVE = ("binds",)
+
+# The product's own values, laid down before any module. The sign-in directory Beethoven starts Claude
+# Code in and the consent markers beside it are the product's alone; $HOME is every worker's first
+# bind; the poll floor is this product's etiquette, and the login node's process cap is not the
+# product's to guess, so a site states it; the rest stands until a layer that may set the field does.
+PRODUCT = (
+    ("schema_version", SCHEMA_VERSION),
+    ("ipc_dir", "/dev/shm"),
+    ("binds", ["$HOME"]),
+    ("claude_config_dir", "$HOME/.beethoven/claude"),
+    ("consent_markers", ["$HOME/.beethoven/claude/.beethoven-remote-consent",
+                         "$HOME/.beethoven/claude/.ashley-remote-consent"]),
+    ("login_abandon_s", 1200),
+    ("login_node_rules", {"poll_floor_seconds": 60}),
+    ("worker_defaults", {"cpus": 2, "mem": "8G", "hours": 8, "permission_mode": "default", "capacity": 4}),
+)
+
+# The keys an object field holds, in the order the composed profile writes them, each with its type
+# and whether the composed profile must carry it. Layers merge these objects key by key, so a module's
+# misspelt key would otherwise sit beside the product's value and leave it in force; a module may set
+# only the keys named here. egress.proxy_env and egress.measured are free below their own key.
+SUBFIELDS = {
+    "image_store": (("type", IMAGE_TYPES, True), ("path", str, True)),
+    "egress": (("class", EGRESS_CLASSES, True), ("proxy_env", "dict", False), ("proxy_module", str, False),
+               ("ca_bundle", str, False), ("measured", "dict", False)),
+    "login_node_rules": (("max_processes", int, True), ("poll_floor_seconds", int, True)),
+    "worker_defaults": (("cpus", int, False), ("mem", str, False), ("hours", int, False),
+                        ("permission_mode", str, False), ("capacity", int, False)),
+}
+
+# What a module says about itself; none of it reaches the composed profile. A site module's "site" is
+# the schema's field of that name; a lab module's "site" names the site it belongs to, and "profile"
+# the id of the composed file (profiles/<profile>.json, the name consumers already vendor). An id is
+# matched whole (fullmatch: a "$" alone would let a trailing newline through into a file name).
+MODULE_KEYS = {"site": ("kind", "module_version"), "lab": ("kind", "module_version", "site", "lab", "profile")}
+ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# The framework still finds a deployment's profile by its `site` field (site_values, `connect`'s shared
+# copy, the copy's own site, the extension's --profile), so a lab whose profile had another id would be
+# served the first lab's values. Until an account keeps only its own choices and names its profile
+# (BEE-208), a site has one lab and that lab's profile carries the site's id.
+PROFILE_IS_SITE = True
+
+
+def _type_name(typ):
+    return "/".join(typ) if isinstance(typ, tuple) else (typ if isinstance(typ, str) else typ.__name__)
+
+
+def _owner(key, kind):
+    """The words for a module of KIND that sets KEY, which its layer may not set"""
+    modules = [layer for layer in FIELD_LAYERS[key] if layer != "product"]
+    if not modules:
+        return "%s is the product's own value; no module sets it" % key
+    return "%s is set by the %s module, not by a %s module" % (key, " or the ".join(modules), kind)
+
+
+def _copy(value):
+    return json.loads(json.dumps(value))
+
+
+def validate_module(mod, kind):
+    """Problems with a site or lab module on its own (empty when it may be composed). Unlike a
+    profile, a module refuses a field the schema does not name, or a key inside an object field that
+    SUBFIELDS does not: it is written by hand against this version, so an unknown key is a typo,
+    never another release's field."""
+    if not isinstance(mod, dict):
+        return ["the %s module is not a JSON object" % kind]
+    errs = []
+    if mod.get("kind") != kind:
+        errs.append("kind must be %r in a %s module (got %r)" % (kind, kind, mod.get("kind")))
+    mv = mod.get("module_version")
+    if not (isinstance(mv, int) and not isinstance(mv, bool) and mv >= 1):
+        errs.append("module_version must be a whole number from 1 (got %r)" % (mv,))
+    ids = ("site",) if kind == "site" else ("site", "lab", "profile")
+    for key in ids:
+        if not (isinstance(mod.get(key), str) and ID.fullmatch(mod[key])):
+            errs.append("%s must be lower-case letters, digits and dashes (got %r)" % (key, mod.get(key)))
+    if kind == "lab" and PROFILE_IS_SITE and mod.get("profile") != mod.get("site"):
+        errs.append("profile must be %r, the site's id: the framework finds a deployment's profile by its site's id, "
+                    "so a site has one lab until BEE-208 (got %r)" % (mod.get("site"), mod.get("profile")))
+    types = dict((key, typ) for key, typ, _req, _default, _desc in SCHEMA)
+    for key, value in mod.items():
+        if key in MODULE_KEYS[kind]:
+            continue
+        if key not in FIELD_LAYERS:
+            errs.append("%s is not a field of this version's profile (hpcworker profile schema lists them)" % key)
+            continue
+        if kind not in FIELD_LAYERS[key]:
+            errs.append(_owner(key, kind))
+            continue
+        if not _type_ok(types[key], value):
+            errs.append("field %s: expected %s, got %r" % (key, _type_name(types[key]), value))
+            continue
+        subs = dict((name, typ) for name, typ, _req in SUBFIELDS.get(key, ()))
+        for sub in value if key in SUBFIELDS else ():
+            if sub not in subs:
+                errs.append("%s.%s is not a key of %s (it has %s)" % (key, sub, key, ", ".join(n for n, _t, _r in SUBFIELDS[key])))
+            elif not _type_ok(subs[sub], value[sub]):
+                errs.append("field %s.%s: expected %s, got %r" % (key, sub, _type_name(subs[sub]), value[sub]))
+    return errs
+
+
+def _lay(prof, origin, key, value, where):
+    """Lay VALUE for KEY over what PROF holds, recording in ORIGIN which layer set each leaf: objects
+    merge key by key (keys already there keep their places, new ones follow), an additive list gains
+    the entries it lacks, anything else is replaced."""
+    def leaves(path, val):
+        # a value laid over PATH replaces whatever was recorded there and below it
+        for p in [p for p in origin if p[:len(path)] == path]:
+            del origin[p]
+        record(path, val)
+
+    def record(path, val):
+        if isinstance(val, dict) and val:
+            for k, v in val.items():
+                record(path + (k,), v)
+        else:
+            origin[path] = where
+
+    def merge(path, old, new):
+        if isinstance(old, dict) and isinstance(new, dict):
+            out = _copy(old)
+            for k, v in new.items():
+                out[k] = merge(path + (k,), out[k], v) if k in out else _copy(v)
+                if k not in old:
+                    leaves(path + (k,), v)
+            return out
+        leaves(path, new)
+        return _copy(new)
+
+    if key in ADDITIVE and isinstance(prof.get(key), list) and isinstance(value, list):
+        out = prof[key]
+        for item in value:
+            if item not in out:
+                origin[(key, len(out))] = where
+                out.append(_copy(item))
+        return
+    if key in prof:
+        prof[key] = merge((key,), prof[key], value)
+    else:
+        leaves((key,), value)
+        prof[key] = _copy(value)
+
+
+def compose_layers(site, lab, site_file="site.json", lab_file="lab.json"):
+    """(profile, origin) for SITE and LAB, two modules already read: the product's values, then the
+    site's, then the lab's, in the schema's key order; ORIGIN maps each leaf's path (a tuple of keys
+    and list positions) to (layer, file). Raises ValueError naming every problem, the composed
+    profile's own included: a composed profile is read raw by every client, so it must be whole."""
+    errs = ["%s: %s" % (site_file, e) for e in validate_module(site, "site")]
+    errs += ["%s: %s" % (lab_file, e) for e in validate_module(lab, "lab")]
+    if isinstance(site, dict) and isinstance(lab, dict) and site.get("site") != lab.get("site"):
+        errs.append("%s: belongs to site %r, not %r" % (lab_file, lab.get("site"), site.get("site")))
+    if errs:
+        raise ValueError("\n".join(errs))
+    prof, origin = {}, {}
+    for key, value in PRODUCT:
+        _lay(prof, origin, key, value, ("product", "lib/profile.py"))
+    for layer, mod, path in (("site", site, site_file), ("lab", lab, lab_file)):
+        for key, value in mod.items():
+            if key not in MODULE_KEYS[layer]:
+                _lay(prof, origin, key, value, (layer, path))
+    order = [key for key, _typ, _req, _default, _desc in SCHEMA]
+    prof = dict((key, prof[key]) for key in order if key in prof)
+    for key, subs in SUBFIELDS.items():
+        if isinstance(prof.get(key), dict):
+            names = [name for name, _typ, _req in subs]
+            value = prof[key]
+            prof[key] = dict([(k, value[k]) for k in names if k in value] + [(k, v) for k, v in value.items() if k not in names])
+    errs = validate(prof)
+    if errs:
+        raise ValueError("the profile %s and %s compose is invalid:\n%s" % (site_file, lab_file, "\n".join(errs)))
+    return prof, origin
+
+
+def compose(site, lab, site_file="site.json", lab_file="lab.json"):
+    return compose_layers(site, lab, site_file, lab_file)[0]
+
+
+def profile_text(prof):
+    """A composed profile as it is written to profiles/<id>.json: one space of indent, the keys in the
+    order given, ASCII, a final newline."""
+    return json.dumps(prof, indent=1) + "\n"
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (IOError, OSError, ValueError) as e:
+        raise ValueError("%s: could not be read as JSON (%s)" % (path, e))
+
+
+def _rel(path, root):
+    path, root = os.path.abspath(path), os.path.abspath(root)
+    return os.path.relpath(path, root).replace(os.sep, "/") if path.startswith(root + os.sep) else path.replace(os.sep, "/")
+
+
+def _module_tree(root):
+    """(site modules, (site.json, lab.json) pairs, problems) under ROOT/sites, sorted: every module is
+    read and checked to sit where its ids say (sites/<site>/site.json, sites/<site>/labs/<lab>.json);
+    a site folder without its site.json, a file that is not a JSON object and a misplaced module are
+    problems, never skipped."""
+    sites = os.path.join(root, "sites")
+    if not os.path.isdir(sites):
+        return [], [], ["%s: no sites folder here (the root is the framework folder, which holds sites/ and profiles/)" % root]
+    site_paths, pairs, errs = [], [], []
+    for name in sorted(os.listdir(sites)):
+        folder = os.path.join(sites, name)
+        if not os.path.isdir(folder):
+            continue
+        site_path = os.path.join(folder, "site.json")
+        if not os.path.isfile(site_path):
+            errs.append("%s: no site.json" % _rel(folder, root))
+            continue
+        try:
+            site = _read_json(site_path)
+        except ValueError as e:
+            errs.append(str(e).replace(site_path, _rel(site_path, root)))
+            continue
+        if not isinstance(site, dict):
+            errs.append("%s: the site module is not a JSON object" % _rel(site_path, root))
+            continue
+        if site.get("site") != name:
+            errs.append("%s: its site id must be %r, the folder's name" % (_rel(site_path, root), name))
+        site_paths.append(site_path)
+        labs = os.path.join(folder, "labs")
+        for fn in sorted(os.listdir(labs)) if os.path.isdir(labs) else []:
+            if not fn.endswith(".json"):
+                continue
+            lab_path = os.path.join(labs, fn)
+            try:
+                lab = _read_json(lab_path)
+            except ValueError as e:
+                errs.append(str(e).replace(lab_path, _rel(lab_path, root)))
+                continue
+            if not isinstance(lab, dict):
+                errs.append("%s: the lab module is not a JSON object" % _rel(lab_path, root))
+                continue
+            if lab.get("lab") != fn[:-5] or lab.get("site") != name:
+                errs.append("%s: its lab id must be %r and its site %r, as the path says" % (_rel(lab_path, root), fn[:-5], name))
+            pairs.append((site_path, lab_path))
+    return site_paths, pairs, errs
+
+
+def modules(root=None):
+    """[(site.json, lab.json)] for every lab module under ROOT/sites (the framework tree by default),
+    sorted. Raises ValueError naming every misplaced or unreadable module."""
+    _sites, pairs, errs = _module_tree(root or code_root())
+    if errs:
+        raise ValueError("\n".join(errs))
+    return pairs
+
+
+def claimants(root=None):
+    """{profile id: [lab module, ...]} for every lab module under ROOT/sites that names one"""
+    out = {}
+    for _site_path, lab_path in modules(root):
+        pid = _read_json(lab_path).get("profile")
+        if isinstance(pid, str):
+            out.setdefault(pid, []).append(lab_path)
+    return out
+
+
+def compose_all(root=None, check=False):
+    """Compose every lab module into ROOT/profiles/<profile>.json (written only where it changed), or
+    with CHECK only compare. Returns the problems: a module that is misplaced or does not compose, a
+    site module with no lab that does not pass on its own, two modules naming one profile, a file that
+    differs (CHECK) and a profile no module names, which is reported and never removed. Nothing is
+    written while any module is misplaced, and a profile two modules name is neither written nor
+    compared, whichever of them sorts first."""
+    root = root or code_root()
+    site_paths, pairs, problems = _module_tree(root)
+    if problems:
+        return problems
+    claimed, composed = {}, {}
+    for site_path, lab_path in pairs:
+        site, lab = _read_json(site_path), _read_json(lab_path)
+        if isinstance(lab.get("profile"), str):
+            claimed.setdefault(lab["profile"], []).append(_rel(lab_path, root))
+        try:
+            composed[lab_path] = compose(site, lab, _rel(site_path, root), _rel(lab_path, root))
+        except ValueError as e:
+            problems.extend(str(e).split("\n"))
+    for site_path in site_paths:
+        if not any(s == site_path for s, _l in pairs):
+            problems += ["%s: %s" % (_rel(site_path, root), e) for e in validate_module(_read_json(site_path), "site")]
+    for pid, labs in sorted(claimed.items()):
+        if len(labs) > 1:
+            problems.append("%s both compose profiles/%s.json" % (" and ".join(labs), pid))
+    folder = os.path.join(root, "profiles")
+    for site_path, lab_path in pairs:
+        if lab_path not in composed:
+            continue
+        pid = _read_json(lab_path)["profile"]
+        if len(claimed[pid]) > 1:
+            continue
+        target = os.path.join(folder, pid + ".json")
+        text = profile_text(composed[lab_path])
+        try:
+            with open(target, "r", encoding="utf-8", newline="") as fh:
+                current = fh.read()
+        except (IOError, OSError):
+            current = None
+        if current == text:
+            continue
+        if check:
+            problems.append("profiles/%s.json %s what %s composes (profile.py compose-all writes it)"
+                            % (pid, "is missing," if current is None else "differs from", _rel(lab_path, root)))
+            continue
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        tmp = target + ".part"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    for fn in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if fn.endswith(".json") and fn[:-5] not in claimed:
+            problems.append("profiles/%s: no lab module composes it" % fn)
+    return problems
+
+
+def _type_spec(typ):
+    if isinstance(typ, tuple):
+        return {"type": "enum", "values": list(typ)}
+    return {"type": typ if isinstance(typ, str) else typ.__name__}
+
+
+def module_schema():
+    """What a site or lab module may carry, as data (`profile.py module-schema`): each field's type,
+    the layers that may set it, whether the composed profile must carry it, its description and, for an
+    object field, the keys it holds; the product's own values, the keys a module says about itself, the
+    id pattern (matched against the whole id) and the additive lists. The modules' own repository (beethoven-sites) pins this output and
+    checks a module against it without any of this code; validate_module is the same rule here, and
+    composing is what hpcworker alone does."""
+    fields = {}
+    for key, typ, req, _default, desc in SCHEMA:
+        spec = _type_spec(typ)
+        spec["layers"] = list(FIELD_LAYERS[key])
+        # a required field must be in the composed profile: the product's value, or a module's
+        spec["required"] = bool(req)
+        spec["description"] = desc
+        if key in SUBFIELDS:
+            spec["keys"] = [dict([("name", name)] + list(_type_spec(typ).items()) + [("required", bool(sreq))])
+                            for name, typ, sreq in SUBFIELDS[key]]
+        fields[key] = spec
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "layers": list(LAYERS),
+        "product": dict((key, _copy(value)) for key, value in PRODUCT),
+        "module_keys": dict((kind, list(keys)) for kind, keys in sorted(MODULE_KEYS.items())),
+        "id_pattern": ID.pattern,
+        "id_match": "whole",
+        "profile_is_site": PROFILE_IS_SITE,
+        "additive": list(ADDITIVE),
+        "fields": fields,
+    }
+
+
+def layers_lines(prof, origin):
+    """`profile.py show --layers`: every value of the composed profile, one leaf a line, with the
+    layer and the file that set it, and after them the schema's defaults the profile leaves to the
+    reader (layer "default"), the way `spack config blame` shows a configuration's sources."""
+    rows = []
+
+    def walk(path, val):
+        if isinstance(val, dict) and val:
+            for k, v in val.items():
+                walk(path + (k,), v)
+        elif isinstance(val, list) and val:
+            for i, v in enumerate(val):
+                walk(path + (i,), v)
+        else:
+            p = path
+            while p and p not in origin:
+                p = p[:-1]
+            layer, where = origin.get(p, ("?", "?"))
+            rows.append((name(path), layer, where, json.dumps(val)))
+
+    def name(path):
+        # an object's key may hold a dot (egress.measured's are host names): such a key is quoted
+        return ".".join(json.dumps(x) if isinstance(x, str) and re.search(r'[.\s"]', x) else str(x) for x in path)
+
+    for key, val in prof.items():
+        walk((key,), val)
+    for key, _typ, _req, default, _desc in SCHEMA:
+        if key not in prof:
+            rows.append((key, "default", "lib/profile.py", json.dumps(default)))
+    width = [max(len(r[i]) for r in rows) for i in range(3)]
+    return ["%-*s  %-*s  %-*s  %s" % (width[0], r[0], width[1], r[1], width[2], r[2], r[3]) for r in rows]
 
 
 def shellenv(prof):
@@ -866,6 +1342,15 @@ def _utf8_stdout():
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
 
 
+def _emit(text, stream=None):
+    """TEXT as UTF-8 bytes with its LF newlines: a Windows console's text mode would write CRLF, and a
+    path python decoded with surrogateescape (a plain ssh's C locale) goes out as the bytes it was."""
+    stream = stream or sys.stdout
+    stream.flush()
+    stream.buffer.write(text.encode("utf-8", "surrogateescape"))
+    stream.flush()
+
+
 def main(argv):
     if len(argv) < 2:
         sys.stderr.write(__doc__)
@@ -913,6 +1398,57 @@ def main(argv):
         text = render(tpl, guide_mapping(prof, _kv_args(argv[4:])))
         sys.stdout.flush()
         sys.stdout.buffer.write(text.encode("utf-8"))
+        return 0
+    if cmd == "compose":
+        if len(argv) != 4:
+            raise SystemExit("usage: profile.py compose <site.json> <lab.json>")
+        try:
+            prof = compose(_read_json(argv[2]), _read_json(argv[3]), argv[2], argv[3])
+        except ValueError as e:
+            _emit("refusing:\n  %s\n" % str(e).replace("\n", "\n  "), sys.stderr)
+            return 1
+        _emit(profile_text(prof))
+        return 0
+    if cmd == "module-schema":
+        _emit(json.dumps(module_schema(), indent=1) + "\n")
+        return 0
+    if cmd == "compose-all":
+        args, root = argv[2:], None
+        if "--root" in args:
+            i = args.index("--root")
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                raise SystemExit("usage: profile.py compose-all [--check] [--root <framework dir>]")
+            root = args[i + 1]
+            del args[i:i + 2]
+        if args not in ([], ["--check"]):
+            raise SystemExit("usage: profile.py compose-all [--check] [--root <framework dir>]")
+        problems = compose_all(root, check=bool(args))
+        _emit("".join("ERROR: %s\n" % p for p in problems) or "ok: every profile is what its modules compose\n")
+        return 1 if problems else 0
+    if cmd == "show" and len(argv) > 2 and argv[2] == "--layers":
+        # show --layers <id> (a profile the checkout's modules compose) | show --layers <site.json> <lab.json>
+        try:
+            if len(argv) == 5:
+                site_path, lab_path = argv[3], argv[4]
+            elif len(argv) == 4:
+                labs = claimants().get(argv[3], [])
+                if not labs:
+                    _emit("no lab module under %s composes the profile %s\n" % (os.path.join(code_root(), "sites"), argv[3]), sys.stderr)
+                    return 1
+                if len(labs) > 1:
+                    _emit("refusing: %s all name the profile %s (profile.py compose-all reports it)\n"
+                          % (", ".join(_rel(l, code_root()) for l in labs), argv[3]), sys.stderr)
+                    return 1
+                lab_path = labs[0]
+                site_path = os.path.join(os.path.dirname(os.path.dirname(lab_path)), "site.json")
+            else:
+                raise SystemExit("usage: profile.py show --layers <id> | show --layers <site.json> <lab.json>")
+            root = code_root()
+            prof, origin = compose_layers(_read_json(site_path), _read_json(lab_path), _rel(site_path, root), _rel(lab_path, root))
+        except ValueError as e:
+            _emit("refusing:\n  %s\n" % str(e).replace("\n", "\n  "), sys.stderr)
+            return 1
+        _emit("\n".join(layers_lines(prof, origin)) + "\n")
         return 0
     path = argv[2] if len(argv) > 2 else None
     if not path:
