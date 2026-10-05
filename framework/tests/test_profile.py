@@ -188,6 +188,11 @@ class Mapping(unittest.TestCase):
         self.assertIn("#SBATCH --signal=B:TERM@120", m["HEADER"])
         self.assertIn("#SBATCH --requeue", m["HEADER"])
         self.assertIn("#SBATCH --dependency=singleton", m["HEADER"])
+        # framework 18: a candidate of a start that asks several queues carries the start's token and its group, and no singleton
+        self.assertEqual((m["RACE"], m["RACE_K"]), ("", "0"))
+        r = P.mapping(self.prof, {"RUN": "worker", "RACE": "1759620000-4321", "RACE_K": "2"})
+        self.assertEqual((r["RACE"], r["RACE_K"]), ("1759620000-4321", "2"))
+        self.assertEqual(r["HEADER"], m["HEADER"].replace("\n#SBATCH --dependency=singleton", ""))
 
     def test_code_root_is_separate_from_the_home(self):
         # the job sources lib/ from HPCW_CODE: what `worker start` passes (a shared copy's numbered
@@ -321,7 +326,7 @@ class SchedulerInWorker(unittest.TestCase):
             self.assertIs(P.load(self.older_copy(td, site="elsewhere"))["scheduler_in_worker"], False)
             self.assertEqual(P.site_values("elsewhere"), {})
             self.assertEqual(P.site_values("../wayne"), {})
-            # framework 10 adds the extension's keys to what a site supplies; framework 11 the ssh path's
+            # framework 10 adds the extension's keys to what a site supplies; framework 11 the ssh path's; framework 18 worker_queues
             # (browser_key_days is not set at Wayne State, so it is not supplied)
             self.assertEqual(P.site_values("wayne"), {"scheduler_in_worker": True, "session_title": "Wayne State grid", "login_abandon_s": 1200,
                                                       "ood_auth": "http-basic", "vpn_portal": "protect.wayne.edu", "vpn_app": "GlobalProtect",
@@ -329,7 +334,9 @@ class SchedulerInWorker(unittest.TestCase):
                                                       "grid_account_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/ArticleDet?ID=20199",
                                                       "grid_2fa_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/Article/20242/How-do-I-set-up-and-use-Google-Authenticator-for-the-Grid",
                                                       "ssh_host": "grid.wayne.edu", "ssh_port": 22,
-                                                      "ssh_host_key": "SHA256:kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s", "ssh_relay": None})
+                                                      "ssh_host_key": "SHA256:kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s", "ssh_relay": None,
+                                                      # framework 18: the queues a worker is asked for at once
+                                                      "worker_queues": ["reqp/requeue", "secp/secondary"]})
 
     def test_framework11_keys_validated(self):
         prof = P.load(WAYNE)

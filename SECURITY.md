@@ -127,9 +127,18 @@ Cluster side:
   `sbatch --export`; the per-job token is a mode-0600 file on shared storage.
 - Supervised mode (`--permission-mode default`) by default; a task manifest enforced by the framework;
   input data read-only with a separate writable working directory.
-- Nothing on the login node beyond one `sbatch`, `squeue` or `scancel`; no container commands there;
-  container temp and cache on the compute node's local disk with a cleanup trap; IPC under `/dev/shm`;
-  the job writes `status.json` and clients read the file.
+- Nothing on the login node beyond one `sbatch`, `squeue` or `scancel` per action, with one exception
+  since framework 18: starting a worker asks every queue group the site profile's `worker_queues`
+  makes, all at once, one `sbatch` per group (at most four, two at Wayne State), beside at most one
+  `squeue` and at most one `scancel`, and the first job to get a computer cancels the others from its
+  compute node (greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues
+  should be launched and the first to get allocated should respond to the client to minimize wait
+  time"). That rule and its exception are this product's own etiquette; C&IT's own instruction is only
+  "nothing container-related on `warrior` and nothing of ours under its `/tmp`". No container commands
+  there; container temp and cache on the compute node's local disk with a cleanup trap; IPC under
+  `/dev/shm`; the job writes `status.json` and clients read the file. A candidate that loses a start's
+  race leaves without writing anything in the run directory; the winner cancels the others by id and
+  only jobs of its own worker's name (`docs/ARCHITECTURE.md` 4.5).
 - The worker refuses to start in a directory marked restricted and when Remote Control is unavailable
   under Zero Data Retention.
 - The framework never deletes anything outside its own run directories (`<shared_state_dir>/<run>/`)

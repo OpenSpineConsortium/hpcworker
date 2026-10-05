@@ -221,11 +221,18 @@ grid is told). Withdrawing an approval does not remove the line.
 | `version` | `HPCW-GATE ok <framework> <due\|never\|-> <account> claude=<yes\|no\|unknown>` |
 | `status NAME` | one JSON line, `worker status --json` (`{"v":1,...}`) |
 | `watch NAME` | JSON lines `{"v":1,"event":"status","final":<bool>,...}` per change and `{"v":1,"event":"keepalive","at":"<UTC>"}` every 20 s; exit 0 online, 1 stopped or error or ended, 2 out of time (30 minutes) |
-| `connect NAME SITE <32 hex\|-> <default\|acceptEdits\|plan> <chain\|no-chain>` | the `HPCW-STEP` lines, never `signin` (always `--login never`) |
+| `connect NAME SITE <32 hex\|-> <default\|acceptEdits\|plan> <chain\|no-chain> [race]` | the `HPCW-STEP` lines, never `signin` (always `--login never`); with the seventh word `race` (framework 18), `--race` before `--login never`, and `HPCW-STEP candidates <L>,<B>` may come before the queued line (`V11_CONTRACT.md` 5.3) |
 | `stop NAME` | `worker NAME: stopped (...)` |
 | `restrict NAME` | `worker NAME: marked restricted (...)` |
 | `read NAME FILE`, FILE one of `status.json`, `connection.json`, `progress.log`, `node` | the file's bytes (`progress.log`'s last 256 KB); exit 1 `HPCW-GATE missing`, 3 `not-plain` or `too-large`, on standard error. `rc.log` and every other file: refused |
 | `forget` | `HPCW-KEY forgotten`, `none`, or `stuck` (exit 7) |
+
+The seventh word of `connect` is optional and, when present, exactly `race` (framework 18, after greg's
+decision of 2026-10-04 23:26Z that a worker asks every queue at once and the first job to get a
+computer runs it); the six-word form is unchanged and starts one job; any other seventh word, an eighth,
+or `race` in another place is refused. A client sends `race` only to a gate whose `version` line names
+framework 18 or later, from its V13 release; a framework 17 gate refuses the seven words. The caps count
+a raced connect as one connect.
 
 Anything else: `HPCW-GATE refused`, exit 126. Past `browser_key_days` (none at Wayne State): the line
 is removed and `HPCW-KEY expired`, exit 125. Caps, per account, in `<shared_state_dir>/.gate/caps`: 3

@@ -13,8 +13,9 @@ import unittest
 
 import fakegrid as G
 
-STEP_ORDER = ["setup", "consent", "queued", "signin", "signed-in", "done"]
-KNOWN = re.compile(r"^(HPCW-STEP (setup (ready|changed)|consent|queued [0-9]+ (new|kept) .+|signin|signed-in \S+ \S+|done|failed [a-z-]+( .*)?)"
+# framework 18: "candidates", printed only under --race, immediately before its queued line
+STEP_ORDER = ["setup", "consent", "candidates", "queued", "signin", "signed-in", "done"]
+KNOWN = re.compile(r"^(HPCW-STEP (setup (ready|changed)|consent|candidates [0-9]+(,[0-9]+)+|queued [0-9]+ (new|kept) .+|signin|signed-in \S+ \S+|done|failed [a-z-]+( .*)?)"
                    r"|HPCW-LOGIN: .+|HPCW-LOGIN-FAILED: .+|AUTH-URL: \S+|SIGNED-IN \S+ \S+|srun: .+)$")
 
 
@@ -86,6 +87,20 @@ class Orders(Base):
         self.assertTrue(m, srun)
         self.assertLessEqual(abs(int(m.group(1)) - (int(time.time()) + 840)), 120)
         self.assertNotIn("--fresh", srun)
+
+    def test_first_run_asking_every_queue(self):
+        # framework 18: --race asks Wayne State's two queue groups at once, then the sitting as before
+        rc, out, err = self.connect("--race --consent %s" % G.INSTALL_ID)
+        self.assertEqual(rc, 0, (out, err))
+        self.assert_whole_lines(out)
+        self.assert_order(out)
+        rd = G.posix(self.g.rundir())
+        self.assertEqual(out.splitlines()[:5], ["HPCW-STEP setup changed", "HPCW-STEP consent", "HPCW-STEP candidates 40501234,40501235",
+                                                "HPCW-STEP queued 40501234 new %s" % rd, "HPCW-STEP signin"])
+        self.assertEqual(out.splitlines()[-1], "HPCW-STEP done")
+        calls = self.g.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["sbatch", "sbatch", "srun"], calls)
+        self.assertIn("-p secp -q secondary -t 00:20:00", calls[2], "the sitting's own allocation is unchanged")
 
     def test_returning_signed_in_skips_the_sitting(self):
         self.g.setup()

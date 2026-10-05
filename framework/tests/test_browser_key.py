@@ -558,6 +558,11 @@ class GateLines(Base):
             "connect worker testsite - default chain": ["connect", "--name", "worker", "--profile", "testsite", "--permission-mode", "default", "--login", "never"],
             "connect worker testsite %s plan no-chain" % IID: ["connect", "--name", "worker", "--profile", "testsite", "--permission-mode", "plan", "--consent", IID, "--no-chain", "--login", "never"],
             "connect a1 site-2 - acceptEdits chain": ["connect", "--name", "a1", "--profile", "site-2", "--permission-mode", "acceptEdits", "--login", "never"],
+            # framework 18: the optional seventh word, a client that follows a worker asking every queue at once
+            "connect worker testsite - default chain race": ["connect", "--name", "worker", "--profile", "testsite", "--permission-mode", "default", "--race",
+                                                             "--login", "never"],
+            "connect worker testsite %s plan no-chain race" % IID: ["connect", "--name", "worker", "--profile", "testsite", "--permission-mode", "plan", "--consent", IID,
+                                                                     "--no-chain", "--race", "--login", "never"],
         }
         os.makedirs(os.path.join(self.state, "w-2_x"), exist_ok=True)   # a watch takes its slot only for a run that exists
         for cmd, want in cases.items():
@@ -591,6 +596,10 @@ class GateLines(Base):
             "connect worker -testsite - default chain", "connect worker testsite -- default chain", "connect worker testsite - --login chain",
             "connect worker testsite --login default chain", "connect --login never worker testsite - default", "connect worker testsite - default --no-chain",
             "connect worker testsite - default-login chain", "connect worker testsite - bypassPermissions chain",
+            # framework 18: race is the one seventh word, after the other six
+            "connect worker testsite - default chain Race", "connect worker testsite - default chain race x", "connect worker testsite - default race chain",
+            "connect worker testsite - default chain --race", "connect worker testsite - default chain race race", "connect worker testsite - default chain races",
+            "connect worker testsite - race chain", "connect worker testsite - default chain race --login",
             "read worker", "read worker job.token", "read worker stop", "read worker rc.log", "read worker ../../.ssh/id_rsa", "read worker .ssh",
             "read worker status.json x", "read -x status.json", "read worker STATUS.JSON", "read worker job.sbatch", "forget x", "forget now",
             "status wé", "status ｗorker", "status worker\r", "status\x00worker", "watch", "watch -", "stop -", "restrict -",

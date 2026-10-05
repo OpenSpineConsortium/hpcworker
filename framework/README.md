@@ -924,7 +924,8 @@ State's KB 20199 in TeamDynamix's standard form, was not fetched), `session_titl
 grid`), `login_abandon_s` (1200; 0 or at least 300), `restricted` and `restricted_workspaces`. Each is
 optional and checked by `profile validate`. An account's `profile.json` copied before version 10 takes
 these from the site profile of the same name in the copy it runs from (`FIELDS_FROM_SITE`), until the
-account sets its own. The worker partition is not changed (the lab lead's choice).
+account sets its own. The worker partition is not changed (the lab lead's choice) until framework 18;
+see `worker_queues` ("A worker on several queues" below).
 
 Version 11 adds, each optional, checked by `validate` and taken from the site profile the same way:
 `ssh_host` (`grid.wayne.edu`: the login node's public ssh name; empty means no ssh path), `ssh_port`
@@ -945,16 +946,27 @@ the worker's directory; Remote Control draws from your plan's shared usage limit
 ## What the framework enforces (cluster etiquette)
 
 - Nothing runs on the login node beyond one scheduler command per action (and connect's sign-in
-  sitting, `srun` relayed by bash), and nothing on its banned list for longer than a moment (see "The
-  login node" below). Every subcommand that would run a container or Claude Code refuses to do so
+  sitting, `srun` relayed by bash), with one exception since framework 18: starting a worker asks every
+  queue group the site profile's `worker_queues` makes, all at once, one `sbatch` per group of queues
+  that share a QoS (at most four; two at Wayne State), beside at most one `squeue`, to look for a worker
+  already there, and at most one `scancel`, only for a stray job of an earlier start or a candidate that
+  got a computer before the last `sbatch` went out; the first job to get a computer cancels the others
+  from its compute node ("A worker on several queues" below). greg, 2026-10-04 23:26Z: "So it seems
+  obvious to me that workers on all possible queues should be launched and the first to get allocated
+  should respond to the client to minimize wait time". The one-call-per-action rule and that exception
+  are this product's own etiquette; C&IT's own instruction is only "nothing container-related on
+  `warrior` and nothing of ours under its `/tmp`". Nothing on the login node's banned list runs for
+  longer than a moment (see "The login node" below). Every subcommand that would run a container or
+  Claude Code refuses to do so
   outside a job and says why. `discover` stays
   under a second of CPU: the module list comes from a glob of `$MODULEPATH` (the authoritative
   `module avail`, 0.76 s of CPU on Wayne State's login node, and the QoS query run only with `--full`).
 - State is read from files the job writes (`status.json`, `connection.json`, `rc.log`) under the
   shared state directory; no client polls the scheduler in a loop, and the profile's poll floor
   (60 s or more) is part of the schema. `worker start` asks the scheduler once about the running job
-  and its queued successor together; `worker stop` waits for the job's own `stop.done`, asks once,
-  and cancels in one call only what the scheduler still holds; `probe` asks once whether the last
+  and its queued successor together (framework 18: and every candidate of the last start); `worker
+  stop` waits for the job's own `stop.done`, asks once, and cancels in one call only what the scheduler
+  still holds (every candidate of a start still in line among it); `probe` asks once whether the last
   probe is still queued or running before it submits another; `queue report`, typed by a maintainer
   now and then, makes one `sacct` (and one `sinfo` with `--limits`) and polls nothing.
 - Container temp and cache live on the compute node's local disk, in a directory named by the
@@ -1014,7 +1026,7 @@ running for milliseconds):
 |---|---|---|
 | `install --shared` | none | nothing |
 | `claude consent --record` | none | nothing |
-| `connect` | none | the sitting: `srun` (up to 600 s for a computer, 840 s in all), the relay (bash builtins) and its ticker (bash, `sleep 1` a second) |
+| `connect` | none | the sitting: `srun` (up to 600 s for a computer, 840 s in all), the relay (bash builtins) and its ticker (bash, `sleep 1` a second); before it, one `squeue` when a job is on record, one `sbatch` per queue group (one without `--race`; with it at most four, two at Wayne State), one `srun`; at most one `scancel` |
 | `worker status --json` | none | nothing (one `squeue` under `timeout 20`, only while in line; with `--poll-floor 60`, not within a minute of the last) |
 | `worker stop` | none | for a running worker, bash waits up to 45 s for its `stop.done` (`sleep 5` between looks); one `squeue`, one `scancel` |
 | `worker restrict` | none | nothing |
@@ -1025,13 +1037,16 @@ running for milliseconds):
 | gate `version`, `read`, `forget` | none | nothing |
 | gate `status`, `stop`, `restrict` | none | as `worker status`, `stop`, `restrict` |
 | gate `watch` | none | up to 30 minutes, bash alone: a look at `status.json` every 5 s with builtins and a `sleep`, one `squeue` a minute at most while in line, a keepalive line every 20 s; it ends within 20 s when its reader goes |
-| gate `connect` | none | nothing (never an `srun`) |
+| gate `connect` | none | nothing (never an `srun`; one `squeue` when a job is on record, one `sbatch`, or one per queue group with the seventh word `race`, at most one `scancel`) |
 
 Measured by `tests/test_login_node.py` under WSL (2026-10-02, fixer run): every line in the table above
 but `queue report`, the first connect of a never-set-up account, the gate's eight verbs, `browser-key
 add`, and the first command after `profile.json` changed, started no `python3` at all, and looked up no
 program on the banned list. `queue report --limits` joined the same test on 2026-10-04 and was measured
-so in a Linux container (Python 3.11, mawk 1.3.4), not under WSL. Reading Wayne State's site profile
+so in a Linux container (Python 3.11, mawk 1.3.4), not under WSL. The raced start (`connect --race`
+and the gate's `connect ... race`, framework 18) joined it on 2026-10-05 in a Linux container against
+the fake scheduler: two `sbatch`, no `squeue` on a fresh run directory, no `scancel`, no `python3`, no
+banned program. Reading Wayne State's site profile
 with awk took 25 to 35 ms more than sourcing the tool (about 55 ms), and loading it, filling the job
 file and the workspace guide 130 to 210 ms in all, with gawk 5.2 and with mawk 1.3.4 (`profile.py
 shellenv` alone took 110 ms on the same machine). Not measured on warrior (gawk 4.0.2, bash 4.2.46,
@@ -1101,6 +1116,102 @@ cancel, a preemption at the same moment) hands back to the path instead of writi
 own, so `stopped` is the last status written and `preempted` is never written over a stop. The
 opposite was measured on job 40501099 (2026-09-29), where a cancel 15 s into the stop turned the
 recorded state into `preempted`; the unit tests now send real TERMs into the rendered stop path.
+
+## A worker on several queues (framework 18)
+
+greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues should be
+launched and the first to get allocated should respond to the client to minimize wait time".
+Before framework 18 a worker was one job on one queue (at Wayne State `reqp/requeue`, the lab lead's
+choice). The site profile's `worker_queues` now names every queue a worker may run on, and a start asks
+them all at once.
+
+**The key.** `worker_queues` is a list of `"PARTITION"` or `"PARTITION/QOS"` entries, in order, at
+most four. Absent or `[]` (every profile here but Wayne State's), a start is one job on
+`partition_cpu_batch` (else `partition_cpu`) with its QoS, exactly as before. Wayne State's is
+`["reqp/requeue", "secp/secondary"]`; `reqp` comes first because a start that cannot follow several
+jobs is given the first group, and that is the worker every earlier version started. `validate` (and
+`lib/profile.awk`, to the same words) refuses an entry other than letters, digits, `_`, `.` and `-`
+around one optional `/` (no comma, no space, no `p/`), an entry named twice, a fifth entry, more than
+one entry where the scheduler is not Slurm, and a `/QOS` there. An entry without a QoS sends none (the
+scheduler's default); it does not borrow `qos_cpu`. `--requeue` follows the QoS as it always has: set
+exactly when the QoS is `qos_batch` and that is `requeue`. An account's `profile.json` from before 18
+takes the site's list (`FIELDS_FROM_SITE`).
+
+**One job, or a race.** Entries that share a QoS are one job over a partition list
+(`--partition=reqp,secp`), which Slurm starts wherever it can first: one id, one `sbatch`, nothing to
+cancel and nothing new for any client. Wayne State's Slurm (23.02) takes one QoS per job, so entries
+with different QoS are separate jobs, the candidates: one `sbatch` per group, and the first candidate to
+get a computer runs the worker and cancels the others from its compute node. That is the race.
+`hpcworker diag --queues` asks the scheduler about each group with `sbatch --test-only -p <list> [-q
+<qos>] -t <hours>:00:00 --wrap=true` (one call per group, at most four; at a terminal only, refused
+through the gate; nothing is submitted) and prints its answer. If one QoS is accepted on both
+partitions, the lab lead can write the list with that QoS: the worker is then one job for every client,
+old ones included, and nothing races.
+
+**Who races.** `connect --race` (the gate's `connect` with the seventh word `race`), and `worker
+start` at a terminal unless `--no-race`, `--partition` or `--qos` is given. `connect` without
+`--race`, as every extension and desktop edition released so far types it, asks the first group only:
+at Wayne State `reqp/requeue`, a job file whose header is framework 17's byte for byte, the same lines
+and the same queued file.
+
+**The files**, in the run directory, of a racing start only (a start of one job writes none of them):
+
+- `race`: one line, `<token> open|done k:<id> k:<id> ...`, the token `<epoch>-<pid>` of that start.
+  Only `worker start` writes it, under its lock, through a temporary name and a rename. A refused group
+  is not listed.
+- `claim.<token>`: a symbolic link whose target is the winning job's id, made by `ln -s` in the job
+  body before it writes anything (one atomic create: only one candidate can make it), read with
+  `readlink` and never followed, and removed only by the next start.
+- `race.<k>.sbatch`, the candidate submitted for group k (the start's token, no `singleton`), and
+  `race.<k>.next.sbatch`, what that group's chain re-submits (no token, `singleton` kept). `job.sbatch`
+  starts as a copy of `race.1.next.sbatch`; the winner puts its own group's file there, so its chain
+  stays on the queue that gave it a computer.
+- `race.log`: one line per event (the start, with how long its `sbatch` calls took; the win, with what
+  it cancelled; a stray cancelled), kept to its last 400 lines. `queue report` reads it.
+- `params` gains `RACE=<token>`; the queued `status.json` gains `"candidates":"L,B"` (the jobs taken,
+  in group order, last among its keys); `worker status --json` gains a top-level `"candidates"` (that
+  value while it is queued, else `""`); `connect --race` prints `HPCW-STEP candidates L,B` right before
+  its queued line (`docs/V11_CONTRACT.md` 5.3 and 9.1).
+
+**What a start makes.** On the login node, a racing start at Wayne State: at most one `squeue` (none
+on a fresh run directory), two `sbatch` (one per group; at most four anywhere), at most one `scancel`
+(a candidate of an earlier start still alive, or one that got a computer before the last `sbatch` went
+out); a claim seen between two `sbatch` ends the submitting there. On the winner's compute node: one
+`scancel` of the other candidates, once its `job.id`, node and first status are written; one `squeue`
+for pending jobs of its own name just before it queues its successor, and one `scancel` of any it
+finds (a loser whose cancel did not take, or a candidate the start never got to write down); and, when
+the start was still sending its `sbatch` calls as it won, a second look two minutes later, with one
+`scancel` of any candidate named since (none when there is none). A losing
+candidate makes no call at all: it finds the claim, writes nothing and exits in its first second.
+
+**Status and stop.** While every candidate is in line, `worker status` asks about all of them in ONE
+`squeue` (the 60 s floor as before) and reads them as one worker: running when one runs, else in line
+with the soonest estimate any of them has, and "the grid ended the request" only when none is left.
+`worker stop` puts every candidate in its one `squeue` and its one `scancel`; a candidate that gets a
+computer after the stop file is down claims, writes `stopped` itself and cancels the rest. A start that
+finds a candidate of an earlier start still alive keeps it and submits nothing; a start that does not
+race (an old client's connect) cancels the others in its one `scancel`, so it follows exactly one job.
+`worker status --details` lists each candidate and its queue while they are all in line, and the last
+race's result; `worker list` says `(+1 queue)`.
+
+**For maintainers.** A panel before its V13 release follows one job id. It never asks for a race, but a
+worker started from a terminal does race; watched from such a panel, a worker whose second candidate
+won can sit at "In line" there until the panel's next Connect, which keeps the running job and follows
+it. A preempted winner on `reqp/requeue` is requeued under the same id and waits in `reqp` alone (the
+other candidate was cancelled when it won); it keeps its claim and runs on. A chain successor never
+races: it is its group's next file, with `singleton`; racing successors wait on open question 4
+(whether `afterany` fires at a requeue). PBS and LSF are not raced (more than one entry is refused
+there).
+
+Not yet measured: whether one QoS is accepted on both of Wayne State's partitions (`diag --queues`;
+whether `--test-only` refuses a QoS a partition does not allow is itself not checked), whether a
+`primary` QoS on `secp` is open to the account, the partitions' `AllowQos`, `MaxTime` and
+`PreemptMode` and the cluster's `EnforcePartLimits`, the account's associations, whether `ln -s` is
+exclusive between two compute nodes on the CephFS run directory (the grid lane `tools/grid_ci.sh
+--race`), `squeue` from a compute node (`sbatch` and `scancel` from one are measured, below), how long
+two `sbatch` take on warrior (`race.log` records it per start), what `sacct` prints as Partition for a
+partition-list job and what `SLURM_JOB_PARTITION` names, the per-queue waits under the race, and C&IT's
+view of two pending jobs per worker (not asked).
 
 ## The workspace guide (version 8)
 
@@ -1200,6 +1311,12 @@ account's own scheduler history once and says how long its jobs waited, per part
 for the maintainer and the lab leads at a terminal; students never see it (no contract line, no panel
 words), and it is Slurm only (a PBS or LSF site is told so in one line, exit 1).
 
+greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues should be
+launched and the first to get allocated should respond to the client to minimize wait time": the
+policy came before the numbers (framework 18, "A worker on several queues" above). The report now also
+says which jobs lost a start's race and which won it, from the runs' `race.log` files; how long each
+queue makes a worker wait under the race is not yet measured.
+
 ```
 hpcworker queue report [--days N] [--limits]      # N from 1 to 90; 14 when not given
 ```
@@ -1269,6 +1386,13 @@ What `sacct` lists, and what the report counts:
   (as some Slurm versions record a cancel in line).
 - **"gave up" and "cancelled" apart.** A `CANCELLED` record not started counts under "gave up"; one
   cancelled after it started (a worker taken down with `scancel`, for one) under "cancelled".
+- **"lost race" and "won race" (framework 18).** A candidate of a racing start that was cancelled in
+  line because another got a computer first (`race.log`'s `cancelled ... (lost)`, or a stray the winner
+  or a later start cancelled) counts under "lost race" instead of "gave up", and stays a wait cut short,
+  censored at its time in line: that queue had not given a computer by then. "won race" counts the
+  candidates that claimed a start. `race.log` is read as files only, `$STATE_DIR/*/race.log`; no
+  scheduler call is added. How `sacct` keys a partition-list job (the list, or the partition it ran on)
+  is not yet measured; the tests cover it with planted records only.
 - **Times are UTC.** `sacct` prints its times in the zone of its own environment and in the form
   `SLURM_TIME_FORMAT` names; both are set for that one call, in its environment and never on its
   argument list, whatever the caller's own say. UTC has no daylight saving, so a difference is a true
@@ -1287,9 +1411,9 @@ becomes seconds since 1970-01-01T00:00:00Z by the days-from-civil formula (`HPCW
 Kaplan-Meier figures to the product-limit formula in exact fractions over random rows with ties). Per
 partition and QoS: the attempts that started in the window (started as above), the median, p90
 and maximum wait as above, written as `Nd Nh Nm`, `Nh Nm` or `Nm Ns`, whichever fits; the records
-pending (State `PENDING`), gave up, preempted (`PREEMPTED`), requeued (`REQUEUED`), cancelled after a
+pending (State `PENDING`), gave up, lost race and won race (framework 18), preempted (`PREEMPTED`), requeued (`REQUEUED`), cancelled after a
 start (`CANCELLED`, with or without "by <uid>") and timed out (`TIMEOUT`); and the median run time (End
-minus Start) of the attempts that ended, those preempted or requeued left out. Four lines under the
+minus Start) of the attempts that ended, those preempted or requeued left out. Five lines under the
 header say how to read the table. A Start before its Eligible (or Submit) time (the clocks the
 scheduler recorded disagree) counts as no wait, and a line after the table says how many did. A record
 whose Submit is not a time this report reads is counted by its state, its wait and run time left out,
@@ -1317,12 +1441,13 @@ queue report for st1234: 16 records of jobs eligible or running at any time in t
 one record per attempt of a requeued job; a wait runs from Eligible (Submit where Eligible is not a time; for a later attempt, the End of the one before) to Start; times in UTC
 a job not started (pending, or cancelled in line) counts as waiting at least as long as it had: median and p90 are Kaplan-Meier estimates, ">T" where one lies beyond T, the longest wait seen
 gave up: cancelled before it started; cancelled: after it started; median run: End minus Start of the attempts not preempted or requeued
+lost race: a candidate of a worker start that asked several queues, cancelled in line because another got a computer first; won race: the one that did (from race.log)
 not listed by sacct: a job held, or waiting on a dependency (the successor a worker queued), since it was submitted; pending is State PENDING, a job held later among them
 
-partition  qos         started  median wait  p90 wait     max wait     pending  gave up  preempted  requeued  cancelled  timed out  median run
-gvohp      gpu               1  1m 0s        1m 0s        1m 0s              0        0          0         0          0          0  -
-reqp       requeue           8  10m 0s       2d 0h 0m     2d 0h 0m           1        1          1         1          0          1  5h 30m
-secp       secondary         5  0m 45s       6m 0s        6m 0s              0        0          0         0          0          0  30m 0s
+partition  qos         started  median wait  p90 wait     max wait     pending  gave up  lost race  won race  preempted  requeued  cancelled  timed out  median run
+gvohp      gpu               1  1m 0s        1m 0s        1m 0s              0        0          0         0          0         0          0          0  -
+reqp       requeue           8  10m 0s       2d 0h 0m     2d 0h 0m           1        1          0         0          1         1          0          1  5h 30m
+secp       secondary         5  0m 45s       6m 0s        6m 0s              0        0          0         0          0         0          0          0  30m 0s
 
 1 of the starts above is a later attempt of a requeued job
 1 record whose Start is before its Eligible (or Submit) time, by the clocks the scheduler recorded; each counts as no wait
@@ -1369,6 +1494,7 @@ jobs/workspace-guide.md.tpl  the CLAUDE.md a new worker workspace gets, filled f
 jobs/build_image.sbatch  a SIF with Claude Code pinned, for sites without an image (not run at Wayne State)
 tests/run.sh             bash -n for every script, then the unittest suite
 tests/grid/slurm_in_container.sbatch  the maintainer's grid check for scheduler_in_worker (one 5-minute job; not published)
+../tools/grid_ci.sh      the suite and, with --container or --race, the maintainer's grid checks as real jobs, the verdict posted to the commit
 ../tools/deploy_shared.sh  publishes bin/ lib/ jobs/ profiles/ VERSION README.md as the lab's shared copy
 ```
 
@@ -1396,7 +1522,9 @@ empty); `session_name`,
 `workspace_trusted`, `chain`, `next_job`, `chain_note`), `connection.json` (the same session fields
 plus node, job, pid, token path, permission mode, capacity), `rc.log` (Claude Code's terminal),
 `job.token` (0600), `in_image.sh` and `launch.sh` (the exact command lines the job ran), `stop`
-(touch it, or `hpcworker worker stop`), `stop.done` (the job's last act after it wrote `stopped`).
+(touch it, or `hpcworker worker stop`), `stop.done` (the job's last act after it wrote `stopped`); and,
+framework 18, from a start that asked several queues at once: `race`, `claim.<token>` (a link naming the
+winner), `race.<k>.sbatch`, `race.<k>.next.sbatch` and `race.log` ("A worker on several queues").
 
 The registration block Claude Code 2.1.283 prints, and what the job takes from it:
 
@@ -1507,6 +1635,18 @@ hang-up giving back the slot), `PlainExec` in `test_connect.py` (connect and `cl
 with no terminal: no `--pty`, the code from standard input and never written back; the setup of an
 account never set up; no sign-in under the gate), the gate's verbs and `browser-key add` in the
 login-node audit, and the new profile keys in `test_profile.py`.
+
+Version 18 adds `test_race.py` (a worker on several queues: the `worker_queues` key and its refusals
+in both readers, the job file with and without the start's token, a list of one QoS made one job, a
+connect with and without `--race`, a group refused and every group refused, a candidate kept or
+cancelled by the next start, two raced starts at once, a claim before the last `sbatch`, status and
+stop over every candidate in one call, the terminal's sentence and `--no-race`, `diag --queues`, and,
+Linux only, the job body itself: the winner, a non-lead winner, a late loser that changes nothing on
+disk and calls nothing, two candidates in the same second, a stale or missing race file, a stop at
+start, a requeued winner, a chain successor, the name sweep and the second look of an open race), the
+fake scheduler's `FAKE_SINGLETON`, `FAKE_SBATCH_REFUSE_PARTITION`, `FAKE_SBATCH_HOOK` and
+`FAKE_SCANCEL_IGNORE`, the gate's seventh word in `test_browser_key.py`, the raced connect in
+`test_login_node.py`, and "lost race" and "won race" in `test_queue.py`.
 
 Version 13 adds `SuccessorOfAnEndedJob` in `test_status.py` (a job that ended naming a successor, asked
 about with the job in one call: a successor the fake scheduler no longer lists, one listed as ended, one

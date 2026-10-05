@@ -127,6 +127,8 @@ class GuideRender(GuideBase):
             "display_name": "", "scheduler": "pbs", "submit_host": "", "ood_base_url": "", "account": "lab42",
             "partition_cpu_batch": "", "qos_cpu": "", "partitions_gpu": ["gpu"], "max_walltime": "48:00:00",
             "shared_state_dir": "$HOME/hpcworker", "binds": ["$HOME", "/scratch/$USER:/scratch"], "scheduler_in_worker": False,
+            # framework 18: Wayne State's two queues with their QoS are Slurm's; a PBS site names one queue, or none
+            "worker_queues": [],
         })
         self.assertEqual(P.validate(prof), [])
         text = self.rendered(prof, run="w2")

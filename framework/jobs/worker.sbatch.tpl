@@ -55,6 +55,17 @@
 # written as no sign-in (need_login, claude_login.loggedIn false, the message says why), Remote Control
 # never starts on it, and one found while a session runs ends that session.
 #
+# Framework 18 (greg, 2026-10-04 23:26Z: "workers on all possible queues should be launched and the
+# first to get allocated should respond to the client"). A start that asked several queue groups at
+# once rendered this job with RACE set to its token and RACE_K to its group. Before anything else the
+# job claims that start: claim.<RACE>, a symbolic link to its id that only one candidate can make (ln -s
+# fails on a name that exists). The candidate that makes it is the worker: it puts its group's job file
+# in job.sbatch (its chain re-submits that, with singleton), cancels the other candidates in one call
+# from this node, looks once more 120 s later for any the start submitted after it looked, and sweeps
+# any job of this worker's name still in line before it queues its successor. Every other candidate,
+# and a candidate of a start that is over, leaves at once, writing nothing in the run directory but its
+# own job output line. A Slurm requeue of the winner finds its own claim and carries on.
+#
 # The code: lib/ comes from HPCW_CODE, the directory the command that rendered this job ran from
 # (the lab's shared copy, by its numbered directory, or ~/.hpcworker); HPCW_HOME is the student's
 # own folder (profile, consent marker). A chain keeps the code it started with until the next start.
@@ -79,6 +90,7 @@ XDG_FIX=@XDG_FIX@; SCHED_IN_WORKER=@SCHED_IN_WORKER@
 PERMISSION_MODE='@PERMISSION_MODE@'; CAPACITY='@CAPACITY@'
 HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@; LOGIN_RECHECK_S=@LOGIN_RECHECK_S@; AUTH_RETRY_S=@AUTH_RETRY_S@
 TITLE='@TITLE@'; HOURS=@HOURS@; LOGIN_ABANDON_S=@LOGIN_ABANDON_S@
+RACE='@RACE@'; RACE_K=@RACE_K@
 export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VAR HPCW_TMPDIR_IS_NODE_LOCAL
 ORIG_TMPDIR="${TMPDIR:-}"   # what a successor should inherit: not this node's per-job temp
 
@@ -93,7 +105,33 @@ JOB=$(hpcw_job_id)
 NODE=$(hostname -s)
 mkdir -p "$RUN_DIR" "$WORKSPACE" || { echo "REFUSING: cannot create $RUN_DIR"; exit 1; }
 cd "$RUN_DIR" || exit 1
-echo "$JOB" > job.id; echo "$NODE" > node; rm -f stop.done
+# framework 18: a candidate of a start that asked several queues runs the worker only if it claims that start
+RACE_WON=0; RACE_OPEN=0; RACE_SETTLED=0; RACE_CLAIMED_S=0; RACE_CANCELLED=""; RACE_SECOND_S="${HPCW_RACE_SECOND_S:-120}"
+race_claim() { # 0 when this job is the start's worker: its own claim already (a requeue of the winner), or one it makes now
+  local c t s rest
+  if [ -L "claim.$RACE" ]; then c=$(readlink "claim.$RACE" 2>/dev/null); [ "$c" = "$JOB" ]; return; fi
+  # the start this job belongs to is the one on record: a race file of another token is a later start's
+  [ -s race ] || return 1
+  t=""; s=""; rest=""; read -r t s rest < race 2>/dev/null || true
+  [ "$t" = "$RACE" ] || return 1
+  # a start whose sbatches are all out names every candidate it was given: one it does not name is not its own
+  if [ "$s" = done ]; then case " $rest " in *":$JOB "*) ;; *) return 1;; esac; fi
+  if ln -s "$JOB" "claim.$RACE" 2>/dev/null; then
+    # the link names this job, read back from the file system (two nodes making it at once on a shared volume)
+    c=$(readlink "claim.$RACE" 2>/dev/null); [ "$c" = "$JOB" ] || return 1
+    RACE_WON=1; RACE_CLAIMED_S=$(date +%s); return 0
+  fi
+  c=$(readlink "claim.$RACE" 2>/dev/null); [ "$c" = "$JOB" ]
+}
+if [ -n "$RACE" ] && ! race_claim; then say "another queue's job has the worker, or this start is over: leaving"; exit 0; fi
+# framework 18: job.id through a temporary name and a rename, as worker start writes it, so a reader never sees it half written
+{ echo "$JOB" > "job.id.part.$JOB" && mv -f "job.id.part.$JOB" job.id; } || echo "$JOB" > job.id
+echo "$NODE" > node; rm -f stop.done
+# the winner's group is the worker's from now on: its chain re-submits job.sbatch, which names this group with singleton
+if [ "$RACE_WON" = 1 ]; then
+  if [ -s "race.$RACE_K.next.sbatch" ] && cp -f "race.$RACE_K.next.sbatch" "job.sbatch.part.$JOB" && mv -f "job.sbatch.part.$JOB" job.sbatch; then :
+  else rm -f "job.sbatch.part.$JOB"; say "race: no race.$RACE_K.next.sbatch to keep; the chain re-submits job.sbatch as the start wrote it"; fi
+fi
 say "hpcworker $HPCW_VERSION worker $RUN job $JOB on $NODE (site $SITE); image $IMAGE_TYPE $IMAGE; chain=$CHAIN"
 
 json_str() { hpcw_json_str "$1"; }
@@ -108,7 +146,10 @@ ENDS_AT=$(date -u -d "@$(( JOB_START_S + HOURS * 3600 ))" +%FT%TZ)
 # named first in next.id by the job that queued it: renewal, and no queued file to read
 prev_field() { [ -s status.json ] && tr -d '\n' < status.json | grep -o "\"$1\": *\(\"[^\"]*\"\|[^,}]*\)" | head -1 | sed -e "s/^\"$1\": *//" -e 's/^"//' -e 's/"$//'; }
 SUBMITTED_AT=""; RENEWAL=false
-if [ "$(prev_field job)" = "$JOB" ]; then SUBMITTED_AT=$(prev_field submitted_at); [ "$(prev_field renewal)" = true ] && RENEWAL=true; fi
+# framework 18: or names it among its candidates (a start that asked several queues names the first it was given)
+if [ "$(prev_field job)" = "$JOB" ] || case ",$(prev_field candidates)," in *",$JOB,"*) true;; *) false;; esac; then
+  SUBMITTED_AT=$(prev_field submitted_at); [ "$(prev_field renewal)" = true ] && RENEWAL=true
+fi
 if [ -s next.id ]; then read -r _nid _np < next.id || true; [ "${_nid:-}" = "$JOB" ] && RENEWAL=true; fi
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 # the session title (framework 10): the profile's session_title, "<title> · <name>" for a worker not named worker; Claude Code's --name
@@ -163,10 +204,43 @@ write_connection() {
 # says so with node and got_computer_at before anything else that can fail, replacing the queued file
 write_status starting "got a computer; checking the container and the sign-in"
 hpcw_progress "$RUN_DIR" "Got a computer"
+# framework 18: the winner of a start's race cancels the other candidates, ONE call from this node, and race.log says so
+race_settle() {
+  [ "$RACE_WON" = 1 ] && [ "$RACE_SETTLED" = 0 ] || return 0
+  RACE_SETTLED=1
+  [ $HAVE_ADAPTER = 1 ] || { say "race: no $SCHEDULER adapter; the other candidates are not cancelled from here"; return 0; }
+  local t="" s="" rest="" e id others="" waited="" sub
+  read -r t s rest < race 2>/dev/null || true
+  [ "$t" = "$RACE" ] || return 0
+  # still "open": the start is still sending its sbatches; the second look below catches the ones it sends after this
+  [ "$s" = open ] && RACE_OPEN=1
+  for e in $rest; do id=${e#*:}; [ "$id" = "$JOB" ] || others="$others${others:+ }$id"; done
+  sub=$(hpcw_iso_epoch "$SUBMITTED_AT") && [ -n "$sub" ] && waited=$(( RACE_CLAIMED_S - sub ))
+  if [ -n "$others" ]; then
+    # shellcheck disable=SC2086
+    adapter_cancel $others; RACE_CANCELLED="$others"
+    hpcw_race_log "$RUN_DIR" "$RACE won $RACE_K:$JOB on $NODE (${SLURM_JOB_PARTITION:-${PBS_QUEUE:-${LSB_QUEUE:-?}}}${SLURM_JOB_QOS:+/$SLURM_JOB_QOS}), ${waited:-?} s after submitted_at; cancelled $others (lost)"
+    say "race: this job won the start $RACE; cancelled $others"
+  else
+    hpcw_race_log "$RUN_DIR" "$RACE won $RACE_K:$JOB on $NODE (${SLURM_JOB_PARTITION:-${PBS_QUEUE:-${LSB_QUEUE:-?}}}${SLURM_JOB_QOS:+/$SLURM_JOB_QOS}), ${waited:-?} s after submitted_at; no other candidate to cancel"
+  fi
+}
+race_second_look() { # once, RACE_SECOND_S after the claim: candidates the start named after race_settle read the file
+  RACE_OPEN=0
+  local t="" s="" rest="" e id late=""
+  read -r t s rest < race 2>/dev/null || true
+  [ "$t" = "$RACE" ] || return 0
+  for e in $rest; do id=${e#*:}; [ "$id" = "$JOB" ] && continue; case " $RACE_CANCELLED " in *" $id "*) continue;; esac; late="$late${late:+ }$id"; done
+  [ -n "$late" ] && [ $HAVE_ADAPTER = 1 ] || return 0
+  # shellcheck disable=SC2086
+  adapter_cancel $late; RACE_CANCELLED="$RACE_CANCELLED${RACE_CANCELLED:+ }$late"
+  hpcw_race_log "$RUN_DIR" "$RACE second look from $JOB: cancelled $late (lost)"
+}
+race_settle
 # a successor (or a Slurm requeue without a queued file): when the scheduler accepted it
 if [ -z "$SUBMITTED_AT" ] && [ $HAVE_ADAPTER = 1 ]; then SUBMITTED_AT=$(adapter_submit_time "$JOB" 2>/dev/null); fi
 # a stop asked for while the previous link was ending: this link ends the chain and leaves at once
-if [ -e stop ]; then rm -f stop; STOP_REASON=request; write_status stopped "stopped by request; the chain ended"; hpcw_progress "$RUN_DIR" "Stopped"; say "stop file present at start: chain ended"; touch stop.done; exit 0; fi
+if [ -e stop ]; then race_settle; rm -f stop; STOP_REASON=request; write_status stopped "stopped by request; the chain ended"; hpcw_progress "$RUN_DIR" "Stopped"; say "stop file present at start: chain ended"; touch stop.done; exit 0; fi
 
 # ---- 1. node-local temp, IPC under /dev/shm, XDG fix ------------------------------------------
 HPCW_NODE_TMP=$(hpcw_node_tmp); export HPCW_NODE_TMP
@@ -269,6 +343,19 @@ arm_chain() {
   [ -s job.sbatch ] || { CHAIN_NOTE="no job.sbatch in $RUN_DIR to re-submit; this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
   local nid np
   if [ -s next.id ]; then read -r nid np < next.id; if [ "$np" = "$JOB" ]; then NEXT_JOB="$nid"; CHAIN_NOTE="successor $nid was queued by this job before a restart"; say "chain: $CHAIN_NOTE"; return 0; fi; fi
+  # framework 18: the winner of a start's race sweeps any job of this worker's name still in line first (a candidate
+  # whose cancel was lost), ONE squeue from this node and ONE scancel, so the successor's singleton waits on nobody else
+  if [ "$RACE_WON" = 1 ]; then
+    local pend rc=0 strays="" x nx=""; [ -s next.id ] && read -r nx _ < next.id
+    pend=$(adapter_pending_named "hpcw_$RUN" 2>/dev/null) || rc=$?
+    if [ "$rc" != 0 ]; then hpcw_race_log "$RUN_DIR" "$RACE sweep from $JOB: the scheduler did not answer; nothing cancelled"
+    else
+      for x in $pend; do [ "$x" = "$JOB" ] || [ "$x" = "$nx" ] || strays="$strays${strays:+ }$x"; done
+      # shellcheck disable=SC2086
+      [ -n "$strays" ] && { adapter_cancel $strays; RACE_CANCELLED="$RACE_CANCELLED${RACE_CANCELLED:+ }$strays"
+                            hpcw_race_log "$RUN_DIR" "$RACE stray $strays cancelled by the sweep of $JOB"; say "race: cancelled stray job(s) $strays"; }
+    fi
+  fi
   # the successor inherits this shell's environment minus this node's per-job temp and sockets
   local out; out=$( ( if [ -n "$ORIG_TMPDIR" ]; then export TMPDIR="$ORIG_TMPDIR"; else unset TMPDIR; fi; unset XDG_RUNTIME_DIR HPCW_NODE_TMP HPCW_BINDS APPTAINER_TMPDIR APPTAINER_CACHEDIR SINGULARITY_TMPDIR SINGULARITY_CACHEDIR
                         adapter_submit_after "$RUN_DIR/job.sbatch" "$JOB" -D "$RUN_DIR" ) 2>&1 ) || { CHAIN_NOTE="the scheduler refused the successor: $(printf '%s' "$out" | tail -1 | cut -c1-160); this job runs alone"; say "chain: $CHAIN_NOTE"; return 0; }
@@ -533,5 +620,7 @@ while :; do
     if [ "$SIGNIN" = other ]; then rc_stop; write_status need_login "$(login_words)"; say "signed in, but not with a Claude subscription: Remote Control stopped"; fi
   fi
   if [ $(( $(now_s) - LAST_BEAT )) -ge "$HEARTBEAT_S" ]; then write_status "$STATE" "$MESSAGE"; LAST_BEAT=$(now_s); fi
+  # framework 18: the second look, once, for candidates a start named after this job settled its race
+  if [ "$RACE_OPEN" = 1 ] && [ $(( $(now_s) - RACE_CLAIMED_S )) -ge "$RACE_SECOND_S" ]; then race_second_look; fi
   sleep 5
 done

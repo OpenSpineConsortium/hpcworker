@@ -45,6 +45,7 @@ function schema_init() {
   sadd("partition_cpu_batch", "str", 0, "\"\"")
   sadd("qos_batch", "str", 0, "\"\"")
   sadd("partitions_gpu", "list", 0, "[]")
+  sadd("worker_queues", "list", 0, "[]")
   sadd("account", "str", 0, "\"\"")
   sadd("max_walltime", "str", 0, "\"\"")
   sadd("node_tmp", "str", 1, "")
@@ -90,7 +91,7 @@ function schema_init() {
   sadd("worker_defaults", "dict", 0, "{\"cpus\":2,\"mem\":\"8G\",\"hours\":8,\"permission_mode\":\"default\",\"capacity\":4}")
   sadd("notes", "str", 0, "\"\"")
   # profile.py FIELDS_FROM_SITE: a field a later version added takes the site profile's value until the account sets its own
-  NFS = split("scheduler_in_worker session_title login_abandon_s ood_auth vpn_portal vpn_app vpn_help_url grid_account_help_url restricted restricted_workspaces grid_2fa_help_url ssh_host ssh_port ssh_host_key ssh_relay browser_key_days", FSK, " ")
+  NFS = split("scheduler_in_worker session_title login_abandon_s ood_auth vpn_portal vpn_app vpn_help_url grid_account_help_url restricted restricted_workspaces grid_2fa_help_url ssh_host ssh_port ssh_host_key ssh_relay browser_key_days worker_queues", FSK, " ")
 }
 
 # ---- JSON, read whole into node tables -----------------------------------------------------------
@@ -352,6 +353,12 @@ function urlish(s, scheme,   r) { if (substr(s, 1, length(scheme)) != scheme) re
 
 # ---- profile.py validate(), on the merged profile -------------------------------------------------------
 function verr(m) { ERRS[++NE] = m }
+function wq_ok(w,   n, p) {   # one worker_queues entry: PARTITION or PARTITION/QOS, each 1 to 64 of letters, digits, _ . -
+  n = split(w, p, "/")
+  if (n < 1 || n > 2) return 0
+  if (!(p[1] ~ /^[A-Za-z0-9_.-]+$/ && length(p[1]) <= 64)) return 0
+  return n == 1 || (p[2] ~ /^[A-Za-z0-9_.-]+$/ && length(p[2]) <= 64)
+}
 function typeok(t, id,   n, i, opts) {
   if (t == "list") return islist(id)
   if (t == "dict") return isdict(id)
@@ -443,6 +450,23 @@ function validate(   i, k, id, img, t, p, eg, pe, rules, v, nt, s, j, e, keys) {
     e = NC[v, j]
     if (!(isstr(e) && (NV[e] == "*" || (NV[e] ~ /^[A-Za-z0-9_-]+$/ && length(NV[e]) <= 32)))) verr("restricted_workspaces entries must be worker names or \"*\" (got " pyrepr(e) ")")
   }
+  # framework 18: the queues a worker is asked for at once (profile.py says why)
+  v = mget("worker_queues")
+  if (islist(v)) {
+    split("", WQSEEN); s = mget("scheduler")
+    for (j = 1; j <= NN[v]; j++) {
+      e = NC[v, j]
+      if (!(isstr(e) && wq_ok(NV[e]))) verr("worker_queues entries must be \"PARTITION\" or \"PARTITION/QOS\" (letters, digits, _ . -) (got " pyrepr(e) ")")
+      else if (NV[e] in WQSEEN) verr("worker_queues names " NV[e] " twice")
+      else WQSEEN[NV[e]] = 1
+    }
+    if (NN[v] > 4) verr("worker_queues may name at most four queues (each group is one sbatch on the login node when a worker starts)")
+    if (!(isstr(s) && NV[s] == "slurm")) {
+      if (NN[v] > 1) verr("worker_queues with more than one queue is built for Slurm only (this profile's scheduler is " pystr(s) ")")
+      k = 0; for (j = 1; j <= NN[v]; j++) { e = NC[v, j]; if (isstr(e) && index(NV[e], "/")) k = 1 }
+      if (k) verr("worker_queues: this framework sends no QoS on " pystr(s) "; name the queue only")
+    }
+  }
   v = mget("binds")
   if (islist(v)) for (j = 1; j <= NN[v]; j++) { e = NC[v, j]; if (!isstr(e) || NV[e] == "" || has_ws(NV[e])) verr("binds entries must be non-empty paths without whitespace (got " pyrepr(e) ")") }
   for (i = 1; i <= MN; i++) walk(MV[i], MK[i] ".")
@@ -502,6 +526,10 @@ function mapping_parts(   v, j, b, l, eg, cls, pe, pm, ca, n, cm, bad, h) {
   putv("HPCW_M_QOS_CPU", pystr(mget("qos_cpu")))
   putv("HPCW_M_QOS_BATCH", pystr(mget("qos_batch")))
   putv("HPCW_M_ACCOUNT", truthy(mget("account")) ? pystr(mget("account")) : "")
+  # framework 18: the entries as they stand (validate checked each), one space between; bin/hpcworker groups them
+  v = mget("worker_queues"); l = ""
+  for (j = 1; j <= NN[v]; j++) l = l (j > 1 ? " " : "") NV[NC[v, j]]
+  putv("HPCW_M_WQ", l)
   putv("HPCW_M_WD_CPUS", wdval("cpus", "2"))
   putv("HPCW_M_WD_MEM", wdval("mem", "8G"))
   v = kid(mget("worker_defaults"), "hours"); h = v ? pyint(v) : "8"

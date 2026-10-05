@@ -490,3 +490,33 @@ adapter_status_one() {
 # framework 10: when the scheduler accepted a job, as ISO-8601 UTC (the job asks, inside itself, when
 # no queued status.json names it: a chain successor); nothing where the scheduler cannot say
 adapter_submit_time() { return 0; }
+# framework 18 (greg, 2026-10-04 23:26Z): a worker asked of several queue groups at once.
+#   adapter_status_set ID,ID... [FORMAT] -> ID|STATE|REASON|START|NODE per id the scheduler still lists, in one
+#       call where the scheduler has one (Slurm: squeue's own %i|%T|%r|%S|%N); an id it no longer lists is absent;
+#       exit 2 when it could not be asked. Elsewhere one status call per id, as adapter_status_one answers it.
+#   adapter_pending_named NAME -> the ids of this account's jobs of that name still in line, one per line; exit 2
+#       when the scheduler could not be asked, or has no such query (every scheduler but Slurm here).
+#   adapter_test_only PARTITIONS QOS HOURS -> what the scheduler says of a job it was not given (Slurm: sbatch
+#       --test-only); exit 2 where there is no such check.
+adapter_status_set() { local id l; for id in ${1//,/ }; do l=$(adapter_status_one "$id") || return 2; [ -n "$l" ] && printf '%s|%s\n' "$id" "$l"; done; return 0; }
+adapter_pending_named() { return 2; }
+adapter_test_only() { echo "no check of this kind for $(adapter_name 2>/dev/null || echo this scheduler)"; return 2; }
+
+# The files of a start that asked several queues (bin/hpcworker writes them; the job reads them):
+#   race       one line, "<token> open|done <k>:<id> <k>:<id> ...": the start's token (<epoch>-<pid>), whether its
+#              sbatches are still going out, and the job each group was given, in group order
+#   claim.<token>  a symbolic link to the id of the job that got a computer first; made only by `ln -s`, which
+#              only one of the candidates can make
+#   race.log   one line per start, win, cancel and sweep, appended (worker start keeps the last 400 lines)
+hpcw_race_read() { # RUN_DIR -> HPCW_RACE_TOK, HPCW_RACE_ST (open|done) and HPCW_RACE_ENT ("k:id k:id"); 1 when there is none
+  HPCW_RACE_TOK=""; HPCW_RACE_ST=""; HPCW_RACE_ENT=""
+  [ -s "$1/race" ] || return 1
+  local t="" s="" rest=""; read -r t s rest < "$1/race" 2>/dev/null || true
+  [[ "$t" =~ ^[0-9]+-[0-9]+$ ]] && { [ "$s" = open ] || [ "$s" = done ]; } || return 1
+  HPCW_RACE_TOK="$t"; HPCW_RACE_ST="$s"; HPCW_RACE_ENT="$rest"
+}
+hpcw_race_log() { # RUN_DIR LINE: one line of race.log, with the time first
+  local s="${2//$'\n'/ }"
+  printf '%s %s\n' "$(hpcw_now_iso)" "${s:0:600}" >> "$1/race.log" 2>/dev/null
+  return 0
+}

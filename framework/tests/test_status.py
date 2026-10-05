@@ -61,7 +61,8 @@ class QueuedFile(Base):
         with open(os.path.join(rd, "node"), "w") as fh:
             fh.write("node99\n")  # the last job's node file goes before the next one is asked for
         before = time.time()
-        out = self.start()
+        # a start of one queue (framework 18: --no-race; a raced start adds candidates last, test_race.py) writes framework 17's file
+        out = self.start("--no-race")
         self.assertIn("worker worker submitted as job 40501234", out, "the sentence the 10.0.0 extension reads")
         with open(os.path.join(rd, "status.json"), encoding="utf-8") as fh:
             raw = fh.read()
@@ -108,14 +109,15 @@ class QueuedFile(Base):
         self.start()
         out = self.start()
         self.assertEqual(out.strip(), "worker worker already has job 40501234 (PENDING); nothing submitted", "the 10.0.0 extension's sentence")
-        self.assertEqual([c.split()[0] for c in self.g.calls()], ["sbatch", "squeue"], "one squeue, nothing submitted twice")
+        # framework 18: a terminal start asks Wayne State's two queues at once (one sbatch each); the second start one squeue
+        self.assertEqual([c.split()[0] for c in self.g.calls()], ["sbatch", "sbatch", "squeue"], "one squeue, nothing submitted twice")
         self.assertEqual(len(self.g.progress()), 1)
 
 
 class SchedulerCall(Base):
     def setUp(self):
         super().setUp()
-        self.start()
+        self.start("--no-race")   # one job in line (framework 18: several candidates are test_race.py's)
         self.calls0 = len(self.g.calls())
 
     def set_job(self, line):
@@ -125,7 +127,9 @@ class SchedulerCall(Base):
         self.set_job("40501234|PENDING|Priority|%s|" % local(3600))
         j = self.status_json()
         self.assertEqual(self.g.calls()[self.calls0:], ["squeue -h -j 40501234 -o %T|%r|%S|%N"], "ONE squeue")
-        self.assertEqual(list(j), ["v", "run", "job", "next_job", "state_dir", "status", "connection", "scheduler", "line"])
+        # framework 18: "candidates" last, "" for a worker that asked one queue (test_race.py: the ids of several)
+        self.assertEqual(list(j), ["v", "run", "job", "next_job", "state_dir", "status", "connection", "scheduler", "line", "candidates"])
+        self.assertEqual(j["candidates"], "")
         self.assertEqual((j["v"], j["run"], j["job"], j["next_job"], j["connection"]), (1, "worker", "40501234", "", None))
         self.assertEqual(j["state_dir"].replace("\\", "/"), G.posix(self.g.state))
         sch = j["scheduler"]
@@ -285,7 +289,7 @@ class Lines(Base):
 
 class StopInLine(Base):
     def test_stop_of_a_worker_still_in_line(self):
-        self.start()
+        self.start("--no-race")   # one job (framework 18: every candidate of a raced start is cancelled the same way, test_race.py)
         t0 = time.time()
         rc, out, err = self.g.run("worker stop")
         self.assertEqual(rc, 0, (out, err))
@@ -470,10 +474,10 @@ class Framework9Compat(Base):
         self.assertTrue(os.path.exists(os.path.join(rd, "stop")), "the stop file is the job's signal, as before")
         self.assertRegex(out, r"^worker worker: stopped \(no word from job 40500019 within 1s")
 
-    def test_version_says_17(self):
+    def test_version_says_18(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "17")
+        self.assertEqual(G.CURRENT_VERSION, "18")
 
 
 class SuccessorOfAnEndedJob(Base):

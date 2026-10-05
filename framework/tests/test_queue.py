@@ -98,10 +98,17 @@ def header(n, days=14):
 HOW = ["one record per attempt of a requeued job; a wait runs from Eligible (Submit where Eligible is not a time; for a later attempt, the End of the one before) to Start; times in UTC",
        "a job not started (pending, or cancelled in line) counts as waiting at least as long as it had: median and p90 are Kaplan-Meier estimates, \">T\" where one lies beyond T, the longest wait seen",
        "gave up: cancelled before it started; cancelled: after it started; median run: End minus Start of the attempts not preempted or requeued",
+       # framework 18 (greg, 2026-10-04 23:26Z): a worker start that asks several queues at once
+       "lost race: a candidate of a worker start that asked several queues, cancelled in line because another got a computer first; won race: the one that did (from race.log)",
        "not listed by sacct: a job held, or waiting on a dependency (the successor a worker queued), since it was submitted; pending is State PENDING, a job held later among them"]
-COLUMNS = ["partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "gave up", "preempted", "requeued", "cancelled", "timed out", "median run"]
+COLUMNS = ["partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "gave up", "lost race", "won race", "preempted", "requeued", "cancelled",
+           "timed out", "median run"]
+# framework 18's two columns, after "gave up": the rows below leave them out, and table() and rows() hold them to 0 where no
+# run has a race.log (every test but RaceLog's)
+RACE_COLUMNS = slice(8, 10)
 ROWS = {
     # partition, qos, started, median wait, p90 wait, max wait, pending, gave up, preempted, requeued, cancelled, timed out, median run
+    # (and lost race and won race, both 0, after gave up)
     "gvohp": ["gvohp", "gpu", "1", "1m 0s", "1m 0s", "1m 0s", "0", "0", "0", "0", "0", "0", "-"],
     # started 30, 30, 120, 300, 600, 3720, 14400, 172800, and two not started: 300 (cancelled in line) and 18000 (pending
     # since 07:00). Kaplan-Meier: the share still waiting 9/10, 8/10, 7/10, 6/10, then at 600, with 5 still in line,
@@ -190,32 +197,37 @@ class Report(unittest.TestCase):
         self.assertEqual(err, "")
         return out.splitlines()
 
+    def no_race(self, c):
+        """a row without framework 18's lost race and won race, which are 0 here"""
+        self.assertEqual(c[RACE_COLUMNS], ["0", "0"], c)
+        return c[:RACE_COLUMNS.start] + c[RACE_COLUMNS.stop:]
+
     def rows(self, lines):
         got = {}
         for line in lines:
             c = cells(line)
-            if len(c) == 13 and c[0] != "partition":
-                got[c[0] if c[0] in ROWS else (c[0], c[1])] = c
+            if len(c) == len(COLUMNS) and c[0] != "partition":
+                got[c[0] if c[0] in ROWS else (c[0], c[1])] = self.no_race(c)
         return got
 
-    def table(self, lines):
-        """the rows between the column line and the blank line after them"""
+    def table(self, lines, race=False):
+        """the rows between the column line and the blank line after them (with race, all the columns)"""
         i = [cells(l) for l in lines].index(COLUMNS)
         j = lines.index("", i)
-        return [cells(l) for l in lines[i + 1:j]]
+        return [c if race else self.no_race(c) for c in (cells(l) for l in lines[i + 1:j])]
 
     def test_the_table(self):
         lines = self.report()
         self.assertEqual(lines[0], header(16), "the header: account, count, window as sacct reads it, query")
-        self.assertEqual(lines[1:5], HOW, "how to read it, in the report itself")
-        self.assertEqual(lines[5], "")
-        self.assertEqual(cells(lines[6]), COLUMNS)
-        self.assertEqual([cells(l)[0] for l in lines[7:10]], ["gvohp", "reqp", "secp"], "sorted by partition, then QoS")
+        self.assertEqual(lines[1:6], HOW, "how to read it, in the report itself")
+        self.assertEqual(lines[6], "")
+        self.assertEqual(cells(lines[7]), COLUMNS)
+        self.assertEqual([cells(l)[0] for l in lines[8:11]], ["gvohp", "reqp", "secp"], "sorted by partition, then QoS")
         self.assertEqual(self.rows(lines), ROWS)
-        self.assertEqual(lines[10], "")
-        self.assertEqual(lines[11:13], [LATER, BEFORE])
-        self.assertEqual(lines[13], "shortest median wait: secp secondary (0m 45s)", "the one sentence the maintainer asked for")
-        self.assertEqual(len(lines), 14, "no recommendation beyond it")
+        self.assertEqual(lines[11], "")
+        self.assertEqual(lines[12:14], [LATER, BEFORE])
+        self.assertEqual(lines[14], "shortest median wait: secp secondary (0m 45s)", "the one sentence the maintainer asked for")
+        self.assertEqual(len(lines), 15, "no recommendation beyond it")
 
     def test_a_chained_successor_waits_from_eligible(self):
         # submitted at 08:00:05 while its predecessor ran; eligible at 16:00:00, when that one ended; started 30 s later
@@ -557,6 +569,30 @@ class OtherSchedulers(unittest.TestCase):
             self.assertEqual(out.splitlines(), ["rc=2", "q=0"], (fam, err))
         rc, out, err = G.bash("source '%s/lib/adapters/slurm.sh' && adapter_history_query 14 && adapter_partitions_query" % G.posix(G.ROOT), env={"USER": "st1234"})
         self.assertEqual(out.splitlines(), [query(14), "sinfo -h -o '%P|%l|%a|%D|%T'"], err)
+
+
+class RaceLog(Report):
+    """framework 18: a candidate a worker start's race cancelled in line (race.log: "cancelled ... (lost)", or a stray
+    swept) is counted under lost race, not gave up, and is still a wait not over (censored) on its queue; the candidate
+    that got a computer is counted under won race. race.log is read as a file; nothing else is asked"""
+
+    def test_lost_and_won(self):
+        rd = self.g.rundir()
+        os.makedirs(rd)
+        with open(os.path.join(rd, "race.log"), "w", newline="\n") as fh:
+            fh.write("2026-10-03T08:00:01Z 1759478400-77 start asked 2: 1:44000001 reqp/requeue, 2:44000002 secp/secondary (41 ms)\n"
+                     "2026-10-03T08:30:00Z 1759478400-77 won 2:44000002 on asx15 (secp/secondary), 1799 s after submitted_at; cancelled 44000001 (lost)\n"
+                     "2026-10-03T09:00:00Z 1759478400-77 stray 44000003 cancelled by the sweep of 44000002\n")
+        rec = ["44000001|reqp|requeue|2026-10-03T08:00:00|2026-10-03T08:00:00|None|2026-10-03T08:30:01|CANCELLED by 1234|08:00:00|None assigned",
+               "44000002|secp|secondary|2026-10-03T08:00:01|2026-10-03T08:00:01|2026-10-03T08:30:00|2026-10-03T16:30:00|TIMEOUT|08:00:00|asx15",
+               "44000003|reqp|requeue|2026-10-03T08:00:02|2026-10-03T08:00:02|None|2026-10-03T09:00:00|CANCELLED by 1234|08:00:00|None assigned",
+               # a job a person cancelled in line, which no race.log names: gave up, as before
+               "44000004|reqp|requeue|2026-10-03T10:00:00|2026-10-03T10:00:00|None|2026-10-03T10:10:00|CANCELLED by 1234|08:00:00|None assigned"]
+        lines = self.report(records=rec)
+        self.assertEqual(self.table(lines, race=True), [
+            ["reqp", "requeue", "0", ">59m 58s", ">59m 58s", ">59m 58s", "0", "1", "2", "0", "0", "0", "0", "0", "-"],   # censored: none started
+            ["secp", "secondary", "1", "29m 59s", "29m 59s", "29m 59s", "0", "0", "0", "1", "0", "0", "0", "1", "8h 0m"]])
+        self.assertEqual([c["cmd"] for c in self.g.argvs()], ["sacct"], "race.log is a file; nothing else asked")
 
 
 class DiagPartitions(unittest.TestCase):

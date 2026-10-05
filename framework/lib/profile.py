@@ -68,6 +68,7 @@ SCHEMA = [
     ("partition_cpu_batch", str, False, "", "CPU partition for long workers"),
     ("qos_batch", str, False, "", "QoS for partition_cpu_batch"),
     ("partitions_gpu", "list", False, [], "GPU partitions, in order of preference"),
+    ("worker_queues", "list", False, [], "queues a worker is asked for at once, each \"PARTITION\" or \"PARTITION/QOS\", in order; entries with the same QoS are one job over a partition list (Slurm); with different QoS each is its own job, the first to get a computer runs the worker and the others are cancelled (greg, 2026-10-04 23:26Z); a caller that cannot follow that gets the first entry only. Empty: one job on partition_cpu_batch (else partition_cpu) with its QoS, as before framework 18"),
     ("account", str, False, "", "allocation account, when the site needs one"),
     ("max_walltime", str, False, "", "longest wall time the CPU partition accepts"),
     ("node_tmp", str, True, None, "node-local temp pattern; $USER and $SLURM_JOB_ID/$HPCW_JOB_ID expand in the job"),
@@ -274,6 +275,27 @@ def validate(prof):
         for w in rw:
             if not isinstance(w, str) or not re.match(r"^(\*|[A-Za-z0-9_-]{1,32})$", w):
                 errs.append("restricted_workspaces entries must be worker names or \"*\" (got %r)" % (w,))
+    # framework 18 (greg, 2026-10-04 23:26Z): the queues a worker is asked for at once. Each group of entries that
+    # share a QoS is one sbatch on the login node when a worker starts, so there are at most four; a partition list
+    # and a QoS per job are Slurm's, and nothing else is built for more than one queue
+    wq = prof.get("worker_queues")
+    if isinstance(wq, list):
+        seen = set()
+        for w in wq:
+            if not isinstance(w, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}(/[A-Za-z0-9_.-]{1,64})?", w):
+                errs.append("worker_queues entries must be \"PARTITION\" or \"PARTITION/QOS\" (letters, digits, _ . -) (got %r)" % (w,))
+            elif w in seen:
+                errs.append("worker_queues names %s twice" % w)
+            else:
+                seen.add(w)
+        if len(wq) > 4:
+            errs.append("worker_queues may name at most four queues (each group is one sbatch on the login node when a worker starts)")
+        sch = prof.get("scheduler")
+        if sch != "slurm":
+            if len(wq) > 1:
+                errs.append("worker_queues with more than one queue is built for Slurm only (this profile's scheduler is %s)" % (sch,))
+            if any(isinstance(w, str) and "/" in w for w in wq):
+                errs.append("worker_queues: this framework sends no QoS on %s; name the queue only" % (sch,))
     # bind specs travel through a job file as one space-separated string
     for b in prof.get("binds", []) or []:
         if not isinstance(b, str) or re.search(r"\s", b) or not b:
@@ -306,7 +328,9 @@ def _walk(obj, prefix=""):
 FIELDS_FROM_SITE = ("scheduler_in_worker", "session_title", "login_abandon_s", "ood_auth", "vpn_portal", "vpn_app",
                     "vpn_help_url", "grid_account_help_url", "restricted", "restricted_workspaces",
                     # framework 11
-                    "grid_2fa_help_url", "ssh_host", "ssh_port", "ssh_host_key", "ssh_relay", "browser_key_days")
+                    "grid_2fa_help_url", "ssh_host", "ssh_port", "ssh_host_key", "ssh_relay", "browser_key_days",
+                    # framework 18
+                    "worker_queues")
 
 
 def session_title(prof, run):
@@ -448,9 +472,11 @@ def header_lines(prof, m):
             # 120 s warning before the wall time or a preemption, delivered to the batch shell
             "#SBATCH --signal=B:TERM@120",
             "#SBATCH --requeue" if m.get("REQUEUE") == "1" else "#SBATCH --no-requeue",
-            # one worker of this name at a time
-            "#SBATCH --dependency=singleton",
         ]
+        # one worker of this name at a time; framework 18: not on a candidate of a start that asked several queues
+        # at once, whose candidates share the name and must all wait in line together (the claim keeps them to one)
+        if not m.get("RACE"):
+            lines.append("#SBATCH --dependency=singleton")
         return "\n".join(lines)
     if sch == "pbs":
         # PBS Pro / OpenPBS (documented options; untested on a real PBS site)
@@ -534,11 +560,20 @@ def mapping(prof, overrides=None):
     chain = str(o.get("CHAIN", "1"))
     if chain not in ("0", "1"):
         raise ValueError("CHAIN must be 0 or 1 (got %r)" % chain)
+    # framework 18: a candidate of a start that asked several queues at once carries that start's token and its group
+    race = str(o.get("RACE", ""))
+    if not re.fullmatch(r"[0-9-]{0,32}", race):
+        raise ValueError("RACE must be a start's token, digits and - (got %r)" % race)
+    race_k = str(o.get("RACE_K", "0"))
+    if not re.fullmatch(r"[0-9]", race_k):
+        raise ValueError("RACE_K must be one digit (got %r)" % race_k)
     m = {
         "VERSION": framework_version(),
         "SITE": prof["site"],
         "SCHEDULER": prof["scheduler"],
         "CHAIN": chain,
+        "RACE": race,
+        "RACE_K": race_k,
         "RUN": run,
         "JOB_NAME": "hpcw_%s" % run,
         "RUN_DIR": run_dir,

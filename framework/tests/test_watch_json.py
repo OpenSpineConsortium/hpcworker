@@ -16,7 +16,7 @@ import unittest
 
 import fakegrid as G
 
-STATUS_KEYS = ["v", "event", "final", "run", "job", "next_job", "state_dir", "status", "connection", "scheduler", "line"]
+STATUS_KEYS = ["v", "event", "final", "run", "job", "next_job", "state_dir", "status", "connection", "scheduler", "line", "candidates"]   # candidates: framework 18
 FAST = {"HPCW_WATCH_POLL_S": "1", "HPCW_WATCH_KEEPALIVE_S": "2"}
 
 

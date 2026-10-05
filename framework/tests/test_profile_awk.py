@@ -219,6 +219,12 @@ class ValidateSame(Base):
             dict(restricted_workspaces=["ok", "bad name", 3, "*"]),
             dict(binds=["", "/a b", 5, "/ok"]),
             dict(notes="paste sk-ant-abc here"), dict(egress={"class": "direct", "proxy_env": {}, "x": {"t": ["setup-token"]}}),
+            # framework 18: the queues a worker is asked for at once
+            dict(worker_queues=[]), dict(worker_queues=["reqp"]), dict(worker_queues=["a", "b/c", "d.e/f-g", "h_i"]), dict(worker_queues=["a", "b", "c", "d", "e"]),
+            dict(worker_queues=["a,b"]), dict(worker_queues=["a b"]), dict(worker_queues=["a/"]), dict(worker_queues=["/q"]), dict(worker_queues=["a/b/c"]),
+            dict(worker_queues=["x", "x"]), dict(worker_queues=["x/q", "x/r"]), dict(worker_queues=[1, None]), dict(worker_queues=["p" * 65]),
+            dict(scheduler="pbs", worker_queues=["batch/high"]), dict(scheduler="pbs", worker_queues=["a", "b"]), dict(scheduler="pbs", worker_queues=["one"]),
+            dict(scheduler="lsf", runtime="singularity", worker_queues=["n/q", "m"]),
         ]
         for c in cases:
             self.verdict(self.bent(**c))
@@ -269,6 +275,10 @@ class Render(Base):
 
     def test_wayne_defaults_and_overrides(self):
         self.pair(wayne())
+        # framework 18: a candidate of a start that asks several queues (no singleton), and a group of queues that share a QoS
+        self.pair(wayne(), RUN="worker", PARTITION="secp", QOS="secondary", RACE="1759620000-4321", RACE_K="2")
+        self.pair(wayne(), RUN="worker", PARTITION="reqp,secp", QOS="requeue", RACE="", RACE_K="0")
+        self.pair(wayne(), RUN="worker", PARTITION="secp", QOS="", RACE="1-2", RACE_K="9")
         self.pair(wayne(), RUN="gpu", PARTITION="secp", QOS="secondary", HOURS="1")
         self.pair(wayne(), RUN="w-2", HOURS="30", CPUS="4", MEM="16G", CHAIN="0", REQUEUE="0", HPCW_HOME="$HOME/.hw",
                   PERMISSION_MODE="plan", CAPACITY="2", TIME="1-00:00:00", HEARTBEAT_S="5", LOGIN_ABANDON_S="0")
@@ -277,7 +287,8 @@ class Render(Base):
 
     def test_other_schedulers_proxies_and_binds(self):
         p = wayne()
-        p.update(scheduler="pbs", scheduler_in_worker=False, account="lab1", partition_cpu_batch="", qos_cpu="")
+        # framework 18: a PBS or LSF profile names no QoS in worker_queues, and one queue at most
+        p.update(scheduler="pbs", scheduler_in_worker=False, account="lab1", partition_cpu_batch="", qos_cpu="", worker_queues=[])
         p["egress"] = {"class": "http-proxy-module", "proxy_module": "proxy/1 x", "proxy_env": {"https_proxy": "http://p:3128", "NO_PROXY": "a,b"},
                        "ca_bundle": "/etc/ca bundle.pem"}
         p["binds"] = ["$HOME", "/data/$USER:/data:ro", "/scratch"]
@@ -340,7 +351,8 @@ class Guide(Base):
                  max_walltime="7-00:00:00", ood_base_url="", submit_host="", qos_batch="", partition_cpu_batch="secp", qos_cpu="")
         p["binds"] = ["$HOME", "/home/x:/home/y:ro", "/rs/rs_grp_oschome/$USER", "/elsewhere", "/rs/rs_grp_oschome/shared/beethoven/"]
         self.pair(p)
-        p.update(scheduler="pbs", partitions_gpu=["a", "", "b", "c"], display_name="", runtime="podman")
+        # framework 18: a PBS or LSF profile names no QoS in worker_queues, and one queue at most
+        p.update(scheduler="pbs", partitions_gpu=["a", "", "b", "c"], display_name="", runtime="podman", worker_queues=["batch"])
         p["binds"] = []
         self.pair(p)
         p.update(scheduler="lsf", account="", partitions_gpu=[], shared_state_dir="$HOME/state")

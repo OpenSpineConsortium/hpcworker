@@ -106,8 +106,10 @@ with `qos_batch`, because on Wayne State short allocations (the sign-in sitting,
 extension writes the framework's own one, `~/.hpcworker/consent`, on the student's acknowledgement,
 4.4, and Claude Code's own `remoteDialogSeen` key takes over after the first session);
 `home_filesystem`; `worker_defaults`; `shared_install` (the lab's shared copy of the framework,
-2.1; absolute, optional); and the measured egress result kept under `egress.measured` with
-its date and node. The profile is the one place a site's facts live; the probe job corrects it and the
+2.1; absolute, optional); `worker_queues` (framework 18: every queue a worker is asked for at once,
+`"PARTITION"` or `"PARTITION/QOS"`, in order, at most four; empty, one job on `partition_cpu_batch`
+as before; Wayne State's is `["reqp/requeue", "secp/secondary"]`; 4.5); and the measured egress
+result kept under `egress.measured` with its date and node. The profile is the one place a site's facts live; the probe job corrects it and the
 templates render from it.
 
 ### 2.1 Where the framework lives: the lab's shared copy, or the student's own
@@ -295,7 +297,11 @@ with a terminal: `srun --pty` on the CPU partition, 2 GB; the panel's `--plain` 
 minutes of wall time with `HPCW_ALLOC_WAIT_S=600`, so `-I600` ends a ten-minute wait for a node in
 words rather than hanging; the person's form of the sitting asks 30 minutes with no bounded wait),
 which is what the sign-in sitting runs in, and `adapter_submit_after` (the successor of the always-on
-chain, `afterany` plus `singleton`).
+chain, `afterany` plus `singleton`). Framework 18 adds three for a worker on several queues (4.5):
+`adapter_status_set` (every candidate of a start in one call; Slurm `squeue -h -j L,B`, elsewhere one
+status call per id), `adapter_pending_named` (the winner's sweep: Slurm `squeue -h -u $USER -n <name>
+-t PENDING -o '%i'`, run once from its compute node; exit 2 elsewhere) and `adapter_test_only`
+(`diag --queues`: Slurm `sbatch --test-only`, which submits nothing).
 
 Egress adapter: `egress_probe()` runs inside the probe job and returns the class plus the working proxy
 environment by testing `https://api.anthropic.com/`, `https://platform.claude.com/` and
@@ -461,7 +467,9 @@ One file rendered from the profile.
 Header directives: `--partition`, `--qos`, `--account`, `--time`, `--tmp`, `--requeue`,
 `--signal=B:TERM@120`, `-D <shared_state_dir>/<run>` (so `--output` resolves where intended); a
 successor in the always-on chain (below) is the same rendered file submitted with
-`--dependency=afterany:<predecessor>,singleton`.
+`--dependency=afterany:<predecessor>,singleton`. Since framework 18 a start that asks several queue
+groups at once renders one candidate per group, carrying the start's token and without `singleton`,
+and beside each the file that group's chain re-submits, with `singleton` (4.5).
 
 Fixed body, in order:
 
@@ -491,7 +499,14 @@ Fixed body, in order:
    ends non-zero for a trivial reason does not strand the chain.
 
 All persistence lives on shared storage; `/tmp` is treated as ephemeral; nothing runs on the login
-node beyond the one `sbatch`. The job's cleanup trap removes only its own node-local temp and its
+node beyond the one `sbatch`, with one exception since framework 18: starting a worker asks every
+queue group the site profile's `worker_queues` makes, all at once, one `sbatch` per group (at most four,
+two at Wayne State), beside at most one `squeue` and at most one `scancel`, and the first job to get a
+computer cancels the others from its compute node (greg, 2026-10-04 23:26Z: "So it seems obvious to me
+that workers on all possible queues should be launched and the first to get allocated should respond to
+the client to minimize wait time"; 4.5). That rule and its exception are this product's own etiquette;
+C&IT's own instruction is only "nothing container-related on `warrior` and nothing of ours under its
+`/tmp`". The job's cleanup trap removes only its own node-local temp and its
 `/dev/shm` directory; the framework deletes nothing outside its own run directories (`SECURITY.md`,
 the incident of 2026-09-28). Compared with the VS Code edition's `worker.sbatch.tpl`, what changes
 is the payload (`claude remote-control` in `tmux` instead of the inbox daemon) and the status files;
@@ -653,6 +668,104 @@ framework finds first (`consent_source: claude_config`, with `marker` as the sou
 The extension never types the answer into Claude Code; the job does, from the student's statement,
 once per prompt. `hpcworker claude consent` remains for a person at a terminal who wants to record the
 answer without the panel.
+
+### 4.5 A worker on several queues (framework 18)
+
+greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues should be
+launched and the first to get allocated should respond to the client to minimize wait time". Before
+it, a worker was one job on one queue (at Wayne State `reqp`/`requeue`, the lab lead's choice), and
+the queue report (`hpcworker queue report`) was to bring the numbers for a two-queue policy first; the
+policy came first, and the numbers are still not measured on the grid.
+
+**Groups.** The site profile's `worker_queues` lists `"PARTITION"` or `"PARTITION/QOS"` entries in
+order, at most four. Entries that share a QoS are one job over a partition list, which Slurm starts
+wherever it can first (`sbatch(1)` for Slurm 23.02, `--partition`: of a list, the partition offering
+the earliest start is used). One id, one `sbatch`, nothing to cancel and nothing new for any client, so a list of one QoS
+gives greg's decision to every client, old ones included. Wayne State runs Slurm 23.02.6, where
+`--qos` takes one value (a QoS list exists only from 24.11, and whether it pairs each partition with
+its own QoS is not yet measured), so entries with different QoS are separate jobs, one per QoS. Those
+jobs are the candidates of a race. PBS and LSF are excluded (more than one entry is refused there):
+`qsub` takes one destination, and `bsub`'s queue list is a choice made at submission, not a job that
+waits in several queues; their status adapters also ask per id.
+
+**Who races.** `connect --race` (the gate's `connect` with the seventh word `race`) and `worker start`
+at a terminal (unless `--no-race`, `--partition` or `--qos`). Every client released before its V13
+release types neither, so its Connect submits the first group only: at Wayne State `reqp/requeue`,
+framework 17's job header byte for byte, the same lines, the same queued file. A client sends `race`
+only to framework 18 or later.
+
+**The start** (`worker start`, inside its existing lock):
+
+1. One status call (one `squeue`) over `job.id`, `next.id`'s successor and every candidate of the last
+   start. A job alive is kept and nothing is submitted (running before pending; the candidate that
+   claimed the last start first, then `job.id`, the successor, and, while no candidate has claimed it,
+   the first still in line). The last start's other candidates still alive are strays and get one
+   `scancel`, unless that start is undecided and this one races too; a caller that does not race thus
+   always ends up following exactly one job. No answer: nothing is submitted, as before.
+2. The last start's files go (`race`, `claim.*`, `race.*.sbatch`, beside `stop`, `stop.done` and
+   `next.id` as before); the race file is written as `<token> open`, the token `<epoch>-<pid>`.
+3. Every file is rendered before the first `sbatch`: `race.<k>.sbatch` (the candidate: the token and
+   its group number, no `singleton`), `race.<k>.next.sbatch` (that group's chain file: no token,
+   `singleton`), and `job.sbatch`, a copy of the first group's chain file.
+4. One `sbatch` per group in group order. Before each after the first, a file test: a claim already
+   made ends the submitting (a candidate has a computer). Each id taken is added to the race file at
+   once; the first is written to `job.id` (through a temporary name and a rename, and not when the node
+   file is there). A refused group is noted and the rest go on; every group refused is `failed refused`,
+   exit 5, and no queued file.
+5. The race file is rewritten `<token> done 1:L 2:B`; the queued `status.json` is framework 10's with
+   `"candidates":"L,B"` last; one progress line; `race.log` records the start and how long its `sbatch`
+   calls took.
+6. A claim made before the last `sbatch` went out: one `scancel` of the other ids taken (the winner
+   cancelled only the ones the race file named when it looked).
+
+**The claim** (the job body, before its first write and before any trap). A candidate claims its start
+with `ln -s "$JOB" "claim.<token>"`: one atomic create (`symlink(2)` fails with `EEXIST` on a name that
+exists) whose target names the winner, readable by anyone with `readlink` and never followed. It is
+read back once, against a file system that is not atomic. A candidate leaves at once, writing nothing
+but Slurm's own job output, when the claim names another job, when the race file is missing or carries
+another token (a later start replaced it), or when that start is done and does not list it (a stray).
+A requeue of the winner finds its own claim and carries on, with no second cancel. There is no takeover
+round: a winner that dies between its claim and its first write leaves the run as a single job dying at
+start leaves it today, and a loser needs no scheduler call (`squeue` from a compute node is not yet
+measured; `sbatch` and `scancel` from one are).
+
+Why not `--dependency=singleton` for the race: as Slurm 23.02's `_find_singleton_job` reads (not
+measured at Wayne State), a singleton job is held while another job of the same name and user is
+running, or pending ahead of it, so of two singleton candidates of one worker only the first could ever
+start and nothing would race; the candidates are rendered without it (the fake scheduler's
+`FAKE_SINGLETON` plays that rule in `tests/test_race.py`). The chain
+keeps it: each group's next file has it, and the winner copies its group's next file over `job.sbatch`
+before its chain is armed, so the successor waits on its own predecessor, as in 4.2.
+
+**The winner, from its compute node.** After `job.id`, the node file and its first `status.json` are
+written (so a status call on the login node in between sees the node file and asks nothing), one
+`scancel` of the other candidates named in the race file, and a `race.log` line with the queue it won
+and the seconds since `submitted_at` (the queued file's, also for a candidate that was not the first:
+the student's wait counts from their own Connect). If the race file still read `open`, a second look
+120 s later cancels any candidate named since. Just before it queues its successor, one `squeue` for
+this account's pending jobs of the worker's name (`hpcw_<run>`), and one `scancel` of any but its own
+successor: a loser whose cancel did not take, or a candidate whose id never reached the race file
+because `worker start` was killed between the scheduler's answer and its write, would otherwise sit
+with a lower id in front of the successor's `singleton`. A stop file seen at start still settles the
+race before the job writes `stopped` and leaves.
+
+**Status and stop.** While every candidate is in line, the queued file's `candidates` makes the one
+status call a call over all of them (`squeue -j L,B`), read as one worker: running when one runs, else
+in line with the soonest future estimate, and the grid ended the request only when none is listed.
+`worker stop` adds every candidate to its one `squeue` and its one `scancel`; the race file keeps its
+one writer.
+
+**Requeue and the chain.** A winner on `reqp/requeue` that is preempted is requeued under the same id
+and waits in `reqp` alone (the other candidate was cancelled when it won); its chain successor, queued
+early with `afterany` and `singleton`, is a single job on the winner's queue and never races. Racing
+the successors too (phase 2) waits on open question 4, whether `afterany` fires at a requeue.
+
+What a client sees is additive: the `candidates` key in the queued file and in `worker status --json`,
+and the line `HPCW-STEP candidates L,B` under `--race` (`docs/V11_CONTRACT.md` 5.3, 9.1, 9.3 R1', 12
+and 13; `docs/V12_CONTRACT.md` for the gate's word). `hpcworker diag --queues` asks `sbatch --test-only`
+about each group (nothing submitted; a person at a terminal only) and is the first measurement to make:
+if one QoS is accepted on both of Wayne State's partitions, the list can name that QoS and the worker is
+one job with no race. The rest of what is not yet measured is in `OPEN_QUESTIONS.md`.
 
 ## 5. The Open OnDemand channels
 

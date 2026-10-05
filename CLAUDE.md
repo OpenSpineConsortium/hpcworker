@@ -103,15 +103,24 @@ name and identifier carry no university name.
   approved students (`docs/store/SUBMISSION.md`). No Edge, Firefox or Safari listing, no signed
   file, no download on the website or for students anywhere else. The Firefox build script stays
   because the code builds for it; nothing submits it.
-- **Grid etiquette.** Nothing runs on the login node beyond one `sbatch`, `squeue` or `scancel` per
-  action; no container command on the login node and nothing of ours under its `/tmp`; container
-  temp and cache on the compute node's local disk (`/tmp/$USER/...` with a cleanup trap; on Wayne
-  State `$TMPDIR` is NOT node-local, it points at CephFS, so never trust `$TMPDIR` blindly); IPC
+- **Grid etiquette.** Nothing runs on the login node beyond the scheduler calls an action needs: one
+  `sbatch`, `squeue` or `scancel` per action, with one exception since framework 18. Starting a
+  worker asks every queue group the site profile's `worker_queues` makes, all at once: one `sbatch`
+  per group of queues that share a QoS, at most four (two at Wayne State). Beside them there is at
+  most one `squeue`, to look for a worker already there, and at most one `scancel`, only for a stray
+  job of an earlier start or a candidate that got a computer before the last `sbatch` went out. The
+  first job to get a computer cancels the others from its compute node. greg, 2026-10-04 23:26Z: "So
+  it seems obvious to me that workers on all possible queues should be launched and the first to get
+  allocated should respond to the client to minimize wait time". No container command on the login
+  node and nothing of ours under its `/tmp`; container temp and cache on the compute node's local
+  disk (`/tmp/$USER/...` with a cleanup trap; on Wayne State `$TMPDIR` is NOT node-local, it points
+  at CephFS, so never trust `$TMPDIR` blindly); IPC
   under `/dev/shm`; scheduler polling never faster than 60 s from clients (the job writes
   `status.json`; clients read the file); every job has a wall time. Attribute these exactly when
   writing for anyone outside: only "nothing container-related on `warrior` and nothing of ours under
   its `/tmp`" is C&IT's instruction (2026-09-28); the 20-process login-node cap is Wayne State's
-  published policy; the 60 s floor and the wall-time rule are this product's own etiquette, taken
+  published policy; the one-call-per-action rule and its exception for a worker's start (greg,
+  2026-10-04 23:26Z), the 60 s floor and the wall-time rule are this product's own etiquette, taken
   from the strictest published rules in the sample and the licence of the VS Code edition (then
   Ashley's), and C&IT never stated them.
 - **The grid's approved list is the named-user ACL on the volume root, kept by

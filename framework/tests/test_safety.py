@@ -46,12 +46,13 @@ class SchedulerSilent(Base):
         rc, out, err = self.g.run("worker start")
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("submitted as job 40501234", out)
+        n = len(self.sbatches())   # framework 18: one per queue group (Wayne State's two, at a terminal)
         self.scheduler_down()
         rc, out, err = self.g.run("worker start")
         self.assertNotEqual(rc, 0, (out, err))
         self.assertIn("the scheduler did not answer", err)
         self.assertIn("nothing was submitted", err)
-        self.assertEqual(len(self.sbatches()), 1, "no second worker beside one still in line")
+        self.assertEqual(len(self.sbatches()), n, "no second worker beside one still in line")
         with open(os.path.join(self.g.rundir(), "job.id")) as fh:
             self.assertEqual(fh.read().strip(), "40501234", "job.id unchanged")
         self.assertFalse(os.path.exists(os.path.join(self.g.rundir(), ".start.lock")), "the lock is let go")
@@ -59,11 +60,13 @@ class SchedulerSilent(Base):
     def test_connect_says_refused_and_exits_5(self):
         rc, out, err = self.g.run("worker start")
         self.assertEqual(rc, 0, (out, err))
+        n = len(self.sbatches())
         self.scheduler_down()
-        rc, out, err = self.g.run("connect --name worker --login never")
-        self.assertEqual(rc, 5, (out, err))
-        self.assertEqual(out.strip().splitlines()[-1], "HPCW-STEP failed refused the scheduler did not answer, so nothing was submitted; try again in a minute")
-        self.assertEqual(len(self.sbatches()), 1)
+        for flags in ("", " --race"):
+            rc, out, err = self.g.run("connect --name worker --login never" + flags)
+            self.assertEqual(rc, 5, (out, err))
+            self.assertEqual(out.strip().splitlines()[-1], "HPCW-STEP failed refused the scheduler did not answer, so nothing was submitted; try again in a minute")
+            self.assertEqual(len(self.sbatches()), n)
 
     def test_stop_of_a_worker_in_line_cancels_even_when_squeue_fails(self):
         rc, out, err = self.g.run("worker start")
@@ -71,28 +74,43 @@ class SchedulerSilent(Base):
         self.scheduler_down()
         rc, out, err = self.g.run("worker stop")
         self.assertEqual(rc, 0, (out, err))
-        self.assertRegex(out, r"^worker worker: stopped \(it was still in line for a computer; cancelled at the scheduler: 40501234;")
-        self.assertIn("scancel 40501234", self.g.calls())
+        # framework 18: every candidate of the start (Wayne State's two queues, at a terminal), as they stand
+        self.assertRegex(out, r"^worker worker: stopped \(it was still in line for a computer; cancelled at the scheduler: 40501234 40501235;")
+        self.assertIn("scancel 40501234 40501235", self.g.calls())
         self.assertEqual(self.g.status()["state"], "stopped")
 
 
 class TwoStarts(Base):
-    def test_two_starts_at_once_submit_one_job(self):
+    def two_at_once(self, args):
         results = []
 
         def go():
-            results.append(self.g.run("worker start", FAKE_SBATCH_DELAY="2"))
+            results.append(self.g.run("worker start" + args, FAKE_SBATCH_DELAY="2"))
 
         threads = [threading.Thread(target=go) for _ in range(2)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+        return results
+
+    def test_two_starts_at_once_submit_one_job(self):
+        results = self.two_at_once(" --no-race")
         self.assertEqual(len(self.sbatches()), 1, (results, self.g.calls()))
         outs = "\n".join(r[1] + r[2] for r in results)
         self.assertIn("submitted as job 40501234", outs)
         self.assertTrue("already has job 40501234" in outs or "another start of worker worker is under way" in outs, outs)
         self.assertNotIn("cannot stat", outs, "no race on a shared temporary file")
+        self.assertFalse(os.path.exists(os.path.join(self.g.rundir(), ".start.lock")))
+
+    def test_two_raced_starts_at_once_make_one_start(self):
+        # framework 18: a terminal start asks Wayne State's two queues at once; two such starts at once still make one
+        # start's sbatches, one per queue group, and the other keeps them
+        results = self.two_at_once("")
+        self.assertEqual(len(self.sbatches()), 2, (results, self.g.calls()))
+        outs = "\n".join(r[1] + r[2] for r in results)
+        self.assertEqual(outs.count("submitted as job 40501234 (reqp/requeue) and job 40501235 (secp/secondary)"), 1, outs)
+        self.assertTrue("already has job 40501234" in outs or "another start of worker worker is under way" in outs, outs)
         self.assertFalse(os.path.exists(os.path.join(self.g.rundir(), ".start.lock")))
 
 

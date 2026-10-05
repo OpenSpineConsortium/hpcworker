@@ -20,11 +20,14 @@
 #   hpcworker discover [--full] [--save]                         phase-1 discovery on the login node (under 1 s of CPU; --full adds module avail and QoS)
 #   hpcworker probe [--show] [--wait MIN] [--partition P --qos Q] ten-minute probe job; writes probe.json
 #   hpcworker connect [--name N] [--profile SITE] [--consent INSTALL_ID] [--login auto|always|never]
-#                     [--permission-mode M] [--no-chain]
+#                     [--permission-mode M] [--no-chain] [--race]
 #                     the extension's one line (framework 10): set the account up if needed, record the
 #                     Remote Control answer, start the worker (or keep the one in line or running), and
-#                     sign in to Claude unless already signed in; "HPCW-STEP ..." lines say how far it got
-#   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain] [--wait [MIN]]
+#                     sign in to Claude unless already signed in; "HPCW-STEP ..." lines say how far it got;
+#                     --race (framework 18): the worker asks every queue group of the site's worker_queues at once
+#   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain] [--race|--no-race] [--wait [MIN]]
+#                     framework 18: at a terminal a worker asks every queue group of the site profile's worker_queues
+#                     at once and the first job to get a computer runs it (--no-race: the first group only)
 #   hpcworker worker status [--name N] [--json] [--details]       one line for a person ("Your worker is in line for a computer (6 min so far).")
 #   hpcworker worker watch [--name N] [--minutes MIN]            follow it until it is online (files every 5 s; the scheduler at most once a minute)
 #   hpcworker worker stop|list|log|restrict [--name N] [--lines N]   restrict: mark the workspace so no worker starts there
@@ -41,6 +44,8 @@
 #                     command is the gate (lib/browser_key.sh); check is read only, for the lab lead
 #   hpcworker gate    that line's forced command: SSH_ORIGINAL_COMMAND, eight fixed verbs, never a sign-in
 #   hpcworker diag [--json]                                      one line per check
+#   hpcworker diag --queues                                      framework 18, a person at a terminal: sbatch --test-only's answer
+#                                                                for each queue group a worker asks (it submits nothing)
 #   hpcworker queue report [--days N] [--limits]                 maintainers and lab leads: how long this account's jobs waited
 #                                                                per partition and QoS, from Eligible (or Submit where Eligible
 #                                                                is not a time; for a later attempt of a requeued job, the End
@@ -56,7 +61,11 @@
 # its own; the framework reads `claude auth status`, and two booleans Claude Code writes into its
 # .claude.json: remoteDialogSeen and the workspace's hasTrustDialogAccepted); no token ever goes on
 # a command line or into a job file; the login node gets one sbatch/squeue/scancel per action and
-# never a loop (connect: one squeue, one sbatch, one srun; worker status: one squeue, only while the
+# never a loop, with one exception since framework 18 (greg, 2026-10-04 23:26Z): starting a worker asks
+# every queue group the site profile's worker_queues makes, all at once, one sbatch per group (at most
+# four, two at Wayne State), beside at most one squeue and at most one scancel, and the first job to get
+# a computer cancels the others from its compute node (connect: one squeue, one sbatch per queue group,
+# one srun, at most one scancel; worker status: one squeue, only while the
 # worker is in line or, framework 13, ended naming a successor; worker watch: at most one a minute;
 # queue report, typed by a maintainer now and then: one sacct, and one sinfo with --limits);
 # state is read from files the job writes;
@@ -73,7 +82,7 @@
 # in (framework 17, greg's rule of 2026-10-04: no API key anywhere): no sitting picks another way to
 # sign in, and no worker runs on one. Versions are integers.
 set -uo pipefail
-VERSION=17
+VERSION=18
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -687,7 +696,9 @@ stop_worker_run() { # RUN_DIR NAME: the stop file, then a wait for the job's own
   # sent on a guess: measured on job 40501099, an scancel sent 15 s in overwrote a stop with "preempted".
   local rd="$1" name="$2" wait_s="${HPCW_STOP_WAIT_S:-45}" poll_s="${HPCW_STOP_POLL_S:-5}"
   local jid nid; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd")
-  local ids="$jid${jid:+${nid:+,}}$nid" waited=0 left=false already=false in_line=false
+  local ids="$jid${jid:+${nid:+,}}$nid" waited=0 left=false already=false in_line=false e
+  # framework 18: and every candidate of the last start, in the same squeue and the same scancel (the race file is left as it is)
+  if hpcw_race_read "$rd"; then for e in $(race_ids "$HPCW_RACE_ENT"); do case ",$ids," in *",$e,"*) ;; *) ids="$ids${ids:+,}$e";; esac; done; fi
   # a stop that went through before (stopped on record, its stop.done still there, no successor): no wait
   [ -e "$rd/stop.done" ] && [ -z "$nid" ] && [ "$(read_field "$rd/status.json" state 2>/dev/null)" = stopped ] && already=true
   # framework 10: a worker still in line for a computer (its queued file, no node file) has no job
@@ -762,13 +773,16 @@ session_title_for() { # NAME -> the session title: the profile's session_title (
   local base="${P_session_title:-}"; [ -n "$base" ] || base="Grid worker"
   if [ "$1" = worker ]; then printf '%s' "$base"; else printf '%s %s %s' "$base" "$MIDDOT" "$1"; fi
 }
-write_queued_status() { # RUN_DIR NAME JOB CHAIN(0|1): the queued file, right after the scheduler took the job, keys in the contract's order
-  local rd="$1" name="$2" job="$3" chain="$4" now title src consent=false tmp="$1/status.json.start.$$"
+write_queued_status() { # RUN_DIR NAME JOB CHAIN(0|1) [CANDIDATES]: the queued file, right after the scheduler took the job, keys in the contract's order
+  # framework 18: a start that asked several queues adds "candidates", the jobs it was given in group order ("L,B"; one
+  # id when the other groups were refused), last; a start of one queue writes the file as framework 17 did
+  local rd="$1" name="$2" job="$3" chain="$4" cands="${5:-}" now title src consent=false tmp="$1/status.json.start.$$" extra=""
   [ -e "$rd/node" ] && return 0   # the job already started and wrote its own (it writes the node file first)
   now=$(hpcw_now_iso); title=$(session_title_for "$name"); src=$(consent_source); [ "$src" != none ] && consent=true
-  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":"","state":"queued","message":"waiting for a computer","needs":"nothing","hint":%s,"submitted_at":%s,"updated_at":%s,"title":%s,"requested_name":%s,"renewal":false,"chain":%s,"next_job":"","consent":%s,"consent_source":%s,"scheduler_state":"","reason":"","expected_start":"","checked_at":""}\n' \
+  [ -n "$cands" ] && extra=",\"candidates\":$(json_str "$cands")"
+  printf '{"version":%s,"site":%s,"run":%s,"job":%s,"node":"","state":"queued","message":"waiting for a computer","needs":"nothing","hint":%s,"submitted_at":%s,"updated_at":%s,"title":%s,"requested_name":%s,"renewal":false,"chain":%s,"next_job":"","consent":%s,"consent_source":%s,"scheduler_state":"","reason":"","expected_start":"","checked_at":""%s}\n' \
     "$VERSION" "$(json_str "$P_site")" "$(json_str "$name")" "$(json_str "$job")" "$(json_str "$(hpcw_hint queued nothing)")" "$(json_str "$now")" "$(json_str "$now")" "$(json_str "$title")" "$(json_str "$title")" \
-    "$([ "$chain" = 1 ] && echo true || echo false)" "$consent" "$(json_str "$src")" > "$tmp" && mv -f "$tmp" "$rd/status.json"
+    "$([ "$chain" = 1 ] && echo true || echo false)" "$consent" "$(json_str "$src")" "$extra" > "$tmp" && mv -f "$tmp" "$rd/status.json"
 }
 SCHED_JSON=null
 status_refresh() { # RUN_DIR [FLOOR_S]: while the run is in line (status.json "queued", or none yet, and no node file), ONE scheduler call for its job.
@@ -792,7 +806,13 @@ status_refresh() { # RUN_DIR [FLOOR_S]: while the run is in line (status.json "q
       [ -n "$ce" ] && [ $(( $(date +%s) - ce )) -lt "$floor" ] && return 0
     fi
   fi
-  line=$(adapter_status_one "$jid" '%T|%r|%S|%N') || return 0
+  # framework 18: a worker asking several queues at once (the queued file's candidates) is asked about in ONE call
+  # over every candidate and read as one worker (race_line); one job alone, as before
+  local cands; cands=$(read_field "$sj" candidates 2>/dev/null)
+  case "$cands" in
+    *,*) line=$(race_line "$cands") || return 0;;
+    *) line=$(adapter_status_one "$jid" '%T|%r|%S|%N') || return 0;;
+  esac
   now=$(hpcw_now_iso)
   if [ -n "$line" ]; then
     # STATE|REASON|START|NODE, split without a here-string (bash 4.2 would put one in a temp file)
@@ -826,6 +846,32 @@ status_refresh() { # RUN_DIR [FLOOR_S]: while the run is in line (status.json "q
       fi
       ;;
   esac
+  return 0
+}
+race_line() { # CANDIDATES -> framework 18: STATE|REASON|START|NODE of the candidate that speaks for a worker asking several
+  # queues: one RUNNING (the first in group order); else one PENDING, the one Slurm expects to start soonest (a future
+  # estimate), else the first in group order; nothing when none of them is listed in line or running (the request
+  # ended). ONE scheduler call (adapter_status_set). Exit 2, and nothing is decided, when the scheduler did not
+  # answer, or answered with a state word this tool does not know and no candidate in line or running
+  local out line id rest st s e fp="" bp="" be="" run="" unk=0 now
+  out=$(adapter_status_set "$1" '%i|%T|%r|%S|%N' 2>/dev/null) || return 2
+  now=$(date +%s)
+  for id in ${1//,/ }; do
+    line=$(printf '%s\n' "$out" | grep -m1 "^$id|") || continue
+    rest=${line#*|}; st=${rest%%|*}
+    case "$(hpcw_normalise_state slurm "$st")" in
+      RUNNING) [ -n "$run" ] || run="$rest";;
+      PENDING)
+        [ -n "$fp" ] || fp="$rest"
+        s=${rest#*|}; s=${s#*|}; s=${s%%|*}
+        e=$(hpcw_iso_epoch "$(hpcw_local_time_utc "$s")")
+        if [ -n "$e" ] && [ "$e" -gt "$now" ] 2>/dev/null && { [ -z "$be" ] || [ "$e" -lt "$be" ]; }; then be="$e"; bp="$rest"; fi;;
+      UNKNOWN) unk=1;;
+    esac
+  done
+  if [ -n "$run" ]; then printf '%s\n' "$run"; return 0; fi
+  if [ -n "$fp" ]; then printf '%s\n' "${bp:-$fp}"; return 0; fi
+  [ "$unk" = 1 ] && return 2
   return 0
 }
 top_field() { # FILE KEY -> framework 13: the top-level plain string KEY of a JSON object file ("" when absent, not a
@@ -984,9 +1030,11 @@ watch_run() { # RUN_DIR NAME MINUTES SEEN [ASKED_AT]: follow a worker until it i
 }
 status_json() { # RUN_DIR NAME PREFIX: `worker status --json`'s one line (v 1, framework 10; framework 9's run, job,
   # next_job, status and connection kept as they were), with PREFIX (framework 11's watch: its event and final) after "v":1,
-  local rd="$1" name="$2" sj="$1/status.json" cj="$1/connection.json"
-  printf '{"v":1,%s"run":%s,"job":%s,"next_job":%s,"state_dir":%s,"status":%s,"connection":%s,"scheduler":%s,"line":%s}\n' "$3" "$(json_str "$name")" "$(json_str "$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" \
-    "$(json_str "$STATE_DIR")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)" "$SCHED_JSON" "$(json_str "$(status_line "$rd")")"
+  # framework 18: "candidates", last: the queued file's candidates while it says queued (a start that asked several queues), else ""
+  local rd="$1" name="$2" sj="$1/status.json" cj="$1/connection.json" cand=""
+  [ -s "$sj" ] && [ "$(read_field "$sj" state)" = queued ] && cand=$(read_field "$sj" candidates 2>/dev/null)
+  printf '{"v":1,%s"run":%s,"job":%s,"next_job":%s,"state_dir":%s,"status":%s,"connection":%s,"scheduler":%s,"line":%s,"candidates":%s}\n' "$3" "$(json_str "$name")" "$(json_str "$(tr -d '[:space:]' < "$rd/job.id" 2>/dev/null)")" "$(json_str "$(next_job_of "$rd")")" \
+    "$(json_str "$STATE_DIR")" "$([ -s "$sj" ] && cat "$sj" || echo null)" "$([ -s "$cj" ] && cat "$cj" || echo null)" "$SCHED_JSON" "$(json_str "$(status_line "$rd")")" "$(json_str "$cand")"
 }
 WATCH_KEYS="state needs job node environment_url session_url message scheduler_state reason expected_start next_job stop_reason"
 WSIG=""; WSTATE=""
@@ -1073,6 +1121,202 @@ run_link() { # STATUS_OR_CONNECTION_FILE -> the link to open, nothing when there
   [ -n "$u" ] && printf '%s' "$u"
   return 0
 }
+# ---- framework 18: a worker asked of every queue at once (greg, 2026-10-04 23:26Z) ------------------------
+# "So it seems obvious to me that workers on all possible queues should be launched and the first to get
+# allocated should respond to the client to minimize wait time." The site profile's worker_queues names the
+# queues ("PARTITION" or "PARTITION/QOS", in order) and worker_groups makes jobs of them: entries that share a
+# QoS are one job over a partition list, which Slurm starts wherever it can first (Slurm 23.02 takes one QoS per
+# job), and each QoS is a job of its own. A start that asks two groups or more (a racing start: connect --race,
+# or worker start at a terminal without --no-race) submits one candidate per group, each carrying the start's
+# token; the first candidate to get a computer claims the start (claim.<token>, made by ln -s, which only one can
+# make) and cancels the others from its compute node. A start that cannot follow that (connect without --race,
+# as every client before its V13 release types it) is given the first group only: one job, as before. The files
+# are described in lib/adapters/common.sh; docs/ARCHITECTURE.md ("A worker on several queues") says why.
+worker_groups() { # -> PARTITIONS|QOS per job, in the order of their first entry (nothing when worker_queues is empty)
+  local e p q i n=0; local -a keys=() parts=()
+  for e in ${HPCW_M_WQ:-}; do
+    case "$e" in */*) p="${e%%/*}"; q="${e#*/}";; *) p="$e"; q="";; esac
+    for ((i = 0; i < n; i++)); do [ "${keys[i]}" = "$q" ] && break; done
+    if [ "$i" -eq "$n" ]; then keys[n]="$q"; parts[n]="$p"; n=$((n + 1)); else parts[i]="${parts[i]},$p"; fi
+  done
+  for ((i = 0; i < n; i++)); do printf '%s|%s\n' "${parts[i]}" "${keys[i]}"; done
+}
+race_ids() { local e out=""; for e in $1; do out="$out${out:+ }${e#*:}"; done; printf '%s' "$out"; }   # "k:id k:id" -> "id id"
+race_claim_of() { [ -L "$1/claim.$2" ] && readlink "$1/claim.$2" 2>/dev/null; return 0; }   # RUN_DIR TOKEN -> the job that claimed that start
+race_undecided() { hpcw_race_read "$1" && [ ! -L "$1/claim.$HPCW_RACE_TOK" ]; }   # RUN_DIR -> 0 while a start's candidates are all still in line
+race_queue_of() { # RUN_DIR K -> "PARTITIONS/QOS" (or "PARTITIONS") of that group's job file
+  local f="$1/race.$2.sbatch" p q
+  p=$(grep -m1 -o -- '--partition=[^ ]*' "$f" 2>/dev/null | cut -d= -f2); q=$(grep -m1 -o -- '--qos=[^ ]*' "$f" 2>/dev/null | cut -d= -f2)
+  printf '%s%s' "${p:-?}" "${q:+/$q}"
+}
+race_write() { # RUN_DIR TOKEN open|done ENTRIES: the race file, through a temporary name and a rename (only worker start writes it)
+  { printf '%s %s%s\n' "$2" "$3" "${4:+ $4}" > "$1/race.part.$$" && mv -f "$1/race.part.$$" "$1/race"; } 2>/dev/null || { rm -f "$1/race.part.$$" 2>/dev/null; return 1; }
+}
+race_log_trim() { # RUN_DIR: race.log kept to its last 400 lines, as progress.log is
+  local f="$1/race.log" n
+  [ -s "$f" ] || return 0
+  n=$(wc -l < "$f" 2>/dev/null | tr -d ' '); [ "${n:-0}" -gt 400 ] 2>/dev/null || return 0
+  tail -n 399 "$f" > "$f.trim.$$" 2>/dev/null && mv -f "$f.trim.$$" "$f" || rm -f "$f.trim.$$"
+  return 0
+}
+first_sentence() { printf '%s\n' "$1" | tr -d '\r' | grep -v '^[[:space:]]*$' | head -1 | sed 's/[[:space:]]*$//' | cut -c1-300; }   # a scheduler's refusal, one line
+and_list() { # ITEM... -> "a", "a and b", "a, b and c"
+  local n=$# out="" i=0 x
+  for x in "$@"; do i=$((i + 1)); if [ $i = 1 ]; then out="$x"; elif [ $i = $n ]; then out="$out and $x"; else out="$out, $x"; fi; done
+  printf '%s' "$out"
+}
+START_KEPT=""; START_KEPT_LINE=""; START_ALIVE=""; START_STRAYS=""; START_UNDECIDED=0; START_OLD_TOK=""
+start_check() { # RUN_DIR RACING(0|1): what a start asks before it submits, ONE scheduler call; exit 2 when it did not answer.
+  # Framework 10 asked about job.id and next.id's successor; framework 18 adds every candidate of the last start.
+  # START_KEPT is the job that stays, and nothing is submitted: a RUNNING one before a PENDING one, and among
+  # them the candidate that claimed the last start, then job.id, then the successor, then (while no candidate
+  # has claimed it) the first candidate still in line, in group order. START_ALIVE: that start's candidates still
+  # in line or running, in group order. START_STRAYS: its other candidates still alive, which are cancelled (ONE
+  # scancel), unless that start is undecided and this one races too: then the first of them to get a computer
+  # settles it. With a job kept, the cancel is made here and the race file then names only the kept one; with
+  # none, the strays wait for the start's own one scancel after its sbatches.
+  local rd="$1" racing="$2" jid nid claim="" rids="" ids="" id st line w e st_out
+  local -A state=() said=()
+  local -a pref=()
+  START_KEPT=""; START_KEPT_LINE=""; START_ALIVE=""; START_STRAYS=""; START_UNDECIDED=0; START_OLD_TOK=""
+  jid=$(cat "$rd/job.id" 2>/dev/null | tr -d '[:space:]'); nid=$(next_job_of "$rd")
+  if hpcw_race_read "$rd"; then
+    START_OLD_TOK="$HPCW_RACE_TOK"; claim=$(race_claim_of "$rd" "$HPCW_RACE_TOK"); [ -n "$claim" ] || START_UNDECIDED=1
+    rids=$(race_ids "$HPCW_RACE_ENT")
+  fi
+  for id in $jid $nid $rids; do case ",$ids," in *",$id,"*) ;; *) ids="$ids${ids:+,}$id";; esac; done
+  [ -n "$ids" ] || return 0
+  st_out=$(adapter_status_many "$ids" 2>/dev/null) || return 2
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue; id=${line%%|*}; st=${line#*|}; st=${st%%|*}
+    [[ "$id" =~ ^[0-9A-Za-z._-]+$ ]] || continue
+    case "$st" in RUNNING|PENDING) state[$id]="$st"; said[$id]="${line#*|}";; esac
+  done < <(printf '%s\n' "$st_out")
+  [ -n "$claim" ] && pref+=("$claim")
+  [ -n "$jid" ] && pref+=("$jid")
+  [ -n "$nid" ] && pref+=("$nid")
+  [ -z "$claim" ] && for id in $rids; do pref+=("$id"); done
+  for w in RUNNING PENDING; do
+    for id in ${pref[@]+"${pref[@]}"}; do
+      [ "${state[$id]:-}" = "$w" ] && { START_KEPT="$id"; START_KEPT_LINE="${said[$id]}"; break 2; }
+    done
+  done
+  for id in $rids; do
+    [ -n "${state[$id]:-}" ] || continue
+    START_ALIVE="$START_ALIVE${START_ALIVE:+ }$id"
+    [ "$id" = "$START_KEPT" ] || [ "$id" = "$jid" ] || [ "$id" = "$nid" ] && continue
+    [ "$START_UNDECIDED" = 1 ] && [ "$racing" = 1 ] && continue
+    START_STRAYS="$START_STRAYS${START_STRAYS:+ }$id"
+  done
+  [ -n "$START_KEPT" ] || return 0
+  if [ -n "$START_STRAYS" ]; then
+    adapter_cancel $START_STRAYS
+    hpcw_race_log "$rd" "$HPCW_RACE_TOK stray $START_STRAYS cancelled by a start that kept job $START_KEPT"
+    local keep=""; for e in $HPCW_RACE_ENT; do [ "${e#*:}" = "$START_KEPT" ] && keep="$e"; done
+    race_write "$rd" "$HPCW_RACE_TOK" done "$keep"
+    START_ALIVE="$START_KEPT"; START_STRAYS=""
+  fi
+  # a candidate kept in place of a job.id the scheduler no longer has (the first queue's job ended, another is
+  # still in line): job.id and the queued file name it, so status, stop and the job's own first write follow it
+  if [ -n "$jid" ] && [ "$START_KEPT" != "$jid" ] && [ ! -e "$rd/node" ] && [ -z "${state[$jid]:-}" ] && case " $rids " in *" $START_KEPT "*) true;; *) false;; esac; then
+    { echo "$START_KEPT" > "$rd/job.id.part.$$" && mv -f "$rd/job.id.part.$$" "$rd/job.id"; } 2>/dev/null || rm -f "$rd/job.id.part.$$" 2>/dev/null
+    status_patch "$rd/status.json" "queued=$jid" job="$(json_str "$START_KEPT")" candidates="$(json_str "$(printf '%s' "$START_ALIVE" | tr ' ' ',')")" 2>/dev/null
+  fi
+  return 0
+}
+worker_race_start() { # framework 18, the racing half of `worker start`, run inside it with the start lock held (cmd_worker's
+  # locals: rd name kv groups chain tail open_line wait_min). Every candidate's job file is rendered first (race.<k>.sbatch,
+  # carrying the start's token; race.<k>.next.sbatch, what the winner's chain re-submits, with singleton), then one
+  # sbatch per group in group order, the race file naming each job as the scheduler takes it; a claim made before
+  # the last group's turn ends the sbatches there. job.id names the first job taken (unless one already has a computer)
+  local G=${#groups[@]} tok k gp gq e id first="" acc="" cands="" refused="" first_no="" logq="" kq out t0 t1 ms="" W lost="" waits=""
+  tok="$(date +%s)-$$"
+  if ! race_write "$rd" "$tok" open ""; then
+    start_unlock "$rd"
+    [ "$CONNECT_MODE" = 1 ] && step_fail refused "could not write the race file in $rd; nothing was submitted" 5
+    die "could not write $rd/race; nothing submitted"
+  fi
+  for ((k = 1; k <= G; k++)); do
+    gp="${groups[k-1]%%|*}"; gq="${groups[k-1]#*|}"
+    if ! { hpcw_render "$JOBS/worker.sbatch.tpl" "${kv[@]}" PARTITION="$gp" QOS="$gq" RACE="$tok" RACE_K="$k" > "$rd/race.$k.sbatch.part.$$" \
+           && mv -f "$rd/race.$k.sbatch.part.$$" "$rd/race.$k.sbatch" \
+           && hpcw_render "$JOBS/worker.sbatch.tpl" "${kv[@]}" PARTITION="$gp" QOS="$gq" > "$rd/race.$k.next.sbatch.part.$$" \
+           && mv -f "$rd/race.$k.next.sbatch.part.$$" "$rd/race.$k.next.sbatch"; }; then
+      rm -f "$rd"/race.*.part.$$; race_write "$rd" "$tok" done ""; start_unlock "$rd"; die "could not render the job (see the message above)"
+    fi
+  done
+  # job.sbatch: the first group's own, until a winner puts its group's in its place (the chain re-submits job.sbatch)
+  if ! { cp -f "$rd/race.1.next.sbatch" "$rd/job.sbatch.part.$$" && mv -f "$rd/job.sbatch.part.$$" "$rd/job.sbatch"; }; then
+    rm -f "$rd/job.sbatch.part.$$"; race_write "$rd" "$tok" done ""; start_unlock "$rd"; die "could not write $rd/job.sbatch"
+  fi
+  rm -f "$rd/job.key" "$rd/node"
+  printf '%s\n' "${kv[@]}" "RACE=$tok" > "$rd/params"
+  t0=$(date +%s%N 2>/dev/null)
+  for ((k = 1; k <= G; k++)); do
+    if [ "$k" -gt 1 ] && [ -L "$rd/claim.$tok" ]; then break; fi
+    kq=$(race_queue_of "$rd" "$k")
+    if out=$(unset HPCW_GATE HPCW_GATE_SLOT SSH_ORIGINAL_COMMAND; cd "$rd" && adapter_submit "$rd/race.$k.sbatch" -D "$rd" 2>&1); then
+      acc="$acc${acc:+ }$k:$out"; cands="$cands${cands:+,}$out"
+      race_write "$rd" "$tok" open "$acc"
+      if [ -z "$first" ]; then
+        first="$out"
+        [ -e "$rd/node" ] || { { echo "$out" > "$rd/job.id.part.$$" && mv -f "$rd/job.id.part.$$" "$rd/job.id"; } 2>/dev/null || rm -f "$rd/job.id.part.$$"; }
+      fi
+      logq="$logq${logq:+, }$k:$out $kq"
+    else
+      out=$(first_sentence "$out"); [ -n "$out" ] || out="no reason given"
+      [ -n "$first_no" ] || first_no="$out"
+      refused="$refused${refused:+; }$kq was refused: $out"
+      logq="$logq${logq:+, }$k:refused $kq"
+    fi
+  done
+  t1=$(date +%s%N 2>/dev/null)
+  [[ "$t0" =~ ^[0-9]+$ ]] && [[ "$t1" =~ ^[0-9]+$ ]] && ms=$(( (t1 - t0) / 1000000 ))
+  if [ -z "$acc" ]; then
+    race_write "$rd" "$tok" done ""
+    start_unlock "$rd"
+    race_log_trim "$rd"; hpcw_race_log "$rd" "$tok start asked $G: $logq; every queue refused"
+    [ "$CONNECT_MODE" = 1 ] && step_fail refused "$first_no" 5
+    die "the scheduler refused every queue: $refused"
+  fi
+  race_write "$rd" "$tok" done "$acc"
+  # framework 10's queued file, with framework 18's candidates (the jobs taken, in group order)
+  write_queued_status "$rd" "$name" "$first" "$chain" "$cands"
+  start_unlock "$rd"
+  hpcw_progress_trim "$rd"; local seen; seen=$(log_lines "$rd")
+  hpcw_progress "$rd" "Asked the grid for a computer"
+  race_log_trim "$rd"
+  hpcw_race_log "$rd" "$tok start asked $G: $logq${ms:+ ($ms ms)}"
+  # one scancel at most: a candidate that got a computer before the last sbatch went out settled only the jobs the
+  # race file named when it looked, so the others taken since go here, with the strays of an earlier start that
+  # no job was kept beside (start_check)
+  W=$(race_claim_of "$rd" "$tok")
+  if [ -n "$W" ]; then for e in $acc; do id=${e#*:}; [ "$id" = "$W" ] || lost="$lost${lost:+ }$id"; done; fi
+  if [ -n "$lost$START_STRAYS" ]; then
+    # shellcheck disable=SC2086
+    adapter_cancel $lost $START_STRAYS
+    [ -n "$lost" ] && hpcw_race_log "$rd" "$tok start: job $W had a computer before the last sbatch went out; cancelled $lost (lost)"
+    [ -n "$START_STRAYS" ] && hpcw_race_log "$rd" "$START_OLD_TOK stray $START_STRAYS cancelled by the start $tok"
+  fi
+  local -a descs=() qs=(); local n=0
+  for e in $acc; do n=$((n + 1)); kq=$(race_queue_of "$rd" "${e%%:*}"); descs+=("job ${e#*:} ($kq)"); qs+=("$kq"); done
+  if [ "$CONNECT_MODE" = 1 ]; then
+    [ "$n" -ge 2 ] && [ -z "$W" ] && say "HPCW-STEP candidates $cands"
+    say "HPCW-STEP queued ${W:-$first} new $rd"; return 0
+  fi
+  # the 10.0.0 extension reads "worker N submitted as job ID" (V11_CONTRACT.md 19): the first job keeps that place
+  local line="worker $name submitted as $(and_list "${descs[@]}")"
+  if [ "$n" -ge 2 ]; then
+    line="$line, asking $n queues for a computer at once: the first to get one runs the worker and the other$([ "$n" -gt 2 ] && echo 's are' || echo ' is') cancelled ($tail)"
+  else
+    line="$line ($tail)"
+  fi
+  [ -n "$refused" ] && line="$line; $refused; the worker waits in $(and_list "${qs[@]}") only"
+  [ -n "$W" ] && line="$line; job $W already has a computer"
+  say "$line. $open_line"
+  if [ "$wait_min" -gt 0 ]; then watch_run "$rd" "$name" "$wait_min" "$seen" "$(date +%s)"; return $?; fi
+  say "watch it with: hpcworker worker watch --name $name   (reads $rd/status.json; asks the scheduler at most once a minute while it is in line)"
+}
 # framework 10: one `worker start` at a time per worker. mkdir is atomic on every file system the state
 # directory may live on (NFS, Lustre, CephFS); a lock older than five minutes belongs to a start that was
 # killed, and goes. The lock holds only the scheduler check, the render and the submit (seconds).
@@ -1093,7 +1337,7 @@ cmd_worker() {
   load_profile
   local sub="${1:-list}"; shift || true
   local name="worker" hours="$P_worker_defaults_hours" cpus="$P_worker_defaults_cpus" mem="$P_worker_defaults_mem" part="" qos="" pm="$P_worker_defaults_permission_mode" cap="$P_worker_defaults_capacity" as_json=0 lines=60 requeue="" chain=1
-  local wait_min=0 details=0 minutes=30 floor=0
+  local wait_min=0 details=0 minutes=30 floor=0 race_flag=""
   while [ $# -gt 0 ]; do case "$1" in
     --poll-floor) floor="${2:-}"; [[ "$floor" =~ ^[0-9]{1,5}$ ]] || die "--poll-floor must be a whole number of seconds"; shift 2;;
     --name) name="$2"; shift 2;; --hours) hours="$2"; shift 2;; --cpus) cpus="$2"; shift 2;; --mem) mem="$2"; shift 2;;
@@ -1101,6 +1345,9 @@ cmd_worker() {
     --requeue) requeue=1; shift;; --no-requeue) requeue=0; shift;; --no-chain) chain=0; shift;; --chain) chain=1; shift;; --json) as_json=1; shift;; --lines) lines="$2"; shift 2;;
     --wait) if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then wait_min="$2"; shift 2; else wait_min=30; shift; fi;;
     --details) details=1; shift;; --minutes) minutes="$2"; shift 2;;
+    # framework 18: --race asks every queue group the site profile names, at once (connect passes it for a client
+    # that follows the candidates); --no-race the first group only. Unsaid: a terminal races, connect does not
+    --race) race_flag=1; shift;; --no-race) race_flag=0; shift;;
     *) die "worker: unknown option $1";; esac; done
   [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "worker name must be letters, digits, _ or -"
   [[ "$minutes" =~ ^[0-9]+$ ]] || die "--minutes must be a whole number"
@@ -1117,33 +1364,41 @@ cmd_worker() {
         written) say "wrote $WORKSPACES/$name/CLAUDE.md, the guide Claude Code reads there (yours to edit; hpcworker never replaces it)";;
         skipped:*) say "note: no workspace guide written (${guide#skipped: }); the worker starts without it";;
       esac; fi
-      # the running link and its queued successor, in ONE scheduler call: either alive means nothing to
-      # submit. The sentence below is the one the 10.0.0 extension reads; under connect the job is
-      # named in HPCW-STEP queued <job> kept, the running one when there is one
+      # the running link, its queued successor and (framework 18) every candidate of the last start, in ONE
+      # scheduler call: any of them alive means nothing to submit. The sentence below is the one the 10.0.0
+      # extension reads; under connect the job is named in HPCW-STEP queued <job> kept, the running one when there is one
       # one check-and-submit at a time for this worker (two connects, or a terminal and the panel, at
       # once would otherwise both see no job and both submit); a lock left by a killed start goes after 5 min.
       # The job ids are read inside the lock: a start that waited for it sees the job the other submitted
-      start_lock "$rd" || { [ "$CONNECT_MODE" = 1 ] && step_fail refused "another start of this worker is under way; nothing was submitted" 5; die "another start of worker $name is under way (its lock is $rd/.start.lock); nothing submitted"; }
-      local jid nid ids line kept="" kept_line="" st_out st_rc; jid=$(cat "$rd/job.id" 2>/dev/null || true); nid=$(next_job_of "$rd"); ids="$jid${jid:+${nid:+,}}$nid"
-      if [ -n "$ids" ]; then
-        # a scheduler that did not answer is not "no job alive": nothing is submitted beside a worker that may still be in line
-        st_out=$(adapter_status_many "$ids" 2>/dev/null); st_rc=$?
-        if [ "$st_rc" != 0 ]; then
-          start_unlock "$rd"
-          [ "$CONNECT_MODE" = 1 ] && step_fail refused "the scheduler did not answer, so nothing was submitted; try again in a minute" 5
-          die "the scheduler did not answer about job(s) $ids, so nothing was submitted (a second worker could start beside the first otherwise); try again in a minute"
-        fi
-        while IFS= read -r line; do [ -n "$line" ] || continue; case "$(echo "$line" | cut -d'|' -f2)" in
-          RUNNING) kept="${line%%|*}"; kept_line="$line"; break;;
-          PENDING) [ -n "$kept" ] || { kept="${line%%|*}"; kept_line="$line"; };; esac; done < <(printf '%s\n' "$st_out")
+      # framework 18: the queue groups this start asks (worker_groups); --partition or --qos names one job as before
+      local -a groups=(); local g racing=0
+      if [ -z "$part" ] && [ -z "$qos" ]; then while IFS= read -r g; do [ -n "$g" ] && groups+=("$g"); done < <(worker_groups); fi
+      if [ ${#groups[@]} -ge 2 ]; then
+        if [ "$race_flag" = 1 ] || { [ "$CONNECT_MODE" != 1 ] && [ "$race_flag" != 0 ]; }; then racing=1; else groups=("${groups[0]}"); fi
       fi
-      [ -n "$kept" ] && start_unlock "$rd"
+      start_lock "$rd" || { [ "$CONNECT_MODE" = 1 ] && step_fail refused "another start of this worker is under way; nothing was submitted" 5; die "another start of worker $name is under way (its lock is $rd/.start.lock); nothing submitted"; }
+      if ! start_check "$rd" "$racing"; then
+        # a scheduler that did not answer is not "no job alive": nothing is submitted beside a worker that may still be in line
+        start_unlock "$rd"
+        [ "$CONNECT_MODE" = 1 ] && step_fail refused "the scheduler did not answer, so nothing was submitted; try again in a minute" 5
+        die "the scheduler did not answer about job(s) $(cat "$rd/job.id" 2>/dev/null | tr -d '[:space:]')${HPCW_RACE_ENT:+ and the candidates of the last start}, so nothing was submitted (a second worker could start beside the first otherwise); try again in a minute"
+      fi
+      local kept="$START_KEPT"
       if [ -n "$kept" ]; then
-        if [ "$CONNECT_MODE" = 1 ]; then say "HPCW-STEP queued $kept kept $rd"; else say "worker $name already has job $kept ($(fmt_job_state "${kept_line#*|}")); nothing submitted"; fi
+        start_unlock "$rd"
+        local -a alive=($START_ALIVE)
+        if [ "$CONNECT_MODE" = 1 ]; then
+          [ "$race_flag" = 1 ] && [ "$START_UNDECIDED" = 1 ] && [ ${#alive[@]} -ge 2 ] && say "HPCW-STEP candidates $(printf '%s' "$START_ALIVE" | tr ' ' ',')"
+          say "HPCW-STEP queued $kept kept $rd"
+        else
+          # the 10.0.0 extension's sentence, alone (its automatic start reads it once a minute); the candidates are in --details
+          say "worker $name already has job $kept ($(fmt_job_state "$START_KEPT_LINE")); nothing submitted"
+        fi
         if [ "$wait_min" -gt 0 ] && [ "$CONNECT_MODE" != 1 ]; then watch_run "$rd" "$name" "$wait_min" "$(log_lines "$rd")" "$(date +%s)"; return $?; fi
         return 0
       fi
-      rm -f "$rd/stop" "$rd/stop.done" "$rd/next.id"
+      # framework 18: the last start's race file, its claim and its candidates' job files go with the stop files
+      rm -f "$rd/stop" "$rd/stop.done" "$rd/next.id" "$rd/race" "$rd"/claim.* "$rd"/race.*.sbatch
       # first-time notice, in plain words (the report's disclosure text, shortened for a terminal)
       if [ ! -e "$rd/.notice-shown" ] && [ "$CONNECT_MODE" != 1 ]; then
         cat <<'EOT'
@@ -1160,6 +1415,13 @@ EOT
       # numbered directory, so a chain keeps the version it started on until the next worker start
       local kv=(RUN="$name" HOURS="$hours" CPUS="$cpus" MEM="$mem" PERMISSION_MODE="$pm" CAPACITY="$cap" HPCW_HOME="$HPCW_HOME" HPCW_CODE="$SRC_ROOT" CHAIN="$chain")
       [ -n "$part" ] && kv+=(PARTITION="$part"); [ -n "$qos" ] && kv+=(QOS="$qos"); [ -n "$requeue" ] && kv+=(REQUEUE="$requeue")
+      # one group: its partitions and its QoS (none, when its entries name none), one job as before
+      [ ${#groups[@]} = 1 ] && kv+=(PARTITION="${groups[0]%%|*}" QOS="${groups[0]#*|}")
+      local tail="${hours} h$([ "$chain" = 1 ] && echo ', always on: each job queues the next before it ends')"
+      local open_line="When it runs, open the link in 'hpcworker worker status --name $name' (or claude.ai/code, or Code in the Claude app)."
+      if [ "$racing" = 1 ]; then
+        worker_race_start; return $?
+      fi
       # framework 11: filled by bash from the profile awk read (lib/profile_sh.sh), afresh at every start, as
       # profile.py render filled it; a job.key an earlier framework 11 build left beside it is not read
       hpcw_render "$JOBS/worker.sbatch.tpl" "${kv[@]}" > "$rd/job.sbatch.part.$$" || { rm -f "$rd/job.sbatch.part.$$"; start_unlock "$rd"; die "could not render the job (see the message above)"; }
@@ -1180,8 +1442,14 @@ EOT
       start_unlock "$rd"
       hpcw_progress_trim "$rd"; local seen; seen=$(log_lines "$rd")
       hpcw_progress "$rd" "Asked the grid for a computer"
+      # framework 18: candidates of an earlier start still alive with no job kept beside them: this start's one scancel
+      if [ -n "$START_STRAYS" ]; then
+        # shellcheck disable=SC2086
+        adapter_cancel $START_STRAYS; hpcw_race_log "$rd" "$START_OLD_TOK stray $START_STRAYS cancelled by a start of one queue (job $out)"
+      fi
       if [ "$CONNECT_MODE" = 1 ]; then say "HPCW-STEP queued $out new $rd"; return 0; fi
-      say "worker $name submitted as job $out ($(grep -m1 -o -- '--partition=[^ ]*' "$rd/job.sbatch" | cut -d= -f2)${qos:+/$qos}, ${hours} h$([ "$chain" = 1 ] && echo ', always on: each job queues the next before it ends')). When it runs, open the link in 'hpcworker worker status --name $name' (or claude.ai/code, or Code in the Claude app)."
+      # the partition (a list, for a group of queues that share a QoS) as job.sbatch names it; the QoS when a person named one
+      say "worker $name submitted as job $out ($(grep -m1 -o -- '--partition=[^ ]*' "$rd/job.sbatch" | cut -d= -f2)${qos:+/$qos}, $tail). $open_line"
       if [ "$wait_min" -gt 0 ]; then watch_run "$rd" "$name" "$wait_min" "$seen" "$(date +%s)"; return $?; fi
       say "watch it with: hpcworker worker watch --name $name   (reads $rd/status.json; asks the scheduler at most once a minute while it is in line)";;
     stop)
@@ -1230,12 +1498,18 @@ EOT
       # framework 10's times and the scheduler's word while it was in line
       local tt; for tt in submitted_at got_computer_at online_at ends_at; do local tv; tv=$(read_field "$sj" "$tt"); [ -n "$tv" ] && say "  $tt: $tv"; done
       if [ "$st" = queued ]; then local xs; xs=$(read_field "$sj" expected_start); say "  scheduler: $(read_field "$sj" scheduler_state) reason $(read_field "$sj" reason) expected start ${xs:-unknown} (asked at $(read_field "$sj" checked_at))"; fi
+      # framework 18: while a start's candidates are all in line, each of them; and how the last start that raced ended
+      if [ "$st" = queued ] && race_undecided "$rd"; then local ce; for ce in $HPCW_RACE_ENT; do say "  candidate: job ${ce#*:} on $(race_queue_of "$rd" "${ce%%:*}")"; done; fi
+      local won; won=$(grep ' won ' "$rd/race.log" 2>/dev/null | tail -1); [ -n "$won" ] && say "  last race: $won"
       [ -n "$(read_field "$sj" stop_reason)" ] && say "  stop reason: $(read_field "$sj" stop_reason)"
       [ "$age" -gt 120 ] && case "$st" in stopped|queued|error) ;; preempted) [ -n "$nid" ] && say "  (this job ended; job $nid is queued to take over)" || say "  (this job ended with no successor; hpcworker worker start --name $name starts it again)";; *) say "  (no heartbeat for ${age}s: the job may have ended; ${nid:+job $nid is queued to take over; }hpcworker worker start --name $name starts it again if not)";; esac
       return 0;;
     list)
       local d any=0; for d in "$STATE_DIR"/*/; do [ -s "$d/job.id" ] || continue; local n; n=$(basename "$d"); [ "$n" = probe ] && continue; any=1
-        local sj="$d/status.json" nid; nid=$(next_job_of "$d"); if [ -s "$sj" ]; then printf '%-16s job %-10s %-12s %s (%ss ago)%s\n' "$n" "$(cat "$d/job.id")" "$(read_field "$sj" state)" "$(read_field "$sj" node)" "$(( $(date +%s) - $(stat -c %Y "$sj") ))" "${nid:+  next $nid}"; else printf '%-16s job %-10s %s\n' "$n" "$(cat "$d/job.id")" "no status yet"; fi; done
+        local sj="$d/status.json" nid more=""; nid=$(next_job_of "$d")
+        # framework 18: a worker whose start's candidates are all still in line says how many other queues it asks
+        if [ "$(read_field "$sj" state 2>/dev/null)" = queued ] && race_undecided "$d"; then local nc; nc=$(set -- $HPCW_RACE_ENT; echo $#); [ "$nc" -gt 1 ] && more=" (+$((nc - 1)) queue$([ "$nc" -gt 2 ] && echo s))"; fi
+        if [ -s "$sj" ]; then printf '%-16s job %-10s %-12s %s (%ss ago)%s\n' "$n" "$(cat "$d/job.id")$more" "$(read_field "$sj" state)" "$(read_field "$sj" node)" "$(( $(date +%s) - $(stat -c %Y "$sj") ))" "${nid:+  next $nid}"; else printf '%-16s job %-10s %s\n' "$n" "$(cat "$d/job.id")" "no status yet"; fi; done
       [ $any = 1 ] || say "no workers yet (hpcworker worker start)";;
     log)
       [ -d "$rd" ] || die "no worker named $name"
@@ -1522,7 +1796,9 @@ EOT
 # lib/relay.sh, and the keepalive "HPCW-LOGIN: still waiting" at least every 20 s from "HPCW-STEP
 # signin" until the sitting ends. Connect ends within 14 minutes: at most 600 s for the sign-in
 # computer, then a code budget of what is left of 840 s (at least two). One scheduler call to check the
-# worker, one sbatch when it submits, one srun for the sitting. For the sitting's whole length the login
+# worker, one sbatch per queue group when it submits (framework 18, with --race: at most four; one
+# without), at most one scancel (a stray of an earlier start, or a candidate beaten before the last sbatch
+# went out), one srun for the sitting. For the sitting's whole length the login
 # node runs srun and bash only: this process and its side of the pipe, waiting; the relay (bash
 # builtins: warrior's banner bans python3, which relayed it in the first framework 10 build); and the
 # relay's ticker, with one `sleep 1` at a time. When the portal's shell is cut, all of them are in the
@@ -1632,12 +1908,14 @@ connect_signin() { # START_EPOCH: the plain sitting on a compute node, relayed w
 }
 cmd_connect() {
   CONNECT_MODE=1
-  local t0 name=worker site="" cid="" login=auto pm="" chain=1
+  local t0 name=worker site="" cid="" login=auto pm="" chain=1 race=0
   t0=$(date +%s)
   while [ $# -gt 0 ]; do case "$1" in
     --name|--profile|--consent|--login|--permission-mode) [ $# -ge 2 ] || connect_usage "$1 needs a value"
       case "$1" in --name) name="$2";; --profile) site="$2";; --consent) cid="$2";; --login) login="$2";; --permission-mode) pm="$2";; esac; shift 2;;
     --no-chain) chain=0; shift;;
+    # framework 18: the client follows a worker that asks every queue at once (HPCW-STEP candidates, V11_CONTRACT.md 5.3)
+    --race) race=1; shift;;
     *) connect_usage "unknown option $1";;
   esac; done
   [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || connect_usage "the worker name must be 1 to 32 letters, digits, _ or -"
@@ -1667,8 +1945,11 @@ cmd_connect() {
   fi
   # what the account's last word on the Claude sign-in was, read before this start replaces the run's status.json with its queued file
   local last=""; [ "$login" = auto ] && last=$(connect_last_login)
-  # 5. the worker (worker start prints "HPCW-STEP queued <job> new|kept <run dir>", or fails with refused)
+  # 5. the worker (worker start prints "HPCW-STEP queued <job> new|kept <run dir>", or fails with refused; framework
+  # 18, with --race: "HPCW-STEP candidates <id>,<id>..." right before it when the worker asks several queues at once).
+  # Without --race a site's several queues are asked as its first group only, one job, as every client before V13 expects
   local -a wa=(start --name "$name"); [ -n "$pm" ] && wa+=(--permission-mode "$pm"); [ "$chain" = 0 ] && wa+=(--no-chain)
+  if [ "$race" = 1 ]; then wa+=(--race); else wa+=(--no-race); fi
   cmd_worker "${wa[@]}"
   # 6. the sign-in. signin.pending tells a job of this worker that waits for the sign-in that one is
   # under way (its 20-minute abandon counts from here, and from the end of the sitting)
@@ -1903,7 +2184,13 @@ cmd_login_setup() {
 # For the maintainer and the lab leads, never the panel (no contract line, no student words). greg,
 # 2026-10-04 15:19Z: an allocation on the requeue partition "takes like forever", primary or secondary may
 # be faster, and a requeue job could stay in line as a second option; before the worker gets a two-queue
-# policy he wants the numbers from the grid itself. So: ONE sacct over the account's own history, and with
+# policy he wants the numbers from the grid itself. greg, 2026-10-04 23:26Z, decided that policy before the
+# numbers: "workers on all possible queues should be launched and the first to get allocated should respond
+# to the client to minimize wait time" (framework 18, worker_queues). The report now says which jobs lost a
+# start's race (cancelled in line because another queue's candidate got a computer first) and which won, from
+# the runs' race.log files: a lost candidate is counted under "lost race" instead of "gave up", and is still a
+# wait cut short (censored at its time in line), never a finished one. How long each queue makes a worker wait
+# under the race is not yet measured. So: ONE sacct over the account's own history, and with
 # --limits ONE sinfo, both bounded by timeout; two queries on the login node for a report a person types
 # now and then is within the one-scheduler-command-per-action etiquette as discover and diag keep it (the
 # 60 s floor binds clients that poll, and nothing here polls). The report itself writes nothing; load_profile,
@@ -1941,7 +2228,8 @@ cmd_login_setup() {
 #   HPCW_Q_MODE=epoch   stdin: one time a line -> its seconds since 1970-01-01T00:00:00 UTC, an empty line for
 #                       anything that is not a time (the tests check the formula so)
 #   HPCW_Q_MODE=report  stdin: adapter_history's records -> the report; HPCW_Q_USER, HPCW_Q_DAYS and HPCW_Q_QUERY
-#                       fill the header, HPCW_Q_NOW (date +%s, taken just before sacct ran) is now and, less
+#                       fill the header; HPCW_Q_LOST and HPCW_Q_WON (framework 18) are the job ids race.log names as
+#                       cancelled in a race and as its winners, space-separated; HPCW_Q_NOW (date +%s, taken just before sacct ran) is now and, less
 #                       HPCW_Q_DAYS days, the start of the window. Exit 4 and nothing printed when no line was a
 #                       record and one was shaped like a record of another form; exit 3 when HPCW_Q_NOW is not a number
 # shellcheck disable=SC2016
@@ -2002,6 +2290,8 @@ BEGIN {
   if (mode != "epoch" && mode != "report") { bad = 1; exit 3 }
   if (mode == "report" && (now !~ /^[0-9]+$/ || days !~ /^[0-9]+$/)) { bad = 1; exit 3 }
   now += 0; days += 0; since = now - days * 86400   # sacct -S now-Ndays, from the moment just before it ran
+  n = split(ENVIRON["HPCW_Q_LOST"], qids, " "); for (i = 1; i <= n; i++) LOST[qids[i]] = 1
+  n = split(ENVIRON["HPCW_Q_WON"], qids, " "); for (i = 1; i <= n; i++) WON[qids[i]] = 1
 }
 mode == "epoch" { print epoch($0); next }
 {
@@ -2030,7 +2320,9 @@ mode == "epoch" { print epoch($0); next }
   if (st ~ /^PENDING/) pend[k]++
   if (st ~ /^PREEMPTED/) pre[k]++
   if (st ~ /^REQUEUE/) req[k]++   # REQUEUED, and REQUEUE_HOLD or REQUEUE_FED where a site has them
-  if (st ~ /^CANCELLED/) { if (ran) canc[k]++; else gave[k]++ }
+  # framework 18: a candidate a race cancelled in line lost it (the job of another queue got a computer first): not a job given up
+  if (st ~ /^CANCELLED/) { if (ran) canc[k]++; else if (id in LOST) lost[k]++; else gave[k]++ }
+  if ((id in WON) && !((k, id) in wonseen)) { wonseen[k, id] = 1; won[k]++ }
   if (st ~ /^TIMEOUT/) tout[k]++
   # Submit is a time on every record sacct keeps; when it is not, sacct printed a form this awk does not read, and
   # the record is counted by its state and said, never quietly read as a job that did not start
@@ -2076,10 +2368,11 @@ END {
   print "one record per attempt of a requeued job; a wait runs from Eligible (Submit where Eligible is not a time; for a later attempt, the End of the one before) to Start; times in UTC"
   print "a job not started (pending, or cancelled in line) counts as waiting at least as long as it had: median and p90 are Kaplan-Meier estimates, \">T\" where one lies beyond T, the longest wait seen"
   print "gave up: cancelled before it started; cancelled: after it started; median run: End minus Start of the attempts not preempted or requeued"
+  print "lost race: a candidate of a worker start that asked several queues, cancelled in line because another got a computer first; won race: the one that did (from race.log)"
   print "not listed by sacct: a job held, or waiting on a dependency (the successor a worker queued), since it was submitted; pending is State PENDING, a job held later among them"
   print ""
-  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %7s  %9s  %8s  %9s  %9s  %s\n"
-  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "gave up", "preempted", "requeued", "cancelled", "timed out", "median run"
+  fmt = "%-9s  %-10s  %7s  %-11s  %-11s  %-11s  %7s  %7s  %9s  %8s  %9s  %8s  %9s  %9s  %s\n"
+  printf fmt, "partition", "qos", "started", "median wait", "p90 wait", "max wait", "pending", "gave up", "lost race", "won race", "preempted", "requeued", "cancelled", "timed out", "median run"
   for (i = 2; i <= nk; i++) { t = keys[i]; for (j = i - 1; j >= 1 && keys[j] > t; j--) keys[j + 1] = keys[j]; keys[j + 1] = t }
   best = ""; nopen = 0
   for (i = 1; i <= nk; i++) {
@@ -2096,7 +2389,7 @@ END {
     }
     n = nr[k] + 0
     if (n > 0) { for (j = 1; j <= n; j++) a[j] = run[k, j]; ssort(a, n); rm = dur(median(a, n)) }
-    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, gave[k] + 0, pre[k] + 0, req[k] + 0, canc[k] + 0, tout[k] + 0, rm
+    printf fmt, kp[1], kp[2], nw[k] + 0, md, p9, mx, pend[k] + 0, gave[k] + 0, lost[k] + 0, won[k] + 0, pre[k] + 0, req[k] + 0, canc[k] + 0, tout[k] + 0, rm
   }
   print ""
   if (early > 0) printf "%d record%s of jobs that started before the window began (running when it opened): %s wait and run left out\n", early, (early > 1 ? "s" : ""), (early > 1 ? "their" : "its")
@@ -2134,7 +2427,15 @@ cmd_queue() {
     2) die "the queue report reads Slurm's history (sacct); this site's scheduler is $P_scheduler";;
     *) die "the scheduler's history could not be read: $(printf '%s' "$hist" | tr '\n' ' ' | sed 's/[[:space:]]*$//')";;
   esac
-  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_NOW="$now" HPCW_Q_QUERY="$(adapter_history_query "$days")" LC_ALL=C awk "$HPCW_QUEUE_AWK"
+  # framework 18: the jobs the runs' race.log files name as lost (cancelled in a race, or swept as strays) and as winners; files only
+  local races lost won
+  races=$(cat "$STATE_DIR"/*/race.log 2>/dev/null | LC_ALL=C awk '
+    { if (match($0, / cancelled [0-9 ]+ \(lost\)/)) { n = split(substr($0, RSTART + 11, RLENGTH - 18), a, " "); for (i = 1; i <= n; i++) print "L " a[i] }
+      if (match($0, / stray [0-9 ]+ cancelled/)) { n = split(substr($0, RSTART + 7, RLENGTH - 17), a, " "); for (i = 1; i <= n; i++) print "L " a[i] }
+      if (match($0, / won [0-9]+:[0-9]+ /)) { s = substr($0, RSTART + 5, RLENGTH - 6); sub(/^[0-9]+:/, "", s); print "W " s } }')
+  lost=$(printf '%s\n' "$races" | sed -n 's/^L //p' | tr '\n' ' '); won=$(printf '%s\n' "$races" | sed -n 's/^W //p' | tr '\n' ' ')
+  printf '%s\n' "$hist" | HPCW_Q_MODE=report HPCW_Q_USER="$USER" HPCW_Q_DAYS="$days" HPCW_Q_NOW="$now" HPCW_Q_QUERY="$(adapter_history_query "$days")" \
+    HPCW_Q_LOST="$lost" HPCW_Q_WON="$won" LC_ALL=C awk "$HPCW_QUEUE_AWK"
   case $? in
     0) ;;
     4) die "none of the lines sacct printed is a record this report reads (ten fields between '|'); the first shaped like one: $(printf '%s\n' "$hist" | grep -m1 '|' | tr -d '\r')";;
@@ -2177,7 +2478,10 @@ emit() { # ID OK(true|false) WARN(true|false) SKIP(true|false) DETAIL
 diag_partitions() { # the profile's partitions against sinfo's names
   # one line per partition and node state since adapter_partitions carries both (queue report --limits): each name once
   local parts; parts=$(adapter_partitions | cut -d'|' -f1 | sed 's/\*$//' | sort -u | tr '\n' ' ')
-  local want="$P_partition_cpu $P_partition_cpu_batch $P_partitions_gpu" bad="" p; for p in $want; do case " $parts " in *" $p "*) ;; *) bad="$bad $p";; esac; done
+  local want="$P_partition_cpu $P_partition_cpu_batch $P_partitions_gpu" bad="" p e
+  # framework 18: and the partitions of worker_queues that the fields above do not already name
+  for e in ${HPCW_M_WQ:-}; do p=${e%%/*}; case " $want " in *" $p "*) ;; *) want="$want $p";; esac; done
+  for p in $want; do case " $parts " in *" $p "*) ;; *) bad="$bad $p";; esac; done
   if [ -z "$bad" ]; then emit hpcw.partitions true false false "profile partitions exist: $want"; else emit hpcw.partitions false false false "not in sinfo:$bad (have: $parts)"; fi
 }
 diag_slurm_in_worker() { # Slurm inside the worker's container (framework 9): what the newest worker heartbeat says about it
@@ -2210,7 +2514,30 @@ diag_browser_key() { # framework 11: the browser key's line (its date and the co
     else emit hpcw.key-copy true false false "$root and every folder above it can be changed by their owners alone"; fi
   fi
 }
+diag_queues() { # framework 18, `diag --queues`: what Slurm says of a worker's job on each queue group a start asks, without
+  # submitting it (sbatch --test-only, one per group: at most four, a person at a terminal typing it now and then)
+  hpcw_signin_barred && die "diag --queues is for a person at a terminal"
+  load_profile
+  [ "$P_scheduler" = slurm ] || die "diag --queues asks Slurm (sbatch --test-only); this site's scheduler is $P_scheduler"
+  local -a groups=(); local g p q out rc hours="${P_worker_defaults_hours:-8}"
+  [[ "$hours" =~ ^[0-9]+$ ]] || hours=8
+  while IFS= read -r g; do [ -n "$g" ] && groups+=("$g"); done < <(worker_groups)
+  if [ ${#groups[@]} = 0 ]; then
+    p="${P_partition_cpu_batch:-$P_partition_cpu}"
+    if [ -n "$P_partition_cpu_batch" ]; then q="$P_qos_batch"; else q="$P_qos_cpu"; fi
+    groups=("$p|$q"); say "worker_queues is empty in the site profile: a worker is one job on $p${q:+/$q}"
+  else
+    say "a worker asks ${#groups[@]} queue group$([ ${#groups[@]} -gt 1 ] && echo s) at once (worker_queues: ${HPCW_M_WQ:-})"
+  fi
+  for g in "${groups[@]}"; do
+    p="${g%%|*}"; q="${g#*|}"
+    out=$(adapter_test_only "$p" "$q" "$hours"); rc=$?
+    say "$p${q:+/$q} for ${hours} h: $(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')$([ "$rc" = 0 ] || echo " (sbatch --test-only exit $rc)")"
+  done
+  return 0
+}
 cmd_diag() {
+  [ "${1:-}" = "--queues" ] && { diag_queues; return $?; }
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
   local miss="" f; for f in bin/hpcworker lib/profile.py lib/profile.awk lib/profile_sh.sh lib/login_plain.sh lib/relay.sh lib/browser_key.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
@@ -2231,8 +2558,11 @@ cmd_diag() {
     if [ "$n" -ge "$cap" ]; then emit hpcw.login-node false false false "$n processes of yours on $(hostname -s); the site's cap is $cap"; elif [ "$n" -ge $((cap * 3 / 4)) ]; then emit hpcw.login-node true true false "$n processes of yours on $(hostname -s) (cap $cap)"; else emit hpcw.login-node true false false "$n processes of yours on $(hostname -s) (cap $cap)"; fi; fi
   if [ "$fam" = slurm ]; then
     diag_partitions
-    local q; q=$(adapter_my_qos); local qb="" x; for x in $P_qos_cpu $P_qos_batch; do case " $q " in *" $x "*) ;; *) qb="$qb $x";; esac; done
-    if [ -z "$q" ]; then emit hpcw.qos true true false "QoS list not readable (sacctmgr); profile wants $P_qos_cpu/$P_qos_batch"; elif [ -z "$qb" ]; then emit hpcw.qos true false false "QoS available: $q"; else emit hpcw.qos false false false "QoS not on your account:$qb (have: $q)"; fi
+    local q; q=$(adapter_my_qos); local qb="" x qw="$P_qos_cpu $P_qos_batch" e
+    # framework 18: and the QoS of worker_queues that the two fields do not already name
+    for e in ${HPCW_M_WQ:-}; do case "$e" in */*) x=${e#*/}; case " $qw " in *" $x "*) ;; *) qw="$qw $x";; esac;; esac; done
+    for x in $qw; do case " $q " in *" $x "*) ;; *) qb="$qb $x";; esac; done
+    if [ -z "$q" ]; then emit hpcw.qos true true false "QoS list not readable (sacctmgr); profile wants $(printf '%s' "$qw" | sed 's/^ *//; s/  */\//g')"; elif [ -z "$qb" ]; then emit hpcw.qos true false false "QoS available: $q"; else emit hpcw.qos false false false "QoS not on your account:$qb (have: $q)"; fi
   fi
   if [ -n "$P_runtime_bin" ] && [ -x "$P_runtime_bin" ]; then emit hpcw.runtime true false false "$P_runtime_bin"
   elif [ -n "$P_runtime_module" ] && hpcw_detect_runtime | grep -q "\"$P_runtime_module\""; then emit hpcw.runtime true false false "module $P_runtime_module listed (binary not on this node's PATH; the probe checks the compute node)"

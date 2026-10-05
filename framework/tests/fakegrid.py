@@ -4,7 +4,13 @@ a fake scheduler on PATH: sbatch, squeue, scancel and scontrol that keep their j
 srun that plays the plain sign-in sitting (lib/login_plain.sh's lines) instead of allocating anything,
 and a sacct and sinfo that print what a test plants (FAKE_SACCT, FAKE_SINFO) for `queue report` and diag.
 Every call is logged in <sched>/calls; sacct's and sinfo's also in <sched>/argv, each argument apart.
-Nothing here reaches a real scheduler or the network."""
+Framework 18: sbatch also records each job it takes in <sched>/submitted (ID|NAME|PARTITION|QOS|DEPENDENCY, from
+the job file's #SBATCH lines and its own command line), so a test sees which queue each candidate asked; it
+refuses one partition when FAKE_SBATCH_REFUSE_PARTITION names it, runs FAKE_SBATCH_HOOK once an id is given
+(a candidate that gets a computer before the next sbatch), answers --test-only, and with FAKE_SINGLETON=1 holds
+a job with singleton behind an earlier one of its name (Reason Dependency), as Slurm 23.02 does; squeue
+answers -u/-n/-t (the winner's sweep) and the %i|%T|%r|%S|%N form; scancel forgets no id that
+FAKE_SCANCEL_IGNORE names ("all" for every one: a cancel that was lost). Nothing here reaches a real scheduler or the network."""
 import json
 import os
 import shutil
@@ -27,8 +33,34 @@ d="${FAKE_SCHED_DIR:?}"
 echo "sbatch $*" >> "$d/calls"
 sleep "${FAKE_SBATCH_DELAY:-0}"
 if [ -s "$d/sbatch_fail" ]; then cat "$d/sbatch_fail" >&2; exit 1; fi
+# what the job asks: the job file's #SBATCH lines, then the command line (the job file is the last word)
+script="" dep="" part="" qos="" testonly=0 prev=""
+for a in "$@"; do
+  case "$prev" in -p) part="$a";; -q) qos="$a";; esac
+  case "$a" in --test-only) testonly=1;; --dependency=*) dep="${a#--dependency=}";; esac
+  prev="$a"; script="$a"
+done
+if [ "$testonly" = 1 ]; then echo "sbatch: Job 99999999 to start at 2026-10-05T10:00:00 using 2 processors on nodes asx1 in partition ${part%%,*}" >&2; exit 0; fi
+name=""; fdep=""
+if [ -f "$script" ]; then
+  name=$(sed -n 's/^#SBATCH --job-name=//p' "$script" | head -1); part=$(sed -n 's/^#SBATCH --partition=//p' "$script" | head -1)
+  qos=$(sed -n 's/^#SBATCH --qos=//p' "$script" | head -1); fdep=$(sed -n 's/^#SBATCH --dependency=//p' "$script" | head -1)
+fi
+[ -n "$dep" ] || dep="$fdep"
+if [ -n "${FAKE_SBATCH_REFUSE_PARTITION:-}" ] && [ "$part" = "$FAKE_SBATCH_REFUSE_PARTITION" ]; then
+  echo "sbatch: error: Batch job submission failed: Invalid qos specification" >&2; exit 1
+fi
 n=$(cat "$d/next_id" 2>/dev/null || echo 40501234); echo $((n + 1)) > "$d/next_id"
-echo "$n|PENDING|${FAKE_REASON:-Priority}|N/A|" >> "$d/jobs"
+reason="${FAKE_REASON:-Priority}"
+# Slurm 23.02's singleton: held while any other job of the name is running or was submitted before it and is still in line
+if [ "${FAKE_SINGLETON:-0}" = 1 ] && [ -n "$name" ] && case ",$dep," in *,singleton,*) true;; *) false;; esac; then
+  while IFS='|' read -r oid oname _; do
+    [ "$oname" = "$name" ] && grep -q -E "^$oid\|(PENDING|RUNNING)\|" "$d/jobs" 2>/dev/null && reason=Dependency
+  done < <(cat "$d/submitted" 2>/dev/null)
+fi
+echo "$n|PENDING|$reason|N/A|" >> "$d/jobs"
+echo "$n|$name|$part|$qos|$dep" >> "$d/submitted"
+[ -n "${FAKE_SBATCH_HOOK:-}" ] && FAKE_ID="$n" bash -c "$FAKE_SBATCH_HOOK"
 echo "$n"
 """
 
@@ -37,8 +69,17 @@ FAKE_SQUEUE = r"""#!/bin/bash
 d="${FAKE_SCHED_DIR:?}"
 echo "squeue $*" >> "$d/calls"
 if [ -e "$d/squeue_fail" ]; then echo "slurm_load_jobs error: Socket timed out on send/recv operation" >&2; exit 1; fi
-ids=""; fmt="%i|%T|%N"
-while [ $# -gt 0 ]; do case "$1" in -j) ids="$2"; shift 2;; -o) fmt="$2"; shift 2;; *) shift;; esac; done
+ids=""; fmt="%i|%T|%N"; jname=""; states=""
+while [ $# -gt 0 ]; do case "$1" in -j) ids="$2"; shift 2;; -o) fmt="$2"; shift 2;; -n) jname="$2"; shift 2;; -t) states="$2"; shift 2;; -u) shift 2;; *) shift;; esac; done
+# -n NAME [-t STATES]: this account's jobs of that name (framework 18's sweep), from what sbatch recorded
+if [ -n "$jname" ] && [ -z "$ids" ]; then
+  while IFS='|' read -r jid st re sta no; do
+    grep -q -E "^$jid\|$jname\|" "$d/submitted" 2>/dev/null || continue
+    [ -z "$states" ] || case ",$states," in *",$st,"*) ;; *) continue;; esac
+    case "$fmt" in '%i') echo "$jid";; *) echo "$jid|$st|$no";; esac
+  done < <(cat "$d/jobs" 2>/dev/null)
+  exit 0
+fi
 found=0
 for id in ${ids//,/ }; do
   line=$(grep "^$id|" "$d/jobs" 2>/dev/null | tail -1); [ -n "$line" ] || continue
@@ -46,6 +87,7 @@ for id in ${ids//,/ }; do
   found=1
   case "$fmt" in
     '%i|%T|%N') echo "$jid|$st|$no";;
+    '%i|%T|%r|%S|%N') echo "$jid|$st|$re|$sta|$no";;
     '%T|%r|%S|%N') echo "$st|$re|$sta|$no";;
     '%T|%N') echo "$st|$no";;
     *) echo "$st";;
@@ -58,7 +100,11 @@ exit 0
 FAKE_SCANCEL = r"""#!/bin/bash
 d="${FAKE_SCHED_DIR:?}"
 echo "scancel $*" >> "$d/calls"
-for id in "$@"; do [ -s "$d/jobs" ] && grep -v "^$id|" "$d/jobs" > "$d/jobs.tmp"; mv -f "$d/jobs.tmp" "$d/jobs" 2>/dev/null; done
+# FAKE_SCANCEL_IGNORE: ids (space-separated, or "all") whose cancel does not take, as a lost scancel
+for id in "$@"; do
+  case " ${FAKE_SCANCEL_IGNORE:-} " in *" all "*|*" $id "*) continue;; esac
+  [ -s "$d/jobs" ] && grep -v "^$id|" "$d/jobs" > "$d/jobs.tmp"; mv -f "$d/jobs.tmp" "$d/jobs" 2>/dev/null
+done
 exit 0
 """
 
@@ -270,6 +316,29 @@ class Grid(object):
             return []
         with open(p) as fh:
             return fh.read().splitlines()
+
+    def submitted(self):
+        """framework 18: what sbatch took, in order: [{"id", "name", "partition", "qos", "dependency"}]"""
+        p = os.path.join(self.sched, "submitted")
+        if not os.path.exists(p):
+            return []
+        with open(p) as fh:
+            rows = [l.split("|") for l in fh.read().splitlines()]
+        return [dict(zip(("id", "name", "partition", "qos", "dependency"), r)) for r in rows]
+
+    def start(self, jid, node="node01"):
+        """the scheduler gives job JID a computer: RUNNING on NODE. With singleton, refused (AssertionError) while
+        another job of its name is running or was submitted before it and is still in line, as Slurm 23.02 holds it"""
+        jid = str(jid)
+        sub = dict((r["id"], r) for r in self.submitted())
+        jobs = self.jobs()
+        mine = sub.get(jid)
+        if mine and "singleton" in mine["dependency"].split(","):
+            for line in jobs:
+                oid, st = line.split("|")[:2]
+                if oid != jid and sub.get(oid, {}).get("name") == mine["name"] and (st == "RUNNING" or (st == "PENDING" and int(oid) < int(jid))):
+                    raise AssertionError("singleton holds job %s behind job %s (%s)" % (jid, oid, st))
+        self.jobs([("%s|RUNNING|None|N/A|%s" % (jid, node)) if l.split("|")[0] == jid else l for l in jobs])
 
     def rundir(self, name="worker"):
         return os.path.join(self.state, name)

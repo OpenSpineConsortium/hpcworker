@@ -30,6 +30,7 @@ EXPECTED = {
     "install --shared": [],
     "claude consent --record": [],
     "connect, first": [],
+    "connect --race": [],
     "worker status --json": [],
     "worker restrict": [],
     "worker stop": [],
@@ -44,6 +45,7 @@ EXPECTED = {
     "gate read": [],
     "gate watch": [],
     "gate connect": [],
+    "gate connect race": [],
     "gate restrict": [],
     "gate stop": [],
     "gate forget": [],
@@ -92,6 +94,7 @@ class BannedPrograms(unittest.TestCase):
         def run(label, args, stdin_text=None, source=None, **extra):
             for p in (cls.py_log, cls.banned_log):
                 open(p, "w").close()
+            n0 = len(cls.g.calls())
             env = cls.g.env(HPCW_PYTHON=G.posix(cls.wrap), HPCW_REAL_PYTHON=cls.real_py, HPCW_PY_LOG=G.posix(cls.py_log),
                             HPCW_BANNED_LOG=G.posix(cls.banned_log), **extra)
             if source:
@@ -105,13 +108,16 @@ class BannedPrograms(unittest.TestCase):
                 py = [l.split(" ", 1) for l in fh.read().splitlines()]
             with open(cls.banned_log) as fh:
                 banned = fh.read().splitlines()
-            cls.ran[label] = {"rc": rc, "out": out, "err": err, "wall": wall, "python": [(int(ms), what) for ms, what in py], "banned": banned}
+            cls.ran[label] = {"rc": rc, "out": out, "err": err, "wall": wall, "python": [(int(ms), what) for ms, what in py], "banned": banned,
+                              "calls": cls.g.calls()[n0:]}
 
         g = cls.g
         run("install --shared", "install --shared '%s' --profile testsite --no-shell-path" % g.shared_spelled)
         run("claude consent --record", "claude consent --record %s" % G.INSTALL_ID)
         run("connect, first", "connect --profile testsite --consent %s --login always" % G.INSTALL_ID, stdin_text=G.CODE + "\n",
             HPCW_KEEPALIVE_S="1", FAKE_SRUN_DELAY="3")
+        # framework 18: a start that asks every queue group at once (Wayne State's two), on a fresh worker
+        run("connect --race", "connect --profile testsite --name raced --race --login never")
         run("worker status --json", "worker status --name worker --json")
         run("worker restrict", "worker restrict --name other")
         run("worker stop", "worker stop --name worker")
@@ -149,6 +155,7 @@ class BannedPrograms(unittest.TestCase):
         run("gate read", "gate", SSH_ORIGINAL_COMMAND="read worker status.json", SSH_CONNECTION=SESSION)
         run("gate watch", "gate", SSH_ORIGINAL_COMMAND="watch w2", SSH_CONNECTION=SESSION)
         run("gate connect", "gate", SSH_ORIGINAL_COMMAND="connect worker testsite %s default chain" % G.INSTALL_ID, SSH_CONNECTION=SESSION)
+        run("gate connect race", "gate", SSH_ORIGINAL_COMMAND="connect raced2 testsite %s default chain race" % G.INSTALL_ID, SSH_CONNECTION=SESSION)
         run("gate restrict", "gate", SSH_ORIGINAL_COMMAND="restrict worker", SSH_CONNECTION=SESSION)
         run("gate stop", "gate", SSH_ORIGINAL_COMMAND="stop worker", SSH_CONNECTION=SESSION)
         if BROWSER_KEY_OK:
@@ -183,6 +190,19 @@ class BannedPrograms(unittest.TestCase):
         self.assertIn("HPCW-STEP done", self.ran["gate connect"]["out"])
         self.assertNotIn("signin", self.ran["gate connect"]["out"])
         self.assertIn("worker worker: stopped", self.ran["gate stop"]["out"])
+
+    def test_a_raced_start_makes_the_calls_the_readme_says(self):
+        # framework 18 (greg, 2026-10-04 23:26Z): one sbatch per queue group (two at Wayne State), at most one squeue (none
+        # on a fresh worker) and at most one scancel; README.md "The login node"'s row for connect
+        for label in ("connect --race", "gate connect race"):
+            kinds = [c.split()[0] for c in self.ran[label]["calls"]]
+            self.assertEqual(kinds.count("sbatch"), 2, (label, kinds))
+            self.assertLessEqual(kinds.count("squeue"), 1, (label, kinds))
+            self.assertEqual(kinds.count("scancel"), 0, (label, kinds))
+            self.assertEqual(set(kinds), {"sbatch"}, (label, kinds))
+            self.assertIn("HPCW-STEP candidates ", self.ran[label]["out"])
+        # a connect that does not race is framework 17's: one sbatch (the first queue group), then the sitting's srun
+        self.assertEqual([c.split()[0] for c in self.ran["connect, first"]["calls"]], ["sbatch", "srun"])
 
     def test_nothing_banned_is_looked_for(self):
         for label, r in self.ran.items():

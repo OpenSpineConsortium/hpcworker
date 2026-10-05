@@ -214,6 +214,25 @@ class Render(RenderBase):
         p = subprocess.run([bash, "-n"], input=text.encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(p.returncode, 0, p.stderr.decode("utf-8", "replace"))
 
+    def test_a_race_candidate_claims_before_anything(self):
+        # framework 18: a candidate of a start that asks several queues is valid bash, carries no singleton, and claims the
+        # start (race_claim) right after it enters the run directory: before its first write there and before any trap
+        text = self.rendered(PARTITION="secp", QOS="secondary", RACE="1759620000-4321", RACE_K="2")
+        bash = os.environ.get("HPCW_BASH") or "bash"
+        p = subprocess.run([bash, "-n"], input=text.encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(p.returncode, 0, p.stderr.decode("utf-8", "replace"))
+        self.assertNotIn("--dependency", text)
+        self.assertIn("\nRACE='1759620000-4321'; RACE_K=2\n", text)
+        body = text[text.index("\nset -uo pipefail\n"):]
+        claim = body.index('\nif [ -n "$RACE" ] && ! race_claim; then')
+        self.assertLess(body.index('\ncd "$RUN_DIR" || exit 1\n'), claim)
+        for first in ('> "job.id.part.$JOB"', '> node', "\ntrap ", "write_status starting", "> status.json"):
+            self.assertLess(claim, body.index(first), first)
+        # a successor's file (RACE empty) skips the claim and keeps singleton
+        nxt = self.rendered(PARTITION="secp", QOS="secondary")
+        self.assertIn("\nRACE=''; RACE_K=0\n", nxt)
+        self.assertIn("#SBATCH --dependency=singleton", nxt)
+
     def test_resume_launcher_drops_capacity(self):
         # write_launcher exactly as rendered: a fresh start passes --name, --capacity and
         # --permission-mode; a resume (--continue) leaves --capacity out, because Claude Code 2.1.283

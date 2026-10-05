@@ -117,7 +117,10 @@ click of the icon after the approval re-checks.
    Claude if it is not (step 3), shows *Where your work
    goes* and takes the student's statement about the worker's workspace once (this also records the
    student's answer to Claude Code's one-time Remote Control question, so no `y` is ever typed by
-   hand), submits the worker on `reqp` through the portal shell (one `sbatch`, then the shell closes)
+   hand), submits the worker on `reqp` through the portal shell (one `sbatch`, then the shell closes;
+   from framework 18, a client that asks for it gets `reqp/requeue` and `secp/secondary` at once, two
+   `sbatch`, and the first job to get a computer runs the worker and cancels the other, greg's decision
+   of 2026-10-04 23:26Z; no extension released so far asks for it)
    and waits for Claude Code to connect, reading `status.json` every ten seconds for the first two
    minutes and once a minute after that (file reads touch no scheduler).
 3. **Sign in to Claude once, when the panel asks.** The extension starts a short sign-in sitting on
@@ -164,8 +167,15 @@ that guideline, a third-party AI bot. The request to C&IT presents it as what it
   C&IT's instruction of 2026-09-28, given after a container build left files under `/tmp` there, and
   the framework enforces it: container commands run only inside jobs, with temp and cache on the
   compute node's local disk.
-- Nothing else runs on `warrior` beyond one `sbatch`, `squeue` or `scancel` per action, plus, once,
-  the `srun` client of the student's own sign-in sitting for as long as the sitting lasts (up to ten
+- Nothing else runs on `warrior` beyond one `sbatch`, `squeue` or `scancel` per action, with one
+  exception since framework 18: starting a worker asks every queue group the site profile's
+  `worker_queues` makes, all at once, one `sbatch` per group (two at Wayne State: `reqp/requeue` and
+  `secp/secondary`), beside at most one `squeue` and at most one `scancel`, and the first job to get a
+  computer cancels the other from its compute node (greg, 2026-10-04 23:26Z: "So it seems obvious to me
+  that workers on all possible queues should be launched and the first to get allocated should respond
+  to the client to minimize wait time"). The rule and its exception are this product's own etiquette,
+  not an instruction of C&IT's, and C&IT have not been asked about two pending jobs per worker. Beside
+  them, once, the `srun` client of the student's own sign-in sitting for as long as the sitting lasts (up to ten
   minutes waiting for a node and ten for the paste, the framework's own limits; the panel closes the
   connection after fifteen minutes whatever happened), which is exactly what the student would
   run by typing the command in the portal's own shell. That follows the published grid policy (no

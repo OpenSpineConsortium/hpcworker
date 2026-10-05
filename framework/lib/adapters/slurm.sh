@@ -168,3 +168,33 @@ adapter_history() { # DAYS -> JobID|Partition|QOS|Submit|Eligible|Start|End|Stat
   printf '%s\n' "$out"
 }
 adapter_my_qos() { command -v sacctmgr >/dev/null 2>&1 && timeout 10 sacctmgr -n -P show assoc where user="$USER" format=qos 2>/dev/null | tr ',' '\n' | sort -u | tr '\n' ' '; }
+
+# framework 18: the candidates of one start in one squeue (worker status while a worker asks several queues).
+# Exit 2, nothing printed, when squeue did not answer; "Invalid job id" is an answer (none listed)
+adapter_status_set() { # ID,ID... [FORMAT] -> squeue's own line per id it still lists (default %i|%T|%r|%S|%N)
+  local ids="$1" fmt="${2:-%i|%T|%r|%S|%N}" out rc
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 20 squeue -h -j "$ids" -o "$fmt" 2>&1); rc=$?; else out=$(LC_ALL=C squeue -h -j "$ids" -o "$fmt" 2>&1); rc=$?; fi
+  [ $rc = 124 ] && return 2
+  if [ $rc != 0 ]; then case "$out" in *"Invalid job id"*) return 0;; *) return 2;; esac; fi
+  # the job lines only: squeue's own warnings start with "squeue:" or "slurm_", a site's notice with neither an id nor a "|"
+  printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+\|' || true
+  return 0
+}
+# framework 18, run by the job that won a start, from its compute node: the account's jobs of that name still in
+# line (a candidate a lost cancel left behind), ONE squeue
+adapter_pending_named() { # NAME -> one id per line
+  local out rc
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 20 squeue -h -u "$USER" -n "$1" -t PENDING -o '%i' 2>&1); rc=$?; else out=$(LC_ALL=C squeue -h -u "$USER" -n "$1" -t PENDING -o '%i' 2>&1); rc=$?; fi
+  [ $rc = 0 ] || return 2
+  printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+$' || true
+  return 0
+}
+# framework 18, `hpcworker diag --queues` (a person at a terminal): what Slurm says of a worker's job on a queue group
+# without submitting it. ONE sbatch --test-only, which answers on stderr ("Job N to start at ... in partition P")
+adapter_test_only() { # PARTITIONS QOS HOURS
+  local out rc
+  if command -v timeout >/dev/null 2>&1; then out=$(LC_ALL=C timeout 30 sbatch --test-only -p "$1" ${2:+-q "$2"} -t "$3:00:00" --wrap=true 2>&1); rc=$?
+  else out=$(LC_ALL=C sbatch --test-only -p "$1" ${2:+-q "$2"} -t "$3:00:00" --wrap=true 2>&1); rc=$?; fi
+  printf '%s\n' "$out" | tr -d '\r' | grep -v '^[[:space:]]*$'
+  return $rc
+}

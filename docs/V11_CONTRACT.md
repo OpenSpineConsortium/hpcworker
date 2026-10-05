@@ -201,6 +201,11 @@ characters; `<name>` matches `^[A-Za-z0-9_-]{1,32}$`.
 | `commands.installShared` (10.0.0) | `bash '<shared>/bin/hpcworker' install --shared '<shared>' --profile '<site>'` | `runShellCommand` | shell |
 | `commands.loginSetup` (AM2) | `bash <shared>/bin/hpcworker login-setup` (unquoted: the student may read it) | typed by the page script into the student's own terminal page, or pasted by the student; never sent by Beethoven's own shell | none (not Beethoven's shell) |
 
+Framework 18 also accepts ` --race` on the connect line, before `--login` (§5.1): the worker then asks
+every queue group of the site profile's `worker_queues` at once. A client sends it only to framework 18
+or later (the gate's version line, or status.json's `version`), from its V13 release; no client released
+so far sends it, and without it connect starts one job, as before.
+
 Moment 6 still runs `commands.installShared` once, before Connect, when the facts say the account
 does not yet use the lab's shared copy (that is what ticks "Your grid account is ready"); connect's
 own setup step (§5.2 step 2) is the safety net for a returning run.
@@ -230,7 +235,7 @@ timer (lines 246, 257), which is why the framework's own keepalive line exists.
 ```
 hpcworker connect [--name NAME] [--profile SITE] [--consent INSTALL_ID]
                   [--login auto|always|never] [--permission-mode default|acceptEdits|plan]
-                  [--no-chain]
+                  [--no-chain] [--race]
 ```
 
 | Flag | Default | Meaning |
@@ -241,6 +246,7 @@ hpcworker connect [--name NAME] [--profile SITE] [--consent INSTALL_ID]
 | `--login` | `auto` | `auto`: skip the sitting when D5's rule says signed in; `always`: run the sitting (Claude Code answers at once when it is signed in); `never`: no sitting. The 15.0.0 extension sends one of these three. `fresh` (framework 10 to 16: the sitting after `claude auth logout` inside it), which an older build still sends for "Use another account", is parsed only to be refused (framework 17; Beethoven never signs anyone out of Claude): `HPCW-STEP failed usage --login fresh is no longer offered: Beethoven never signs anyone out of Claude; to use another account, sign out of Claude Code yourself on a compute node, then sign in again`, exit 2, nothing done |
 | `--permission-mode` | the profile's `worker_defaults.permission_mode` | passed to `worker start` |
 | `--no-chain` | chain on | passed to `worker start` |
+| `--race` | off | framework 18: passed to `worker start`; the worker asks every queue group of the site profile's `worker_queues` at once and the first job to get a computer runs it (greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues should be launched and the first to get allocated should respond to the client to minimize wait time"). Off, connect passes `--no-race` and a site's several queues are asked as its first group only, one job, as every client before V13 expects |
 
 Unknown flags and bad values: `HPCW-STEP failed usage <sentence>`, exit 2, nothing done.
 
@@ -267,7 +273,15 @@ Unknown flags and bad values: `HPCW-STEP failed usage <sentence>`, exit 2, nothi
    queued status.json and progress.log's "Asked the grid for a computer", §9.2, §11) and print
    `HPCW-STEP queued <job> new <run dir>`. When the scheduler refuses: `HPCW-STEP failed refused
    <sbatch's message on one line>`, exit 5. `worker start`'s human sentences and its first-time
-   notice are not printed under connect.
+   notice are not printed under connect. Framework 18, with `--race` at a site whose `worker_queues`
+   makes two groups or more: the check also covers every candidate of the last start; one `sbatch` per
+   group (at most four), and `HPCW-STEP candidates <L>,<B>` right before the queued line when two or
+   more were taken (`<job>` in the queued line is the first taken, `L`); a group refused is left out
+   and the rest go on, and every group refused is `failed refused` with the first refusal, exit 5. A
+   job kept while every candidate of an earlier racing start is still in line prints the candidates
+   line, then `queued <job> kept`. Without `--race` a site's first group only is asked, and a
+   candidate of an earlier racing start that is not the kept job is cancelled in the same action, so
+   the client follows exactly one job.
 6. **Sign-in.** By `--login` (D5 for `auto`). When the sitting is skipped under `auto`, print
    `HPCW-STEP signed-in <email> <plan>` from that status.json's `claude_login`. Otherwise print
    `HPCW-STEP signin`, then run the sitting (§5.4) with the keepalive (§5.5) inside the budget (§5.6);
@@ -300,6 +314,7 @@ and it ends at the newline. The extension strips terminal codes and trims before
 HPCW-STEP setup ready
 HPCW-STEP setup changed
 HPCW-STEP consent
+HPCW-STEP candidates <job>,<job>[,<job>…]
 HPCW-STEP queued <job> new <run dir>
 HPCW-STEP queued <job> kept <run dir>
 HPCW-STEP signin
@@ -309,6 +324,11 @@ HPCW-STEP failed <code> <sentence>
 ```
 
 - `<job>`: the scheduler's job id, digits only.
+- `candidates` (framework 18): `HPCW-STEP candidates ([0-9]+(,[0-9]+)+)`, printed only under
+  `--race`, immediately before its queued line, when the worker asks two queue groups or more and two
+  or more jobs are in line for it, in group order. The queued line's `<job>` is one of them. A client
+  before V13 does not know the step: its parser returns nothing for it and it is not shown (extension
+  `contract.ts` `parseStepLine`, desktop `src/contract.ts`); such a client never sends `--race`.
 - `<run dir>`: the run folder, `<state_dir>/<name>`, to the end of the line (it may hold spaces; never a
   newline). Optional for the parser; framework 10 always prints it.
 - `<email>`, `<plan>`: one token each, `-` when Claude Code did not say. `<plan>` is Claude Code's
@@ -322,6 +342,7 @@ HPCW-STEP failed <code> <sentence>
 |---|---|
 | `setup …` | ticks "Your grid account is ready" |
 | `consent` | sets Acknowledgement v3 `consent_recorded_at` |
+| `candidates <job>,<job>…` (framework 18, V13 clients) | records `run.candidates`; nothing shown to the student beyond "In line for a computer" (§9.4); the run's job is then whichever of them a status.json names (R1') |
 | `queued <job> new\|kept <run dir>` | records the run (state dir = the run dir's parent, name = its last part, job); lists the run folder at once; the hero leaves "Asking…" |
 | `signin` | "Getting your Claude sign-in ready…"; after 2 minutes without `signin-node` or `auth-url`, "The grid is busy. Still finding a computer for the sign-in…" |
 | `signed-in <email> <plan>` | "Signed in as <email> · <Plan>" with the drawn check for 3 s; refuses the plan per D33 ("This Claude account has no Pro or Max plan. Remote Control needs one. To use another Claude account, sign out of Claude on the grid first (your lab lead's guide shows how), then press Sign in again." [Sign in again]); closes the Anthropic tab per §17 |
@@ -452,11 +473,13 @@ start)` on standard error and exits 1.
 {"v":1,"run":"worker","job":"40501234","next_job":"","state_dir":"/rs/rs_grp_oschome/st1234/hpcworker",
  "status":{…status.json after this call…},"connection":{…connection.json…}|null,
  "scheduler":{"state":"PENDING","reason":"Priority","expected_start":"2026-10-01T13:12:00Z","node":"","checked_at":"2026-10-01T12:58:03Z"}|null,
- "line":"Your worker is in line for a computer (14 min so far)."}
+ "line":"Your worker is in line for a computer (14 min so far).","candidates":""}
 ```
 
 (Shown on three lines here; on the wire it is one.) Types: `contract.ts StatusJson`. Framework 9's
-`--json` fields (`run`, `job`, `next_job`, `status`, `connection`) are kept.
+`--json` fields (`run`, `job`, `next_job`, `status`, `connection`) are kept. Framework 18 adds
+`candidates`, last: the queued file's `candidates` while status.json says `queued` (a racing start,
+`"40501234,40501235"`), else `""`.
 
 **The one scheduler call.** Only when status.json says `queued` (or there is no status.json, a
 job.id exists and no `node` file does), the command makes ONE `squeue -h -j <job> -o '%T|%r|%S|%N'`:
@@ -470,6 +493,11 @@ job.id exists and no `node` file does), the command makes ONE `squeue -h -j <job
   reason, expected_start and node `""`, checked_at}; status.json becomes state `error`, message "the
   grid ended the request before it started", needs `nothing`; progress.log gets "Couldn't start: the
   grid ended the request before it started".
+
+Framework 18: when the queued file's `candidates` names two jobs or more, the one call is ONE `squeue
+-h -j <L>,<B> -o '%i|%T|%r|%S|%N'` over all of them, read as one worker: `RUNNING` when one runs; else
+`PENDING` with the reason and estimate of the candidate expected to start soonest (else the first in
+group order); `GONE` only when none is listed. The guard stays the queued file's `job`.
 
 Otherwise `scheduler` is `null` and nothing is asked: the job's own files say where it is.
 
@@ -736,6 +764,7 @@ framework 10.
 | `reason` | string | worker status | while queued: Slurm's `%r` (`Priority`, `Resources`, `None`, `QOSMax…`, `AssocGrp…`, `ReqNodeNotAvail…`) | 10 |
 | `expected_start` | string | worker status | `%S` in UTC when in the future, else `""` (D12) | 10 |
 | `checked_at` | string | worker status | when it asked | 10 |
+| `candidates` | string | worker start (a racing start only) | the queued file only, last: the jobs a start that asked several queue groups was given, in group order, comma-separated (`"40501234,40501235"`; one id when the other groups were refused); `job` is the first. Absent from every other status.json; the job's own writes never carry it | 18 |
 
 ### 9.2 The queued file
 
@@ -747,7 +776,9 @@ order; values for Wayne State):
 ```
 
 It also removes the `node` file (as framework 9 does) and appends progress.log's "Asked the grid for
-a computer". A chain successor queued by the job (`adapter_submit_after`) gets no queued file: its
+a computer". Framework 18: a racing start writes the same keys plus `"candidates":"<L>,<B>"` last; a
+start of one job writes exactly the file above. The job that wins keeps `submitted_at` from it when
+its `job` matches or its `candidates` names the job, so the wait counts from the student's Connect. A chain successor queued by the job (`adapter_submit_after`) gets no queued file: its
 predecessor's status.json carries `next_job`, and the successor's first write sets `renewal: true`
 (the successor knows it is one because `next.id`'s first field is its own id).
 
@@ -765,6 +796,13 @@ Claude sign-in timed out" to progress.log, and exits. The time counts from the j
 - **R1 Stale files.** A status.json or connection.json whose `job` is neither the run's job nor the
   run's `next_job` is ignored. When it names the run's `next_job`, that job becomes the run's job (a
   renewal).
+- **R1' (framework 18, V13 clients).** A status.json or connection.json whose `job` is in
+  `run.candidates` is the run's job: it becomes `run.job`, the candidates are cleared, and it is not a
+  renewal (R10 and R13 count from the queued file's `submitted_at`, which the winner keeps).
+  `run.candidates` comes from the `candidates` line, the queued file and `worker status --json`. A
+  client sends `race` (or `--race`) only to framework 18 or later. Rejected: following the second
+  candidate through `next_job`; it can win and replace the queued file before a client reads it,
+  which would leave the panel at "Got a computer" for good.
 - **R2 Queued is live** while `status.job` is the run's job.
 - **R3 Never backwards.** Once a job has been seen past `queued` (any other state, or a `node` file
   modified at or after its `submitted_at`), a later `queued` for that job is ignored.
@@ -789,7 +827,7 @@ Claude sign-in timed out" to progress.log, and exits. The time counts from the j
 ### 9.4 What the student never sees
 
 `message`, `hint`, job and successor ids, node, partition, QoS, paths, Slurm's raw reason, raw shell
-output, rc.log. Details shows them.
+output, rc.log, and (framework 18) the candidates and how many queues were asked. Details shows them.
 
 ## 10. connection.json
 
@@ -839,6 +877,7 @@ Any other line is shown in Details only. The job also prints `<H:MM> Online. Ope
   job.id  next.id  node  status.json  connection.json  progress.log
   rc.log  rc.prev.log  stop  stop.done  chain.log  job.sbatch  params
   launch.sh  in_image.sh  job.token  slurm_<id>.out  .notice-shown
+  race  claim.<token>  race.<k>.sbatch  race.<k>.next.sbatch  race.log      framework 18, a racing start only
 <state_dir>/workspaces/<name>/            the worker's working folder (CLAUDE.md, .restricted)
 ~/.hpcworker/{profile.json, shared, consent, bin/hpcworker}
 ```
@@ -846,7 +885,11 @@ Any other line is shown in Details only. The job also prints `<H:MM> Online. Ope
 The extension lists `<state_dir>/<name>/` through the Files app's JSON listing (`portal.ts listDir`)
 and looks only at the names and `modified_at` of `status.json`, `connection.json`, `node`,
 `progress.log`, `next.id`, `stop.done` and `rc.log`. It never downloads `job.token`, `job.sbatch`,
-`params`, the launch files or the job output.
+`params`, the launch files or the job output. Framework 18's race files are internal: `race` (`<token>
+open|done k:<id> …`, written only by `worker start`), `claim.<token>` (a symbolic link naming the
+candidate that got a computer first, made by `ln -s` in the job), the candidates' job files and
+`race.log` (for `queue report`). Clients read none of them; what a client sees of a race is the
+`candidates` key and line (§5.3, §6, §9.1).
 
 | When | What |
 |---|---|
@@ -882,7 +925,13 @@ New keys, with Wayne State's values. The texts stream's `sync-profiles.mjs` copi
 Kept and still read: `submit_host` (`"warrior"`, login-setup's Host names), `ood_shell_host` (`""`),
 `vpn_required` (`true`), `shared_state_dir`, `worker_defaults` (hours 8, which "Your worker restarts
 itself every 8 hours" uses; capacity 4). The worker partition is the lab lead's decision (spec
-Decision 5); the profile's partition keys are not touched by this contract.
+Decision 5); the profile's partition keys are not touched by this contract. Framework 18 adds
+`worker_queues` (`["reqp/requeue", "secp/secondary"]` at Wayne State), after greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues should be launched and the first to get allocated should respond to the client to minimize wait time":
+every queue a worker is asked for at once, in order, at most four; entries that share a QoS are one
+job over a partition list, and each QoS is a job of its own, the first to get a computer running the
+worker. `partition_cpu`, `partition_cpu_batch` and the QoS keys are unchanged, and a start that
+cannot follow several jobs (every client before V13) gets the first entry's group: `reqp/requeue`,
+the worker as before. Clients do not read the key.
 `lib/profile.py` validates the new keys and accepts their absence; `RESUME_WINDOW_S` becomes 4 hours.
 
 ## 14. Waiting: the reason, the estimate and the history
@@ -1067,6 +1116,11 @@ replaces 9 on the lab's volume. From `contract.ts` at f8d2e88 and its callers:
 - **Values that change and are only displayed by 10.0.0:** `requested_name` becomes the title;
   `hint` for starting no longer says "about a minute"; the resume window becomes 4 hours.
 - **VERSION** becomes 10; 10.0.0 only shows it.
+- **Framework 18.** 10.0.0's `worker start` line names neither `--race` nor `--no-race`, and outside
+  connect `worker start` races by default, so at a site whose `worker_queues` makes two groups it asks
+  both. Its sentence still begins `worker <n> submitted as job <the first job> (…)`, which 10.0.0
+  reads; the job that wins rewrites `job.id`, and its automatic start, once a minute, gets `worker <n>
+  already has job <the job kept> (…); nothing submitted`. Not tried with a 10.0.0 build.
 
 ## 20. Changes needed outside the four contract files
 

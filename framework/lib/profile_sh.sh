@@ -91,6 +91,12 @@ hpcw_render() { # TEMPLATE KEY=VALUE...
   local markers; markers=$(hpcw_pjoin "$hh" consent); [ "${HPCW_M_CM_N:-0}" -gt 0 ] && markers="$HPCW_M_CM:$markers"
   local chain="1"; [ -n "${HPCW_KV[CHAIN]+x}" ] && chain="${HPCW_KV[CHAIN]}"
   case "$chain" in 0|1) ;; *) echo "CHAIN must be 0 or 1 (got $(hpcw_pyrepr "$chain"))" >&2; return 1;; esac
+  # framework 18: a candidate of a start that asked several queues at once carries that start's token and its group
+  local race="" racek=0
+  [ -n "${HPCW_KV[RACE]+x}" ] && race="${HPCW_KV[RACE]}"
+  [[ "$race" =~ ^[0-9-]{0,32}$ ]] || { echo "RACE must be a start's token, digits and - (got $(hpcw_pyrepr "$race"))" >&2; return 1; }
+  [ -n "${HPCW_KV[RACE_K]+x}" ] && racek="${HPCW_KV[RACE_K]}"
+  [[ "$racek" =~ ^[0-9]$ ]] || { echo "RACE_K must be one digit (got $(hpcw_pyrepr "$racek"))" >&2; return 1; }
   local sch="$HPCW_M_SCHEDULER" time="${HPCW_KV[TIME]:-}"
   if [ -z "$time" ]; then
     local q=$(( hours / 24 )) r=$(( hours % 24 ))
@@ -104,7 +110,7 @@ hpcw_render() { # TEMPLATE KEY=VALUE...
   [ -n "${HPCW_KV[CAPACITY]+x}" ] && cap="${HPCW_KV[CAPACITY]}"
   local title="$HPCW_M_TITLE_BASE"; [ "$run" = worker ] || title="$title "$'\302\267'" $run"
   local -a m=(
-    VERSION "$(hpcw_fw_version)" SITE "$HPCW_M_SITE" SCHEDULER "$sch" CHAIN "$chain" RUN "$run" JOB_NAME "hpcw_$run"
+    VERSION "$(hpcw_fw_version)" SITE "$HPCW_M_SITE" SCHEDULER "$sch" CHAIN "$chain" RACE "$race" RACE_K "$racek" RUN "$run" JOB_NAME "hpcw_$run"
     RUN_DIR "$rundir" STATE_DIR "$sd" WORKSPACE "$ws" PARTITION "$part" QOS "$qos" CPUS "$cpus" MEM "$mem"
     HOURS "$hours" TIME "$time" REQUEUE "$requeue" NODE_TMP "$HPCW_M_NODE_TMP" NODE_TMP_VAR "$HPCW_M_NODE_TMP_VAR"
     TMPDIR_IS_NODE_LOCAL "$HPCW_M_TMPDIR_LOCAL" IPC_DIR "$HPCW_M_IPC_DIR" RUNTIME "$HPCW_M_RUNTIME"
@@ -127,7 +133,8 @@ hpcw_render() { # TEMPLATE KEY=VALUE...
       header="$header$nl#SBATCH --nodes=1$nl#SBATCH --ntasks=1$nl#SBATCH --cpus-per-task=$cpus$nl#SBATCH --mem=$mem$nl#SBATCH --time=$time"
       header="$header$nl#SBATCH --output=slurm_%j.out$nl#SBATCH --open-mode=append$nl#SBATCH --signal=B:TERM@120"
       if [ "$requeue" = 1 ]; then header="$header$nl#SBATCH --requeue"; else header="$header$nl#SBATCH --no-requeue"; fi
-      header="$header$nl#SBATCH --dependency=singleton";;
+      # framework 18: no singleton on a candidate of a start that asked several queues at once (profile.py says why)
+      [ -n "$race" ] || header="$header$nl#SBATCH --dependency=singleton";;
     pbs)
       local pmem="${mem,,}"; pmem="${pmem//g/gb}"
       header="#PBS -N hpcw_$run$nl#PBS -q $part"

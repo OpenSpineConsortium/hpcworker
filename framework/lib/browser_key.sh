@@ -347,8 +347,9 @@ cmd_browser_key() {
 #   version                                   HPCW-GATE ok <framework> <due|never|-> <account> claude=<yes|no|unknown>
 #   status NAME                               worker status --name NAME --json --poll-floor 60
 #   watch NAME                                worker watch --name NAME --json --minutes 30 --poll-floor 60 (two at once)
-#   connect NAME SITE INSTALLID|- MODE chain|no-chain
-#                                             connect --name NAME --profile SITE --permission-mode MODE [--consent ID] [--no-chain] --login never
+#   connect NAME SITE INSTALLID|- MODE chain|no-chain [race]
+#                                             connect --name NAME --profile SITE --permission-mode MODE [--consent ID] [--no-chain] [--race] --login never
+#                                             (race, framework 18: the client follows a worker that asks every queue at once)
 #   stop NAME                                 worker stop --name NAME
 #   restrict NAME                             worker restrict --name NAME
 #   read NAME FILE                            FILE one of status.json connection.json progress.log node: its bytes
@@ -570,7 +571,7 @@ cmd_gate() {
       elif [ -s "$PROFILE" ]; then gate_limit busy; fi
       gate_exec worker restrict --name "${t[1]}";;
     connect)
-      [ "$n" = 6 ] && gate_name_ok "${t[1]}" && [[ "${t[2]}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] && [[ "${t[3]}" =~ ^([0-9a-f]{32}|-)$ ]] || gate_refuse
+      { [ "$n" = 6 ] || { [ "$n" = 7 ] && [ "${t[6]}" = race ]; }; } && gate_name_ok "${t[1]}" && [[ "${t[2]}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] && [[ "${t[3]}" =~ ^([0-9a-f]{32}|-)$ ]] || gate_refuse
       case "${t[4]}" in default|acceptEdits|plan) ;; *) gate_refuse;; esac
       case "${t[5]}" in chain|no-chain) ;; *) gate_refuse;; esac
       if sd=$(gate_state_dir "${t[2]}"); then
@@ -579,6 +580,7 @@ cmd_gate() {
       local -a a=(connect --name "${t[1]}" --profile "${t[2]}" --permission-mode "${t[4]}")
       [ "${t[3]}" = - ] || a+=(--consent "${t[3]}")
       [ "${t[5]}" = no-chain ] && a+=(--no-chain)
+      [ "$n" = 7 ] && a+=(--race)
       a+=(--login never)
       gate_exec "${a[@]}";;
     read) [ "$n" = 3 ] && gate_name_ok "${t[1]}" || gate_refuse; gate_read "${t[1]}" "${t[2]}"; exit $?;;

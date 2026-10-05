@@ -37,10 +37,19 @@ time ends so the worker stays on, and writes `status.json` and `connection.json`
 its claude.ai link) to shared storage. The browser **extension** (`extension/`, working name
 `ood-worker`) is a launcher and a diagnostics panel. It talks to exactly one origin, the student's
 Open OnDemand portal, over surfaces that exist on every Open OnDemand 3.x and 4.x site without
-administrator help: the Shell WebSocket (to run one `sbatch`, and to hold one sign-in sitting open),
+administrator help: the Shell WebSocket (to run one `sbatch`, or, since framework 18 and for a client
+that asks for it, one per queue group of the site's `worker_queues`, and to hold one sign-in sitting
+open),
 the Files JSON routes (to read the job's status files), and Active Jobs JSON (to reconcile). It rides
 the portal session the student already has in the browser; it never reads the cookie and never
-automates a login.
+automates a login. Since framework 18 a worker's start may ask every queue the site profile's
+`worker_queues` names at once, one `sbatch` per group of queues that share a QoS (at most four, two at
+Wayne State), and the first job to get a computer runs the worker and cancels the others from its
+compute node (greg, 2026-10-04 23:26Z: "So it seems obvious to me that workers on all possible queues
+should be launched and the first to get allocated should respond to the client to minimize wait
+time"). That exception to one scheduler call per action, like the rule itself, is this product's own
+etiquette; C&IT's own instruction is only "nothing container-related on `warrior` and nothing of ours
+under its `/tmp`". Extensions released so far do not ask for it and start one job, as before.
 
 The product is small on purpose. On twelve sampled US university clusters the things that break a
 worker, egress from compute nodes, the container runtime, node-local temp, login-node rules, proxy
@@ -60,7 +69,7 @@ claude.ai/code, Claude app  ◀════════════════ 
    transcript stored while connected)                                                          │ polls for work
                                                                                                │
 Beethoven extension     ──▶ https://ondemand.<university>.edu ──▶ login node ──sbatch──▶ compute node (Slurm job)
-  (one origin, one            │ Shell WebSocket: one sbatch, then close;      (nothing else)   tmux ▶ apptainer exec
+  (one origin, one            │ Shell WebSocket: sbatch(es), then close;      (nothing else)   tmux ▶ apptainer exec
    content script;            │   once, held open for the sign-in sitting                      ▶ claude remote-control
    the icon runs the steps)   │ Files JSON: list, then read status.json, rc.log                 writes status.json,
                               │ Active Jobs JSON: reconcile                                     connection.json, rc.log
@@ -146,8 +155,9 @@ From the report's "deliberately absent" list and its security controls:
   in to your portal in a tab".
 - No remote code: no `eval`, no fetched scripts. The kill-list is JSON, verified with WebCrypto against
   a public key compiled into the bundle, and the extension works offline on the last good list.
-- Nothing persistent on the login node: one `sbatch --parsable` through the shell, then the shell is
-  closed; the sign-in sitting holds the shell open once, for as long as the sitting lasts (up to ten
+- Nothing persistent on the login node: one `sbatch --parsable` through the shell (framework 18: one
+  per queue group when the client asks every queue at once, greg's decision of 2026-10-04 23:26Z
+  above), then the shell is closed; the sign-in sitting holds the shell open once, for as long as the sitting lasts (up to ten
   minutes waiting for a compute node and ten minutes for the paste, both the framework's own limits;
   the panel closes the connection after fifteen minutes whatever happened), and no longer.
   Scheduler-facing calls never faster than once a minute; the job writes `status.json` and clients
