@@ -290,17 +290,18 @@ class Layers(unittest.TestCase):
     def test_show_layers_reads_the_two_files_it_is_given(self):
         """outside the framework tree too, under a C locale, with a path that is not ASCII"""
         with tempfile.TemporaryDirectory() as tmp:
-            folder = os.path.join(tmp, "caf\u00e9")
+            # bytes throughout: the suite itself may run under an ASCII locale (python 3.6, a plain ssh)
+            folder = os.fsencode(tmp) + b"/caf\xc3\xa9"
             os.makedirs(folder)
             site, lab = read(SITE), read(LAB)
             lab["claude_bin"] = "/elsewhere/bin/claude"
-            for name, mod in (("site.json", site), ("lab.json", lab)):
-                with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
+            for name, mod in ((b"site.json", site), (b"lab.json", lab)):
+                with open(folder + b"/" + name, "w", encoding="utf-8") as fh:
                     json.dump(mod, fh)
             env = dict((k, v) for k, v in os.environ.items() if k not in ("LANG", "LC_CTYPE", "PYTHONIOENCODING", "PYTHONUTF8"))
             env["LC_ALL"] = "C"
-            p = subprocess.run([PY, os.path.join(ROOT, "lib", "profile.py"), "show", "--layers",
-                                os.path.join(folder, "site.json"), os.path.join(folder, "lab.json")],
+            p = subprocess.run([os.fsencode(PY), os.fsencode(os.path.join(ROOT, "lib", "profile.py")), b"show", b"--layers",
+                                folder + b"/site.json", folder + b"/lab.json"],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=120)
             self.assertEqual(p.returncode, 0, p.stderr)
             row = [line.split() for line in p.stdout.decode("utf-8").splitlines() if line.startswith("claude_bin ")][0]
@@ -325,6 +326,30 @@ class Layers(unittest.TestCase):
             self.assertEqual((p.returncode, p.stdout), (1, b""))
             self.assertIn("sites/wayne/labs/aaa.json, sites/wayne/labs/oschome.json all name the profile wayne",
                           p.stderr.decode("utf-8"))
+
+
+class PinnedCopy(unittest.TestCase):
+    """framework/sites/ is a copy of OpenSpineConsortium/beethoven-sites, never edited here"""
+
+    def test_every_module_is_what_its_origin_records(self):
+        import hashlib
+        folder = os.path.join(ROOT, "sites")
+        with open(os.path.join(folder, "ORIGIN"), encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+        self.assertEqual(lines[0], "repository OpenSpineConsortium/beethoven-sites")
+        self.assertRegex(lines[1], r"^commit [0-9a-f]{40}$")
+        recorded = dict((line.split(" ")[2], line.split(" ")[1]) for line in lines if line.startswith("sha256 "))
+        present = {}
+        for d, _dirs, names in os.walk(folder):
+            for n in names:
+                if n.endswith(".json"):
+                    path = os.path.join(d, n)
+                    with open(path, "rb") as fh:
+                        present[os.path.relpath(path, folder).replace(os.sep, "/")] = hashlib.sha256(fh.read()).hexdigest()
+        self.assertEqual(present, recorded, "framework/sites/ differs from its ORIGIN: change the module in "
+                                            "beethoven-sites, then framework/sites/pull.sh")
+        self.assertEqual(sorted(os.path.join(ROOT, "sites", rel) for rel in recorded if rel.endswith("/site.json")),
+                         sorted(set(s for s, _l in P.modules())))
 
 
 class ComposeAll(unittest.TestCase):

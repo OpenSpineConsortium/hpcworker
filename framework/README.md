@@ -1366,6 +1366,7 @@ profiles/wayne.json      Wayne State University's profile, composed from the two
 sites/wayne/site.json    the site module: Wayne State's grid (scheduler, hosts, partitions, node temp, runtime, portal, VPN, ssh)
 sites/wayne/labs/oschome.json  the lab module: the oschome lab's deployment there (its volume, shared copy, image, claude, binds)
 sites/README.md          the three layers, who owns each field, compose, compose-all, show --layers
+sites/ORIGIN, pull.sh    the modules are a pinned copy of OpenSpineConsortium/beethoven-sites; pull.sh refreshes it
 jobs/probe.sbatch        the ten-minute probe (five minutes of budgets inside the container) -> <state_dir>/probe/probe.json
 jobs/worker.sbatch.tpl   the worker job, rendered per start from the profile
 jobs/workspace-guide.md.tpl  the CLAUDE.md a new worker workspace gets, filled from the profile (see below)
@@ -1421,8 +1422,9 @@ Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R
 ## Adding a university
 
 1. Write a site module for the university's cluster and a lab module for the group that hosts the
-   shared copy (`sites/README.md`; `hpcworker install --discover` on its login node seeds the values),
-   then `python3 lib/profile.py compose-all` writes `profiles/<id>.json` from them. In an account,
+   shared copy in `OpenSpineConsortium/beethoven-sites` (its README; `hpcworker install --discover` on
+   the login node seeds the values), then `bash sites/pull.sh` copies them here and
+   `python3 lib/profile.py compose-all` writes `profiles/<id>.json` from them. In an account,
    `~/.hpcworker/profile.json` is still one file, copied from a composed profile at install. The
    schema is `hpcworker profile schema`; `hpcworker profile validate` must pass. A field the file
    carries that the installed version does not know (written by an older or a newer release) is
@@ -1444,9 +1446,11 @@ Continue coding in the Claude mobile app or https://claude.ai/code/session_01N4R
 
 ## What is Wayne-State-specific
 
-Only the two modules under `sites/wayne/` (the site `wayne` and the lab `oschome`), which compose
-`profiles/wayne.json`; `python3 lib/profile.py show --layers wayne` says which of them set each value.
-Between them: partitions `secp/secondary` (starts at once) and `reqp/requeue`, GPU
+The values are in two modules, written in `OpenSpineConsortium/beethoven-sites` and pinned under
+`sites/wayne/` (the site `wayne` and the lab `oschome`), which compose `profiles/wayne.json`;
+`python3 lib/profile.py show --layers wayne` says which of them set each value. Lines of the code that
+still spell one are listed in `tests/site_literals_known.txt` until BEE-202 and BEE-205 remove them,
+and no new one may join them (`tests/test_site_literals.py`). Between the two modules: partitions `secp/secondary` (starts at once) and `reqp/requeue`, GPU
 partitions `gmsap` and `gvohp`, `module load apptainer/1.2.2` at `/wsu/el7/gnu7/apptainer/1.2.2/bin`,
 the shared sandbox image and `claude` under `/rs/rs_grp_oschome/shared/beethoven`, the lab's shared
 copy of this framework (`shared_install`, `/rs/rs_grp_oschome/shared/beethoven/hpcworker/current`, which
@@ -1521,9 +1525,14 @@ login-node audit, and the new profile keys in `test_profile.py`.
 
 `test_sites.py` (the site and lab modules): Wayne State's two modules compose `profiles/wayne.json`
 byte for byte, and every profile in `profiles/` is what its modules compose (`compose-all --check`);
-every schema field has the layers that may set it, and a module that sets another layer's field, the
-product's own, an unknown key or a wrong type is refused; `binds` add up, objects merge, everything else
-is replaced; and `show --layers` names the layer and the file behind every value.
+the pinned copy is what its `ORIGIN` records; every schema field has the layers that may set it, and a
+module that sets another layer's field, the product's own, an unknown key (inside an object field too)
+or a wrong type is refused; `binds` add up, objects merge, everything else is replaced; a profile two
+labs name is never written; and `show --layers` names the layer and the file behind every value.
+`test_site_literals.py` builds the list of each site's hosts, path roots, partitions, QoS, links, host
+key, runtime module and ids from the modules and fails on a new line of `bin/`, `lib/`, `jobs/` or the
+tools that spells one; a comment that records a measurement keeps its values with the marker
+`measured at <site>:`.
 
 Version 13 adds `SuccessorOfAnEndedJob` in `test_status.py` (a job that ended naming a successor, asked
 about with the job in one call: a successor the fake scheduler no longer lists, one listed as ended, one
