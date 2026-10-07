@@ -1,0 +1,12 @@
+#!/bin/bash
+# fake sbatch (hpcworker's test bed): logs the call to $FAKE_SCHED_DIR/calls; refuses with the message in
+# $FAKE_SCHED_DIR/sbatch_fail when that file is not empty; else prints the next id and lists the job PENDING
+# (FAKE_REASON, default Priority). FAKE_SBATCH_DELAY: seconds to wait first.
+# fake sbatch: logs, refuses when <sched>/sbatch_fail holds a message, else prints the next id and lists the job PENDING
+d="${FAKE_SCHED_DIR:?}"
+echo "sbatch $*" >> "$d/calls"
+sleep "${FAKE_SBATCH_DELAY:-0}"
+if [ -s "$d/sbatch_fail" ]; then cat "$d/sbatch_fail" >&2; exit 1; fi
+n=$(cat "$d/next_id" 2>/dev/null || echo 40501234); echo $((n + 1)) > "$d/next_id"
+echo "$n|PENDING|${FAKE_REASON:-Priority}|N/A|" >> "$d/jobs"
+echo "$n"

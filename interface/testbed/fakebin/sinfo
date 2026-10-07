@@ -1,0 +1,8 @@
+#!/bin/bash
+# fake sinfo (hpcworker's test bed), the partitions: FAKE_SINFO holds the lines it prints (nothing when unset). Each
+# call is also logged to $FAKE_SCHED_DIR/argv as sacct's is.
+d="${FAKE_SCHED_DIR:?}"
+echo "sinfo $*" >> "$d/calls"
+{ printf '%s\n%s\n%s\n%d\n' "${0##*/}" "${TZ-(unset)}" "${SLURM_TIME_FORMAT-(unset)}" $#; [ $# -gt 0 ] && printf '%s\n' "$@"; } >> "$d/argv"
+[ -n "${FAKE_SINFO:-}" ] && printf '%s\n' "$FAKE_SINFO"
+exit 0

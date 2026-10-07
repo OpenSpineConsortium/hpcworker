@@ -2,11 +2,13 @@
 
 The modules here are copied from `OpenSpineConsortium/beethoven-sites`, where they are written,
 reviewed and checked (greg's decision of 2026-10-05: the site modules have their own repository).
-`ORIGIN` names the commit they came from and each file's sha256; `tests/test_sites.py` fails when a
-file differs from it. They are never edited here: a change lands in beethoven-sites, then
-`bash framework/sites/pull.sh --from <checkout>` (or `pull.sh --ref main`, through `gh`) copies it,
-`python3 framework/lib/profile.py compose-all` writes the profiles, and the copy, `ORIGIN` and the
-profiles are committed together.
+`ORIGIN` names the commit they came from, the export and its version, and each file's sha256;
+`tests/test_sites.py` fails when a file differs from it. They are never edited here: a change lands in
+beethoven-sites, then `bash framework/sites/pull.sh` (`--ref REF` for another merged commit) copies
+what that repository's `interface/INTERFACE.json` lists under the export `modules`, from GitHub through
+`gh` and never from a checkout, `python3 framework/lib/profile.py compose-all` writes the profiles, and
+the copy, `ORIGIN` and the profiles are committed together (the interface standard,
+`interface/README.md`).
 
 Each deployment's profile, `profiles/<id>.json`, is composed from three layers:
 
@@ -25,8 +27,10 @@ hpcworker owns the rules a module follows and the composing: the schema, `FIELD_
 layers that may set each field), `SUBFIELDS` (the keys an object field holds), `PRODUCT`, and
 `compose`, `compose-all` and `show --layers` in `lib/profile.py`. `profile.py module-schema` prints
 those rules as data; beethoven-sites pins that output and checks its modules against it with no code
-of this repository. A change to the rules lands here first, then beethoven-sites takes the new schema
-(`tools/pull_schema.sh` there) before a module may use it.
+of this repository. That output is committed as `interface/sites/module-schema.json`, the export
+`module-schema` (`tests/test_interface.py` fails when it differs from what `profile.py` prints). A
+change to the rules lands here first, then beethoven-sites takes the new schema (`tools/pull_schema.sh`
+there, which copies that file and runs nothing of this repository) before a module may use it.
 
 In short: a module is data only; it sets only what its layer may set and only keys the schema names,
 inside an object field too; objects merge key by key, `binds` add up, anything else a later layer sets

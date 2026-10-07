@@ -1,0 +1,66 @@
+{
+ "format": 1,
+ "name": "hpcworker",
+ "repository": "OpenSpineConsortium/hpcworker",
+ "summary": "The cluster side of the Beethoven launcher: the hpcworker command, the worker job, and the files and lines they write for the clients.",
+ "standard": "https://github.com/OpenSpineConsortium/beethoven/blob/main/INTERFACES.md",
+ "exports": [
+  {
+   "id": "contract",
+   "kind": "contract",
+   "version": 1,
+   "summary": "What a client may type (cli.json), the lines it reads (lines.json), the files it reads (JSON Schemas), the credential and sign-in rules (rules.json), and vectors the real writer produced",
+   "paths": ["interface/contract/"],
+   "consumers": ["OpenSpineConsortium/beethoven-extension", "OpenSpineConsortium/beethoven-desktop", "OpenSpineConsortium/beethoven-agents", "OpenSpineConsortium/beethoven-vscode"]
+  },
+  {
+   "id": "contract-text",
+   "kind": "text",
+   "version": 1,
+   "summary": "The contract written for people: why each line and field is what it is, and how a client reacts to it",
+   "paths": ["docs/V11_CONTRACT.md", "docs/V12_CONTRACT.md"],
+   "consumers": ["OpenSpineConsortium/beethoven-extension", "OpenSpineConsortium/beethoven-desktop"]
+  },
+  {
+   "id": "profiles",
+   "kind": "data",
+   "version": 1,
+   "summary": "The composed site profiles, one per deployment of a university's cluster and a lab on it",
+   "paths": ["framework/profiles/*.json"],
+   "consumers": ["OpenSpineConsortium/beethoven-extension", "OpenSpineConsortium/beethoven-desktop", "OpenSpineConsortium/beethoven-agents"]
+  },
+  {
+   "id": "module-schema",
+   "kind": "schema",
+   "version": 1,
+   "summary": "What a site or lab module may carry: each field's type, the layers that may set it, the product's own values; `profile.py module-schema` printed and committed",
+   "paths": ["interface/sites/module-schema.json"],
+   "consumers": ["OpenSpineConsortium/beethoven-sites"]
+  },
+  {
+   "id": "testbed",
+   "kind": "program",
+   "version": 1,
+   "summary": "The fake scheduler the framework's own tests use (sbatch, squeue, scancel, scontrol, srun, sacct, sinfo), for a client's test that runs the real framework behind it",
+   "paths": ["interface/testbed/"],
+   "consumers": ["OpenSpineConsortium/beethoven-desktop", "OpenSpineConsortium/beethoven-extension"]
+  },
+  {
+   "id": "framework",
+   "kind": "program",
+   "version": 1,
+   "summary": "The lab's shared copy as tools/deploy_shared.sh publishes it, for a client's opt-in test that runs it as a black box behind the testbed; its interface is the contract export",
+   "paths": ["framework/bin/", "framework/lib/", "framework/jobs/", "framework/profiles/", "framework/VERSION", "framework/README.md"],
+   "consumers": ["OpenSpineConsortium/beethoven-desktop", "OpenSpineConsortium/beethoven-extension"]
+  }
+ ],
+ "imports": [
+  {
+   "repository": "OpenSpineConsortium/beethoven-sites",
+   "export": "modules",
+   "version": 1,
+   "into": "framework/sites",
+   "origin": "framework/sites/ORIGIN"
+  }
+ ]
+}

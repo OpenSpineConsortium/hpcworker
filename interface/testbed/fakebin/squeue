@@ -1,0 +1,22 @@
+#!/bin/bash
+# fake squeue (hpcworker's test bed): answers -j IDS -o FORMAT from $FAKE_SCHED_DIR/jobs, one line per job the
+# "scheduler" still lists, ID|STATE|REASON|START|NODE; fails as Slurm does when $FAKE_SCHED_DIR/squeue_fail exists.
+d="${FAKE_SCHED_DIR:?}"
+echo "squeue $*" >> "$d/calls"
+if [ -e "$d/squeue_fail" ]; then echo "slurm_load_jobs error: Socket timed out on send/recv operation" >&2; exit 1; fi
+ids=""; fmt="%i|%T|%N"
+while [ $# -gt 0 ]; do case "$1" in -j) ids="$2"; shift 2;; -o) fmt="$2"; shift 2;; *) shift;; esac; done
+found=0
+for id in ${ids//,/ }; do
+  line=$(grep "^$id|" "$d/jobs" 2>/dev/null | tail -1); [ -n "$line" ] || continue
+  IFS='|' read -r jid st re sta no <<< "$line"
+  found=1
+  case "$fmt" in
+    '%i|%T|%N') echo "$jid|$st|$no";;
+    '%T|%r|%S|%N') echo "$st|$re|$sta|$no";;
+    '%T|%N') echo "$st|$no";;
+    *) echo "$st";;
+  esac
+done
+if [ $found = 0 ] && [ -n "$ids" ]; then echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1; fi
+exit 0
