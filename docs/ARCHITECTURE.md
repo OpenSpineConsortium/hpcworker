@@ -188,6 +188,44 @@ script's own advice is to publish changed files as the next integer version). It
 to `deploy.log` beside the versions, prints what changed against the previous `current`, the tree, the
 link and the ACLs, and runs `hpcworker version` through `current`.
 
+**Publishing from CI** (greg, 2026-10-07: installing a change to the grid's copy is part of CI).
+GitHub's runners cannot reach the grid and no token may enter the repository, a job file or an argv,
+so the install is pulled from the grid's side, under the account's own `gh` sign-in, by the same
+lane that runs the grid suite (`tools/grid_ci.sh`). A person starts its watcher once in the portal's
+shell: `bash tools/grid_ci.sh --watch [--every 10] [--container] [--site S]`, which on the login node
+is file work, one `squeue` (one watcher per account, by the job name `hpcw_ci_watch`) and one
+`sbatch`. Every `--every` minutes a short job (`tools/grid_ci_watch.sbatch`: ten minutes of wall
+time, one core, node-local temp) first queues its one successor (`--begin`, `--dependency=singleton`)
+and then moves main's head on by at most one job, never waiting on one: GitHub's own check runs on
+the commit all passed; then the grid suite (and with `--container` the container check) as jobs, their
+verdicts posted as before; then `tools/grid_deploy.sbatch`, which runs `deploy_shared.sh --here` from
+the commit's own worktree on a compute node (never `--replace`, its temporary files under
+`/tmp/$USER` on that node, refused outright where `getfacl` or `setfacl` is missing, because
+deploy_shared would otherwise publish and leave the ACL entries unset); and the status
+`grid/deploy`, in deploy_shared's own words ("installed as the lab's shared copy, version N";
+a version already published with other files: "raise framework/VERSION"). A commit main has moved
+past keeps its verdicts and is never installed, and installs run one at a time (`<clone>/deploy.lock`,
+waited on for ten minutes inside a twenty-minute job). An install already in the queue checks again
+when it starts, because a queue can hold it for hours and a person's `--deploy` and the watcher can
+each have one waiting: it refuses, posted as `grid/deploy` error, when its commit is not main's newest
+head as either lane last fetched it (every fetch of main writes `<clone>/main-head` under the clone's
+lock), or when deploy_shared's own dry run shows `current` already naming a newer version.
+deploy_shared moves `current` anywhere from version 11 up, so this is what keeps the shared copy from
+going back. The head it compares with is as new as the last fetch: a commit merged after that may
+still be installed, and the newer one follows it at the next tick. Each submission is
+written down before and after its `sbatch` and recovered by one `sacct` by its job name (unique per
+commit), so a tick killed and run again never submits a second suite or install for a commit. The
+watcher runs from its own copy of its scripts in `<ci dir>/watch/bin`, replaced (by a rename) only
+from a commit it has just installed; `--unwatch` writes `watch/STOP`, which each tick reads first,
+and cancels the queued tick. The install is the publish above, with its checks and its refusals; it
+works only for the account that owns the shared copy's folder (deploy_shared's `chmod` of `ROOT`
+fails for any other), and so far that is the maintainer's. A pull request that changes a published
+file without raising `framework/VERSION` (and the `VERSION=` line with it) fails GitHub's own check
+(`tools/version_check.sh`, which reads deploy_shared's file list from deploy_shared itself), so the
+grid's install is not the first to say so. Whether compute nodes reach github.com, have `getfacl`
+and `setfacl` outside a container, and run the `--begin`/`singleton` chain as described is not yet
+measured (`OPEN_QUESTIONS.md`).
+
 **A running worker and a new version.** A rendered job names the numbered directory it started from,
 not `current`: the command follows the `current` link one level and no further, so
 `/rs/rs_grp_oschome` stays spelled as it is and the volume's physical path never reaches a job file or
@@ -264,10 +302,15 @@ Below the gate, `shared/` and everything under `shared/beethoven` is readable by
 it), and the published tree gives the group and others read and execute and no write, so a student
 can run the lab's code and cannot change it; `shared/access` and the lab lead's own folder stay
 closed to others by their own modes. Beside the list, `tools/grid_access.sh` keeps the **readers**
-(`admin.mjs readers`, the access service's read-only approvals, one AccessID and one folder under the
-root at a time): `--x` on the root, and under each approved folder a named entry equal to the read
-and enter the group `oschome` has on each entry there, never write and never a default entry, swept
-when the reader list changes and once a day (`docs/guides/LAB_LEAD.md`, section 9). The directory above the copy, `shared/beethoven`, stays group-writable, so
+(the access service's read-only approvals, `<AccessID> <folder>` lines, a folder under the root or
+`.` for the whole volume): `--x` on the root, and under each approved folder a named entry equal to
+the read and enter the group `oschome` has on each entry there, never write and never a default
+entry, swept when the reader list changes and once a day. A reader of `.` gets the group's read on
+the root itself (`r-x` on `drwxrws--T`; an account on the list keeps `rwx`) and the sweep is the
+whole volume, one `getfacl -R` walk for each such reader; other students' own folders, and anything
+inside them, are counted and left as they are. A taking back that did not finish (over the cap, or a
+`setfacl` that failed) is kept in the state as `# unread <id> <folder>` and tried again at the next
+day's sweep, or at once with `--force` (`docs/guides/LAB_LEAD.md`, section 9). The directory above the copy, `shared/beethoven`, stays group-writable, so
 a member of the group could still rename `hpcworker/` itself (`OPEN_QUESTIONS.md`).
 
 **Where workflow-engine templates would go.** Not built now. A site profile already holds what a

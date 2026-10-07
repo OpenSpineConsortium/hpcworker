@@ -1,14 +1,22 @@
 name: ci
-# The framework's suite in the two environments it must pass in. Neither job holds a secret and
-# neither reaches the grid: GitHub's runners cannot (VPN and a one-time code stand between), and
-# tokens never enter a repository (CLAUDE.md). The grid itself is the third lane: tools/grid_ci.sh,
-# run on the cluster by a person or their worker, posts its verdict here as a commit status
-# (contexts grid/framework-suite-py36 and grid/slurm-in-container).
+# The framework's suite in the two environments it must pass in, and the check that a change to what
+# the lab's shared copy publishes raises framework/VERSION. No job holds a secret and none reaches the
+# grid: GitHub's runners cannot (VPN and a one-time code stand between), and tokens never enter a
+# repository (CLAUDE.md). The grid itself is the third and fourth lanes: tools/grid_ci.sh, run on the
+# cluster under the account's own gh sign-in, posts its verdict here as commit statuses (contexts
+# grid/framework-suite-py36 and grid/slurm-in-container), and its watcher (tools/grid_ci.sh --watch,
+# started once on the grid) installs main's head as the lab's shared copy after these checks and the
+# grid suite pass, and posts grid/deploy.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+
+# every job only reads the repository, and none keeps the token in its checkout's git configuration:
+# each runs the pull request's own scripts after the checkout
+permissions:
+  contents: read
 
 jobs:
   suite-linux:
@@ -18,10 +26,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: run the suite
         run: HPCW_PYTHON=python3 bash framework/tests/run.sh
       - name: the grid access tool (tools/grid_access.sh, against a temporary volume; setfacl emulated)
         run: bash tools/tests/test_grid_access.sh
+      - name: the grid's CI lane and its watcher (tools/grid_ci.sh; GitHub, the scheduler and gh stood in for)
+        run: bash tools/tests/test_grid_ci.sh
 
   suite-centos7:
     # the login node's own stack: CentOS 7, python 3.6.8, bash 4.2.46, util-linux 2.23. The
@@ -32,6 +44,34 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: run the suite in centos:7
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:/src" docker.io/library/centos:7 bash /src/.github/centos7-suite.sh
+
+  version:
+    # the shared copy keeps one folder per framework VERSION and refuses other files under a version it
+    # has published, so the grid's install would refuse a merged change that forgot to raise it
+    name: framework version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: files deploy_shared publishes change only with a new framework/VERSION (tools/version_check.sh)
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+            pull_request) bash tools/version_check.sh "origin/$BASE_REF" HEAD;;
+            push)
+              if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+                bash tools/version_check.sh "$BEFORE" HEAD
+              else echo "no earlier commit to compare with"; fi;;
+            *) echo "only a pull request or a push is compared";;
+          esac

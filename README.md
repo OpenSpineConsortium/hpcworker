@@ -272,6 +272,30 @@ new terminal finds `hpcworker`; a terminal opened before the install needs
 lab's group `oschome` in both cases: the image, the shared copy and the state directory are all on the
 group's volume, which others cannot enter (`docs/OPEN_QUESTIONS.md`).
 
+**Continuous integration.** Four lanes, none holding a secret. On GitHub (`.github/workflows/ci.yml`):
+the suite on ubuntu (with the tests of `tools/grid_access.sh` and `tools/grid_ci.sh`) and inside
+`centos:7`, the login node's stack; and `tools/version_check.sh`, which fails a pull request that
+changes a file `tools/deploy_shared.sh` publishes (`framework/bin`, `lib`, `jobs`, `profiles`,
+`VERSION`; not `README.md`, which a publish updates in place) without raising `framework/VERSION`
+and the `VERSION=` line of `framework/bin/hpcworker` together, since the shared copy refuses other
+files under a version it has published. On the grid, under the account's own `gh` sign-in (GitHub's
+runners cannot reach it): `tools/grid_ci.sh` runs the suite (and with `--container` the
+Slurm-in-container check) as jobs on compute nodes and posts `grid/framework-suite-py36` and
+`grid/slurm-in-container` on the commit; and its watcher, started once by a person in the portal's
+shell with `bash tools/grid_ci.sh --watch` (`--every N` minutes, 10 by default and 5 at least;
+`--container`; `--site S`), installs main's head as the lab's shared copy by itself. Each tick of the
+watcher is a short job that queues the next one and then moves main's head on by at most one job:
+GitHub's checks on the commit all passed, then the grid suite, then `tools/grid_deploy.sbatch`
+(`deploy_shared.sh --here` on a compute node, never `--replace`), and the result posted as
+`grid/deploy` in one sentence ("installed as the lab's shared copy, version N", or
+deploy_shared's own refusal, such as a version already published with other files). A commit that
+main has moved past is never installed: an install already waiting in the queue checks again when
+it starts, and refuses when main has moved on or the shared copy already names a newer version, so
+`current` never moves back. `bash tools/grid_ci.sh --unwatch` stops it;
+`bash tools/grid_ci.sh --deploy` does the same once, synchronously, for main's head. Only the account
+that owns the shared copy's folder can install (deploy_shared refuses any other). What the grid has
+not yet shown is in `docs/OPEN_QUESTIONS.md`.
+
 **Site pages.** The website generates its own pages, the Beethoven ones included: run
 `python -X utf8 tools/build_site.py` in `../openspineconsortium.github.io` after changing
 `LICENSE.txt`, `PRIVACY.md` or a release, then publish the site (`docs/PUBLISHING_SITE.md`).
@@ -297,7 +321,9 @@ that sends no installation identifier (before 8.0.0) is refused once the service
 2. `npm run typecheck && npm run build && npm run zip && npm test` in `extension/` (the test run
    after the zips also checks the packages themselves), and the framework tests. A changed framework is then published to each site's shared copy with
    `bash tools/deploy_shared.sh`, before the extension that needs it reaches students: the extension
-   runs whatever the lab's copy is.
+   runs whatever the lab's copy is. Where the grid's watcher runs (`tools/grid_ci.sh --watch`), it
+   publishes main's head by itself once GitHub's checks and the grid suite pass, and says so on the
+   commit as `grid/deploy`.
 3. Copy the Chrome zip (the only package from 8.0.0) into `release/<version>/`, write `SHA256SUMS.txt`
    (`sha256sum *.zip > SHA256SUMS.txt`) and a short `README.md` there (see `release/10.0.0/`, which also holds the store kit and the reviewers' mock-portal zip), commit, tag `v<version>`, push both remotes:
    `bash tools/push_via_grid.sh` (the personal copy, through the grid's token) and `bash tools/push_org.sh`

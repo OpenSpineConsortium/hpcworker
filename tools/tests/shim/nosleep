@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# sleep for tools/tests/test_grid_ci.sh: returns at once and appends what it was asked to wait to
+# $SHIM_SLEEPS, so a person's run of tools/grid_ci.sh finishes in seconds and the test can still
+# see that it never asks the scheduler faster than once a minute.
+printf '%s\n' "$*" >> "${SHIM_SLEEPS:?SHIM_SLEEPS is not set}"
+exit 0

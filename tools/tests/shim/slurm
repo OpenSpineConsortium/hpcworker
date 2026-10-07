@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# sbatch, squeue, sacct and scancel for tools/tests/test_grid_ci.sh: a scheduler that runs nothing. The
+# test links this file under those four names first on PATH. Every call is appended to
+# $SHIM_SLURM/calls (the name and its arguments, one line), and to $SHIM_SLURM/leaks when GITHUB_TOKEN or
+# GH_TOKEN reached it. sbatch refuses what would reach a real cluster by mistake: a script or a -D
+# outside $SHIM_SLURM_ROOT (the test's temporary folder), an argument naming /rs/, and a script with no
+# `#SBATCH --time=` line (every job has a wall time); each refusal is also written to $SHIM_SLURM/refused.
+# Each job is a folder $SHIM_SLURM/jobs/<id>/ with
+# one file per field (name, state, dir, out, begin, dependency, partition, qos, args one per line, and
+# script, a copy taken at submission as Slurm keeps one); the test moves a job on by writing its state
+# and its log (at the path in out). A file $SHIM_SLURM/finish/<name> (the job name without a trailing
+# _<12 hex>) finishes a job at once: its first line is the state, the rest the log. While
+# $SHIM_SLURM/refuse exists sbatch refuses with its text; while $SHIM_SLURM/refuse-<name> exists it
+# refuses only a job of that name. While $SHIM_SLURM/warn exists sbatch also writes its text to stderr
+# when it takes a job, as sbatch's own warnings and a site's submit plugin do. sacct refuses a -j list
+# that is not job numbers, as the real one does.
+set -uo pipefail
+S=${SHIM_SLURM:?SHIM_SLURM is not set}
+ROOT=${SHIM_SLURM_ROOT:?SHIM_SLURM_ROOT is not set}
+me=$(basename "$0")
+mkdir -p "$S/jobs"
+printf '%s %s\n' "$me" "$*" >> "$S/calls"
+{ [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; } && printf '%s TOKEN-IN-ENV %s\n' "$me" "$*" >> "$S/leaks"
+under() { case "$(cd "$1" 2>/dev/null && pwd -P)/" in "$(cd "$ROOT" && pwd -P)/"*) return 0;; esac; return 1; }
+fld() { cat "$S/jobs/$1/$2" 2>/dev/null; }
+refused() { printf '%s: refused by the test shim: %s\n' "$me" "$*" | tee -a "$S/refused" >&2; exit 9; }
+
+case " $* " in *" /rs/"*|*"=/rs/"*) refused "a real cluster path in $*";; esac
+
+if [ "$me" = sbatch ]; then
+  parsable=0 dir=$(pwd) name="" part="" qos="" begin="" dep="" script=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --parsable) parsable=1; shift;;
+    -D|--chdir) dir=$2; shift 2;; --chdir=*) dir=${1#*=}; shift;;
+    -J|--job-name) name=$2; shift 2;; --job-name=*) name=${1#*=}; shift;;
+    -p|--partition) part=$2; shift 2;; --partition=*) part=${1#*=}; shift;;
+    -q|--qos) qos=$2; shift 2;; --qos=*) qos=${1#*=}; shift;;
+    --begin) begin=$2; shift 2;; --begin=*) begin=${1#*=}; shift;;
+    -d|--dependency) dep=$2; shift 2;; --dependency=*) dep=${1#*=}; shift;;
+    -*) echo "sbatch: unsupported option $1 (test shim)" >&2; exit 2;;
+    *) script=$1; shift; break;;
+  esac; done
+  [ -n "$script" ] && [ -f "$script" ] || { echo "sbatch: error: Unable to open file $script" >&2; exit 1; }
+  under "$(dirname "$script")" || refused "$script is outside $ROOT"
+  under "$dir" || refused "-D $dir is outside $ROOT"
+  grep -q '^#SBATCH --time=' "$script" || refused "$script has no wall time"
+  [ -e "$S/refuse" ] && { echo "sbatch: error: $(cat "$S/refuse")" >&2; exit 1; }
+  [ -n "$name" ] || name=$(sed -n 's/^#SBATCH --job-name=//p' "$script" | head -1)
+  key=$(printf '%s' "$name" | sed 's/_[0-9a-f]\{12\}$//')
+  [ -e "$S/refuse-$key" ] && { echo "sbatch: error: $(cat "$S/refuse-$key")" >&2; exit 1; }
+  id=$(( $(cat "$S/counter" 2>/dev/null || echo 1000) + 1 )); echo "$id" > "$S/counter"
+  out=$(sed -n 's/^#SBATCH --output=//p' "$script" | head -1); out=${out:-slurm-%j.out}; out="$dir/${out//%j/$id}"
+  J="$S/jobs/$id"; mkdir -p "$J"
+  printf '%s\n' "$name" > "$J/name"; echo PENDING > "$J/state"; printf '%s\n' "$dir" > "$J/dir"; printf '%s\n' "$out" > "$J/out"
+  printf '%s\n' "$part" > "$J/partition"; printf '%s\n' "$qos" > "$J/qos"; printf '%s\n' "$begin" > "$J/begin"; printf '%s\n' "$dep" > "$J/dependency"
+  : > "$J/args"; for a in "$@"; do printf '%s\n' "$a" >> "$J/args"; done
+  cp "$script" "$J/script"
+  if [ -f "$S/finish/$key" ]; then head -1 "$S/finish/$key" > "$J/state"; tail -n +2 "$S/finish/$key" > "$out"; fi
+  [ -e "$S/warn" ] && cat "$S/warn" >&2
+  if [ $parsable = 1 ]; then echo "$id"; else echo "Submitted batch job $id"; fi
+  exit 0
+fi
+
+if [ "$me" = squeue ]; then
+  names="" states="" fmt="%i"
+  while [ $# -gt 0 ]; do case "$1" in
+    -h|--noheader) shift;; -u|--user) shift 2;; --user=*) shift;;
+    -n|--name) names=$2; shift 2;; --name=*) names=${1#*=}; shift;;
+    -t|--states) states=$2; shift 2;; --states=*) states=${1#*=}; shift;;
+    -o|--format) fmt=$2; shift 2;; --format=*) fmt=${1#*=}; shift;;
+    *) echo "squeue: unsupported option $1 (test shim)" >&2; exit 2;;
+  esac; done
+  for J in $(ls "$S/jobs" | sort -n); do
+    st=$(fld "$J" state) nm=$(fld "$J" name)
+    if [ -n "$states" ]; then case ",$states," in *",$st,"*) ;; *) continue;; esac
+    else case "$st" in PENDING|RUNNING|CONFIGURING|COMPLETING|SUSPENDED) ;; *) continue;; esac; fi
+    [ -z "$names" ] || case ",$names," in *",$nm,"*) ;; *) continue;; esac
+    line=${fmt//%i/$J}; line=${line//%T/$st}; line=${line//%j/$nm}; printf '%s\n' "$line"
+  done
+  exit 0
+fi
+
+if [ "$me" = sacct ]; then
+  ids="" names="" since="" fields="JobID,JobName,State" sep=" "
+  while [ $# -gt 0 ]; do case "$1" in
+    -X|--allocations|-n|--noheader) shift;; -P|--parsable2) sep="|"; shift;;
+    -u|--user) shift 2;; -j|--jobs) ids=$2; shift 2;; --jobs=*) ids=${1#*=}; shift;;
+    --name) names=$2; shift 2;; --name=*) names=${1#*=}; shift;;
+    -S|--starttime) since=$2; shift 2;; -o|--format) fields=$2; shift 2;; --format=*) fields=${1#*=}; shift;;
+    *) echo "sacct: unsupported option $1 (test shim)" >&2; exit 2;;
+  esac; done
+  # without -S, sacct answers only for jobs since midnight: a query by name must say since when
+  [ -z "$names" ] || [ -n "$since" ] || refused "--name without -S"
+  [ -n "$ids$names" ] || refused "neither -j nor --name"
+  [[ -z "$ids" || "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "sacct: fatal: Bad job/step specified: $ids" >&2; exit 1; }
+  for J in $(ls "$S/jobs" | sort -n); do
+    nm=$(fld "$J" name)
+    [ -z "$ids" ] || case ",$ids," in *",$J,"*) ;; *) continue;; esac
+    [ -z "$names" ] || case ",$names," in *",$nm,"*) ;; *) continue;; esac
+    row=""; IFS=, read -r -a fl <<< "$fields"
+    for f in "${fl[@]}"; do case "$f" in JobID) v=$J;; JobName) v=$nm;; State) v=$(fld "$J" state);; *) v="";; esac; row="$row${row:+$sep}$v"; done
+    printf '%s\n' "$row"
+  done
+  exit 0
+fi
+
+if [ "$me" = scancel ]; then
+  for J in "$@"; do
+    [ -d "$S/jobs/$J" ] || { echo "scancel: error: Invalid job id $J" >&2; continue; }
+    case "$(fld "$J" state)" in PENDING|RUNNING) echo CANCELLED > "$S/jobs/$J/state";; esac
+  done
+  exit 0
+fi
+echo "slurm shim: called as $me" >&2; exit 2

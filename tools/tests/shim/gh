@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# gh for tools/tests/test_grid_ci.sh: the two API calls tools/grid_ci.sh makes, against files. Every call
+# is appended to $SHIM_GH/calls, and to $SHIM_GH/leaks when GITHUB_TOKEN or GH_TOKEN reached it.
+#   gh api repos/O/N/statuses/SHA -f context=C -f state=S -f description=D --silent
+#       appends "SHA<tab>C<tab>S<tab>D" to $SHIM_GH/statuses; a description over 140 characters is
+#       refused as GitHub refuses it (422)
+#   gh api repos/O/N/commits/SHA/check-runs[?query] [--jq EXPR]
+#       answers $SHIM_GH/checks/SHA (GitHub's JSON), or no check runs; --jq goes through the real jq
+# While $SHIM_GH/offline exists every call fails as gh does without a network. Anything else is refused.
+set -uo pipefail
+G=${SHIM_GH:?SHIM_GH is not set}
+mkdir -p "$G"
+printf 'gh %s\n' "$*" >> "$G/calls"
+{ [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; } && printf 'gh TOKEN-IN-ENV %s\n' "$*" >> "$G/leaks"
+[ "${1:-}" = api ] || { echo "gh: unsupported command $* (test shim)" >&2; exit 2; }
+[ -e "$G/offline" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+shift
+ep="" jq_expr="" fields=()
+while [ $# -gt 0 ]; do case "$1" in
+  -f|--raw-field) fields+=("$2"); shift 2;;
+  --jq|-q) jq_expr=$2; shift 2;;
+  --silent|--paginate) shift;;
+  -*) echo "gh: unsupported flag $1 (test shim)" >&2; exit 2;;
+  *) ep=$1; shift;;
+esac; done
+if [[ "$ep" =~ ^repos/[^/]+/[^/]+/statuses/([0-9a-f]{40})$ ]]; then
+  sha=${BASH_REMATCH[1]} c="" s="" d=""
+  for f in "${fields[@]}"; do case "$f" in context=*) c=${f#*=};; state=*) s=${f#*=};; description=*) d=${f#*=};; esac; done
+  [ ${#d} -le 140 ] || { echo "gh: HTTP 422: description is too long (maximum is 140 characters)" >&2; exit 1; }
+  case "$s" in pending|success|failure|error) ;; *) echo "gh: HTTP 422: state is not included in the list" >&2; exit 1;; esac
+  printf '%s\t%s\t%s\t%s\n' "$sha" "$c" "$s" "$d" >> "$G/statuses"
+  exit 0
+fi
+if [[ "$ep" =~ ^repos/[^/]+/[^/]+/commits/([0-9a-f]{40})/check-runs(\?.*)?$ ]]; then
+  f="$G/checks/${BASH_REMATCH[1]}"; json='{"total_count":0,"check_runs":[]}'
+  [ -f "$f" ] && json=$(cat "$f")
+  if [ -n "$jq_expr" ]; then printf '%s' "$json" | jq -r "$jq_expr"; else printf '%s\n' "$json"; fi
+  exit $?
+fi
+echo "gh: HTTP 404: unsupported endpoint $ep (test shim)" >&2; exit 1
