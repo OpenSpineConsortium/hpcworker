@@ -29,11 +29,6 @@ CHECKOUT_ACTION_REPO = re.compile(r"^\s*repository:\s*\S+", re.M)
 
 # (file, what matched) -> why it is still here and who removes it
 KNOWN = {
-    ("tools/grid_access.sh", "ashley"): "the roster's default source is a beethoven-vscode checkout beside this one "
-                                        "(admin.mjs roster); the access thread owns the file (2026-10-07) and is asked to take "
-                                        "the roster only from --roster-file or BEETHOVEN_ROSTER_CMD",
-    ("tools/grid_access.sh", "BEETHOVEN_SERVICE_DIR"): "the same default: a variable naming that checkout",
-    ("tools/tests/test_grid_access.sh", "BEETHOVEN_SERVICE_DIR"): "the test of that default, which goes with it",
 }
 
 
