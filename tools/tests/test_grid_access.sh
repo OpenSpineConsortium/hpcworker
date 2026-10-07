@@ -23,6 +23,7 @@ SHIMS="$REPO/tools/tests/shim"
 T=$(mktemp -d /tmp/grid_access_test.XXXXXX) || exit 1
 T=$(cd "$T" && pwd -P)
 cleanup() { [ -z "${SVC_PID:-}" ] || kill "$SVC_PID" 2>/dev/null; chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"; }
+[ -z "${KEEP_T:-}" ] || cleanup() { [ -z "${SVC_PID:-}" ] || kill "$SVC_PID" 2>/dev/null; echo "kept $T"; }
 trap cleanup EXIT
 
 SHIM_REAL_ID=$(command -v id); SHIM_REAL_STAT=$(command -v stat); export SHIM_REAL_ID SHIM_REAL_STAT
@@ -289,7 +290,7 @@ n=$(calls); ga
 t "a failing roster command: refused, no connection" eval 'rc_is 1 && has "ended with exit 3" && [ "$(calls)" = $n ]'
 unset BEETHOVEN_ROSTER_CMD
 ga
-t "no roster file or command: the access service is asked, and with no admin_token here that refuses before anything is sent; no connection" eval 'rc_is 1 && has "no admin_token in the vendor folder \($T/vendor\)" && [ "$(calls)" = $n ]'
+t "no roster file or command: the access service is asked, and with no token here that refuses before anything is sent; no connection" eval 'rc_is 1 && has "no grid_token or admin_token in the vendor folder \($T/vendor\)" && [ "$(calls)" = $n ]'
 # a command as the source: a stand-in with two subcommands, roster and readers, or a failure with its exit code
 printf '%s\n' 'case "$1" in' '  roster) printf "%s\n" ${STUB_ROSTER:-hy9698 cd5678};;' '  readers) [ -z "${STUB_READERS_EXIT:-}" ] || exit "$STUB_READERS_EXIT"; printf "%s\n" "${STUB_READERS:-}";;' '  *) echo usage >&2; exit 2;;' 'esac' > "$T/admin-stub"
 export BEETHOVEN_ROSTER_CMD="bash $T/admin-stub roster"
@@ -313,7 +314,7 @@ n=$(calls)
 ga --here --roster-file "$T/roster"
 t "--here: applied without ssh" eval 'rc_is 0 && has "^  removed (cd5678|ef9012)" && [ "$(named)" = hy9698 ] && [ "$(calls)" = $n ] && grep -q "^# target here:$ROOT$" "$STATE"'
 ga --here
-t "--here with no roster file or command: the service is asked, no token here, refused" eval 'rc_is 1 && has "no admin_token in the vendor folder"'
+t "--here with no roster file or command: the service is asked, no token here, refused" eval 'rc_is 1 && has "no grid_token or admin_token in the vendor folder"'
 roster '# nobody'
 ga --roster-file "$T/roster" --force
 t "an empty list with --force: every named entry removed, (none)" eval 'rc_is 0 && [ -z "$(named)" ] && has "^grid access list on $ROOT: \(none\)$" && [ -z "$(state_ids)" ]'
@@ -415,9 +416,9 @@ ga
 t "a failing readers command: refused, no connection" eval 'rc_is 1 && has "the readers command .* ended with exit 5" && unchanged $n'
 unset BEETHOVEN_READERS_CMD
 ga --here --roster-file "$T/roster"
-t "--here with no readers file or command: the service is asked for them, no token here, refused" eval 'rc_is 1 && has "no admin_token in the vendor folder" && unchanged $n'
+t "--here with no readers file or command: the service is asked for them, no token here, refused" eval 'rc_is 1 && has "no grid_token or admin_token in the vendor folder" && unchanged $n'
 ga --roster-file "$T/roster"
-t "no readers file or command: the service is asked for them, no token here, refused, no connection" eval 'rc_is 1 && has "no admin_token in the vendor folder" && unchanged $n'
+t "no readers file or command: the service is asked for them, no token here, refused, no connection" eval 'rc_is 1 && has "no grid_token or admin_token in the vendor folder" && unchanged $n'
 readers "ab1234 shared/access"
 OUT=$(SHIM_SSH_MODE=record bash "$GA" --site wayne --roster-file "$T/roster" --readers-file "$T/readers" 2>&1); RC=$?; runs=$((runs + 1))
 t "the pairs travel to the grid side, with the sweep" eval 'tail -1 "$SHIM_SSH_CALLS" | grep -E "bash -s -- --apply --sweep-readers --read ab1234:shared/access /rs/rs_grp_oschome cd5678 hy9698 2>&1$" >/dev/null'
@@ -567,8 +568,10 @@ export BEETHOVEN_READERS_CMD=true; unset BEETHOVEN_ROSTER_CMD
 
 echo "== the access service"
 # The stand-in: a python3 HTTPS server on 127.0.0.1 (an ephemeral port, a certificate of its own that
-# CURL_CA_BUNDLE names to curl) that compares the Authorization header byte for byte with the token the
-# test wrote, needs no Origin (a program sends none), and answers the two routes with EXACTLY the bodies
+# CURL_CA_BUNDLE names to curl) that compares the Authorization header byte for byte with the two tokens
+# the test wrote (the admin token, and the grid token, which the service takes for these two routes too),
+# writes which one it saw to a file of its own (the word admin or grid, never the token), needs no
+# Origin (a program sends none), and answers the two routes with EXACTLY the bodies
 # of the access service's published vectors admin-roster-txt and admin-readers-txt (in mode empty,
 # admin-roster-txt-empty), copied here as data; test_access_contract.py pins the export itself once
 # interface/access/ is pulled. The mode is read from a file at each request: ok, empty, 401, 403, 404 (a
@@ -577,7 +580,7 @@ echo "== the access service"
 unset BEETHOVEN_ROSTER_CMD BEETHOVEN_READERS_CMD http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 cat > "$T/svc.py" <<'PY'
 import http.server, os, ssl, sys
-token_file, mode_file, port_file, cert, key = sys.argv[1:6]
+token_file, grid_file, seen_file, mode_file, port_file, cert, key = sys.argv[1:8]
 ROSTER = "ab1234\nzz9999\n"                                                   # vectors/admin-roster-txt.json
 READERS = "cd5678 shared/data\nrd5678 lab\nrd5678 shared/access\nzq0006 .\n"  # vectors/admin-readers-txt.json
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -589,13 +592,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         with open(mode_file) as fh: mode = fh.read().strip()
         with open(token_file) as fh: token = fh.read().strip()
+        with open(grid_file) as fh: grid = fh.read().strip()
         if mode == "404": return self.answer(404, "application/json", '{"error":"no such route"}')
         if mode == "html": return self.answer(200, "text/html; charset=utf-8", "<html><body>Sign in</body></html>")
         if mode == "403": return self.answer(403, "application/json", '{"error":"origin not allowed"}')
         if mode == "500": return self.answer(500, "text/plain; charset=utf-8", "zq0001\nzq0002\n")   # a list-shaped body that must not count
         if mode == "upper" and self.path == "/admin/roster.txt": return self.answer(200, "Text/Plain; Charset=UTF-8", ROSTER)
-        if mode == "401" or self.headers.get("Authorization") != "Bearer " + token:
+        sent = self.headers.get("Authorization")
+        seen = "admin" if sent == "Bearer " + token else "grid" if grid and sent == "Bearer " + grid else ""
+        if mode == "401" or not seen:
             return self.answer(401, "application/json", '{"error":"admin token missing or wrong"}')
+        with open(seen_file, "a") as fh: fh.write(seen + "\n")
         if self.path == "/admin/roster.txt": return self.answer(200, "text/plain; charset=utf-8", "" if mode == "empty" else ROSTER)   # empty: vectors/admin-roster-txt-empty.json
         if self.path == "/admin/readers.txt": return self.answer(200, "text/plain; charset=utf-8", READERS)
         self.answer(404, "application/json", '{"error":"no such route"}')
@@ -609,8 +616,9 @@ PY
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/svc.key" -out "$T/svc.crt" -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1 \
   || { fail=$((fail + 1)); echo "FAIL openssl could not make the stand-in's certificate"; }
 TOKEN=standin-admin-token-4f9c2e71b0d8
-printf '%s\n' "$TOKEN" > "$T/svc.token"; echo ok > "$T/svc.mode"
-python3 "$T/svc.py" "$T/svc.token" "$T/svc.mode" "$T/svc.port" "$T/svc.crt" "$T/svc.key" & SVC_PID=$!
+GTOKEN=standin-grid-token-7a1d93c4e5f6
+printf '%s\n' "$TOKEN" > "$T/svc.token"; printf '%s\n' "$GTOKEN" > "$T/svc.gridtoken"; : > "$T/svc.seen"; echo ok > "$T/svc.mode"
+python3 "$T/svc.py" "$T/svc.token" "$T/svc.gridtoken" "$T/svc.seen" "$T/svc.mode" "$T/svc.port" "$T/svc.crt" "$T/svc.key" & SVC_PID=$!
 for _ in $(seq 1 100); do [ -s "$T/svc.port" ] && break; sleep 0.1; done
 [ -s "$T/svc.port" ] || { fail=$((fail + 1)); echo "FAIL the stand-in service did not start"; }
 PORT=$(cat "$T/svc.port"); SVC="https://127.0.0.1:$PORT"
@@ -636,7 +644,7 @@ OUT=$(bash "$GA" --help 2>&1); RC=$?
 t "--help names the service and its address as the source, and no tool of another repository" eval 'rc_is 0 && has "https://beethoven-access.openspineconsortium.workers.dev" && has "admin_token" && lacks "admin.mjs"'
 cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
 gs --dry-run --force
-t "service: no admin_token in the vendor folder: refused in words, nothing sent, nothing changed" eval 'rc_is 1 && has "^grid_access: no admin_token in the vendor folder \($T/vendor\): the access service.s token is the maintainer.s, one line in that file; nothing changed$" && [ "$(curls)" = 0 ] && unchanged $n'
+t "service: no grid_token or admin_token in the vendor folder: refused in words naming both, nothing sent, nothing changed" eval 'rc_is 1 && has "^grid_access: no grid_token or admin_token in the vendor folder \($T/vendor\): the access service.s token is one line in either \(grid_token, made on the admin page, reads only the two lists; admin_token is the maintainer.s\); nothing changed$" && [ "$(curls)" = 0 ] && unchanged $n'
 printf '%s\r\n' "$TOKEN" > "$T/vendor/admin_token"; chmod 644 "$T/vendor/admin_token"
 gs --dry-run --force
 t "service: admin_token readable by others (0644): refused naming the fix, nothing sent" eval 'rc_is 1 && has "^grid_access: $T/vendor/admin_token is readable by group or other \(mode 644\); make it yours alone first: chmod 600 $T/vendor/admin_token; nothing changed$" && [ "$(curls)" = 0 ] && unchanged $n'
@@ -706,17 +714,191 @@ for bad in "http://127.0.0.1:$PORT" "$SVC/admin" "$SVC/admin/roster.txt" "https:
   gs --service "$bad" --force
   t "service: a bad address ($bad): refused, nothing sent" eval 'rc_is 1 && has "must be https:// and a host name of plain characters, with nothing after it" && [ "$(curls)" = $c ] && [ "$(calls)" = $n ]'
 done
+echo "-- the grid token: read before admin_token when it is there"
+OUT=$(bash "$GA" --help 2>&1); RC=$?
+t "--help names grid_token before admin_token, and the chain's two commands" eval 'rc_is 0 && has "grid_token when that file is there, else admin_token" && has "tools/grid_access.sh --watch \[--every 15\]" && has "tools/grid_access.sh --unwatch"'
+cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
+printf '%s\n' "$GTOKEN" > "$T/vendor/grid_token"; chmod 600 "$T/vendor/grid_token"
+c=$(curls); : > "$T/svc.seen"; gs --dry-run --force
+t "grid token: preferred over admin_token, both lists asked with it (the stand-in saw it twice)" eval 'has "^grid access: 2 ids from the access service \(127.0.0.1:$PORT\)" && [ "$(curls)" = $((c + 2)) ] && [ "$(tr "\n" " " < "$T/svc.seen")" = "grid grid " ]'
+cp "$STATE" "$T/state.before"; n=$(calls)
+printf '%s\n' not-the-grid-token > "$T/vendor/grid_token"
+c=$(curls); gs --force
+t "grid token: one the service does not know (401): refused naming grid_token, admin_token not tried" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) did not accept the token for the approved list \(HTTP 401\): check grid_token in the vendor folder \($T/vendor\); nothing changed$" && [ "$(curls)" = $((c + 1)) ] && unchanged $n'
+printf '%s\n' "$GTOKEN" > "$T/vendor/grid_token"; chmod 644 "$T/vendor/grid_token"
+c=$(curls); gs --force
+t "grid token: readable by others (0644): refused naming grid_token and the fix, nothing sent" eval 'rc_is 1 && has "^grid_access: $T/vendor/grid_token is readable by group or other \(mode 644\); make it yours alone first: chmod 600 $T/vendor/grid_token; nothing changed$" && [ "$(curls)" = $c ] && unchanged $n'
+chmod 600 "$T/vendor/grid_token"; printf ' \r\n' > "$T/vendor/grid_token"
+gs --force
+t "grid token: an empty grid_token: refused naming it, nothing sent, admin_token not used instead" eval 'rc_is 1 && has "^grid_access: $T/vendor/grid_token is empty: the access service.s token is one line in it; nothing changed$" && [ "$(curls)" = $c ] && unchanged $n'
+ln -s "$T/no-such-token" "$T/vendor/grid_token.link"; rm "$T/vendor/grid_token"; mv "$T/vendor/grid_token.link" "$T/vendor/grid_token"
+gs --force
+t "grid token: a link to nothing is still grid_token: cannot read it, admin_token not used instead" eval 'rc_is 1 && has "^grid_access: cannot read $T/vendor/grid_token; nothing changed$" && [ "$(curls)" = $c ] && unchanged $n'
+rm "$T/vendor/grid_token"; : > "$T/svc.seen"
+gs --dry-run --force
+t "without grid_token, admin_token as before" eval 'has "^grid access: 2 ids from the access service" && [ "$(tr "\n" " " < "$T/svc.seen")" = "admin admin " ]'
 echo "-- the token leaves its file only for the header file"
-t "service: curl is handed the header as a file (-H @...) in the run's own folder, never the token" eval 'grep -q -- " -H @$T/tmp/grid_access\.[A-Za-z0-9]*/header " "$SHIM_CURL_CALLS" && ! grep -F -- "$TOKEN" "$SHIM_CURL_CALLS" >/dev/null && ! grep -F -- not-the-token "$SHIM_CURL_CALLS" >/dev/null'
+t "service: curl is handed the header as a file (-H @...) in the run's own folder, never a token" eval 'grep -q -- " -H @$T/tmp/grid_access\.[A-Za-z0-9]*/header " "$SHIM_CURL_CALLS" && ! grep -F -e "$TOKEN" -e not-the-token -e "$GTOKEN" -e not-the-grid-token "$SHIM_CURL_CALLS" >/dev/null'
 t "service: the header file was 0600 at every request" eval '[ "$(grep -c "^header-file-mode " "$SHIM_CURL_CALLS")" -gt 10 ] && ! grep "^header-file-mode " "$SHIM_CURL_CALLS" | grep -v "^header-file-mode 600$" >/dev/null'
 t "service: the run's folder is gone after every run" eval '[ -z "$(ls -A "$T/tmp")" ]'
-t "service: the token is in no output, nor in the log or the state" eval '! grep -F -- "$TOKEN" "$SVC_OUT" "$LOG" "$STATE" >/dev/null && ! grep -F -- not-the-token "$SVC_OUT" "$LOG" "$STATE" >/dev/null'
+t "service: neither token is in any output, nor in the log or the state" eval '! grep -F -e "$TOKEN" -e not-the-token -e "$GTOKEN" -e not-the-grid-token "$SVC_OUT" "$LOG" "$STATE" >/dev/null'
 t "service: the log names the source and the refusals, in words" eval 'grep -q "refused: the access service (127.0.0.1:$PORT) did not accept the token" "$LOG" && grep -q "refused: the access service (127.0.0.1:1) could not be reached" "$LOG"'
 export BEETHOVEN_SERVICE_URL=https://127.0.0.1:1 BEETHOVEN_READERS_CMD=true; unset CURL_CA_BUNDLE TMPDIR
 
 echo "== the log"
 t "one log line per run ($runs runs)" eval '[ "$(wc -l < "$LOG" | tr -d " ")" = "$runs" ]'
 t "the log names an unknown id once it is skipped" eval 'grep -q "1 unknown to the grid: zz0000" "$LOG"'
+
+echo "== the chain on the cluster: --watch, --unwatch and each job (--tick)"
+# sbatch, squeue, sacct and scancel are tests/shim/slurm, the scheduler test_grid_ci.sh uses: it runs
+# nothing, records each call, refuses a script or a -D outside $T, and its sbatch writes a warning to
+# stderr beside every job it takes. A job "runs" when the test runs its copied script the way Slurm
+# would: in its -D folder, with its arguments and SLURM_JOB_ID, its output appended to its log. The
+# stand-in service still answers; GITHUB_TOKEN and GH_TOKEN are markers no scheduler call may see, and
+# BEETHOVEN_READERS_CMD (true) and BEETHOVEN_SERVICE_URL (a closed port) are still set from above, as a
+# shell's own settings a job inherits and must not follow.
+cp "$REPO/tools/tests/shim/slurm" "$T/bin/slurm.shim" && chmod 755 "$T/bin/slurm.shim"
+for s in sbatch squeue sacct scancel; do ln -s slurm.shim "$T/bin/$s"; done
+export SHIM_SLURM="$T/slurm" SHIM_SLURM_ROOT="$T" CURL_CA_BUNDLE="$T/svc.crt"
+export GITHUB_TOKEN=ghp_testtoken_must_not_leak GH_TOKEN=gho_testtoken_must_not_leak
+unset HPCW_ACCESS_PARTITION HPCW_ACCESS_QOS HPCW_CI_PARTITION HPCW_CI_QOS SLURM_JOB_ID
+mkdir -p "$T/slurm"; : > "$T/slurm/calls"
+echo "sbatch: Warning: this job may be preempted and requeued" > "$T/slurm/warn"
+WD="$T/vendor/access-watch"
+DEF_PART=$(sed -n 's/^#SBATCH --partition=//p' "$REPO/tools/grid_ci.sbatch"); DEF_QOS=$(sed -n 's/^#SBATCH --qos=//p' "$REPO/tools/grid_ci.sbatch")
+J() { cat "$T/slurm/jobs/$1/$2" 2>/dev/null; }
+scalls() { grep -c "^$1 " "$T/slurm/calls"; }
+set_state() { echo "$2" > "$T/slurm/jobs/$1/state"; }
+chain_jobs() { local j; for j in $(ls "$T/slurm/jobs" 2>/dev/null | sort -n); do [ "$(J "$j" name)" = hpcw_access ] && echo "$j"; done; return 0; }
+pending() { local j; for j in $(chain_jobs); do [ "$(J "$j" state)" = PENDING ] && echo "$j"; done; return 0; }
+newest() { chain_jobs | tail -1; }
+run_tick() { # ID [VAR=VALUE...]: the job as Slurm runs it, its output appended to its log (--open-mode=append),
+  # which is opened before the job starts, as Slurm opens it: a job that renames its log keeps writing there
+  local id=$1 args=(); shift
+  mapfile -t args < "$T/slurm/jobs/$id/args"
+  set_state "$id" RUNNING
+  OUT=$({ cd "$(J "$id" dir)" && env "$@" SLURM_JOB_ID="$id" bash "$T/slurm/jobs/$id/script" "${args[@]}" 2>&1 | tee -a /dev/fd/3; } 3>>"$(J "$id" out)"); RC=$?
+  if [ "$RC" = 0 ]; then set_state "$id" COMPLETED; else set_state "$id" FAILED; fi
+}
+same_bin() { cmp -s "$WD/bin/grid_access.sh" "$1/grid_access.sh" && cmp -s "$WD/bin/grid_access_watch.sbatch" "$1/grid_access_watch.sbatch"; }
+nodetmp() { printf '/tmp/%s/hpcw_access_%s' "$(id -un)" "$1"; }
+for f in tools/grid_access.sh tools/grid_access_watch.sbatch; do OUT=$(bash -n "$REPO/$f" 2>&1); t "bash -n $f" [ -z "$OUT" ]; done
+t "the chain's job file names no queue, has a wall time of thirty minutes and the chain's name" eval '! grep -E "^#SBATCH --(partition|qos)" "$REPO/tools/grid_access_watch.sbatch" && grep -qx "#SBATCH --time=00:30:00" "$REPO/tools/grid_access_watch.sbatch" && grep -qx "#SBATCH --job-name=hpcw_access" "$REPO/tools/grid_access_watch.sbatch"'
+
+echo "-- --watch refuses, and asks the scheduler nothing"
+mv "$T/vendor/admin_token" "$T/admin_token.kept"
+if ! ( PATH=/usr/bin:/bin; command -v sbatch ) >/dev/null 2>&1; then
+  OUT=$(PATH=/usr/bin:/bin bash "$GA" --site wayne --root "$ROOT" --watch 2>&1); RC=$?
+  t "--watch where there is no sbatch: refused, it runs on the cluster" eval 'rc_is 1 && has "^grid_access: --watch runs on the cluster, in a shell on its login node: sbatch and squeue are not here; nothing started$"'
+fi
+ga --watch
+t "--watch without grid_token: refused, says where it comes from" eval 'rc_is 1 && has "^grid_access: no grid_token in the vendor folder \($T/vendor\): make the grid token on the admin page" && [ ! -s "$T/slurm/calls" ]'
+printf '%s\n' "$GTOKEN" > "$T/vendor/grid_token"; chmod 644 "$T/vendor/grid_token"
+ga --watch
+t "--watch with grid_token readable by others (0644): refused with the fix" eval 'rc_is 1 && has "grid_token is readable by group or other \(mode 644\); make it yours alone first: chmod 600 $T/vendor/grid_token; nothing started$" && [ ! -s "$T/slurm/calls" ]'
+chmod 600 "$T/vendor/grid_token"; : > "$T/vendor/grid_token"
+ga --watch
+t "--watch with an empty grid_token: refused" eval 'rc_is 1 && has "grid_token is empty: the grid token is one line in it; nothing started$" && [ ! -s "$T/slurm/calls" ]'
+printf '%s\r\n' "$GTOKEN" > "$T/vendor/grid_token"
+cp "$T/admin_token.kept" "$T/vendor/admin_token"
+ga --watch
+t "--watch with admin_token beside grid_token: refused, gives the exact rm" eval 'rc_is 1 && has "^grid_access: $T/vendor/admin_token is here too: the admin token can approve accounts and must not sit on a shared machine, and the chain needs only grid_token. Remove it first: rm $T/vendor/admin_token; nothing started$" && [ ! -s "$T/slurm/calls" ]'
+rm "$T/vendor/admin_token"; ln -s "$T/admin_token.kept" "$T/vendor/admin_token"
+ga --watch
+t "--watch with admin_token a link: the rm names the file and the link" eval 'rc_is 1 && has "Remove it first: rm $T/admin_token.kept $T/vendor/admin_token; nothing started$" && [ ! -s "$T/slurm/calls" ]'
+rm "$T/vendor/admin_token"
+for e in 4 1441 x; do
+  ga --watch --every "$e"
+  t "--watch --every $e: refused (5 to 1440), the scheduler not asked" eval 'rc_is 1 && has "5 to 1440: $e$" && [ ! -s "$T/slurm/calls" ]'
+done
+ga --watch --dry-run
+t "--watch with an option of a run's own (--dry-run): refused" eval 'rc_is 1 && has "^grid_access: --watch takes no --dry-run: " && [ ! -s "$T/slurm/calls" ]'
+ga --watch --partition p1
+t "--partition outside a job of the chain: refused, names the variable to set" eval 'rc_is 1 && has "HPCW_ACCESS_PARTITION" && [ ! -s "$T/slurm/calls" ]'
+ga --every 15
+t "--every without --watch: refused" eval 'rc_is 1 && has "--every goes with --watch"'
+t "nothing of the chain made by a refusal" eval '[ ! -e "$WD/bin" ]'
+
+echo "-- --watch starts the chain"
+ga --watch --every 7 --service "$SVC"
+W1=$(newest)
+t "--watch: one squeue and one sbatch, nothing else" eval 'rc_is 0 && [ "$(grep -c . "$T/slurm/calls")" = 2 ] && [ "$(scalls squeue)" = 1 ] && [ "$(scalls sbatch)" = 1 ] && grep -q "^squeue -h -u $(id -un) -n hpcw_access " "$T/slurm/calls"'
+t "--watch: says what it started, in two lines" eval '[ "$(printf "%s\n" "$OUT" | wc -l)" = 2 ] && has "^copying the access lists to $ROOT every 7 minutes: job $W1 looks now$" && has "^its log is $WD/access.log; tools/grid_access.sh --unwatch stops it$"'
+t "--watch: the chain's own copy of its two scripts in access-watch/bin" same_bin "$REPO/tools"
+t "--watch: the job runs that copy, in the chain's folder, singleton, at once" eval '[ "$(J $W1 dir)" = "$WD" ] && cmp -s "$T/slurm/jobs/$W1/script" "$REPO/tools/grid_access_watch.sbatch" && [ "$(J $W1 dependency)" = singleton ] && [ -z "$(J $W1 begin)" ]'
+t "--watch: on grid_ci.sbatch's own partition and QoS, carried in the job's arguments" eval '[ -n "$DEF_PART" ] && [ "$(J $W1 partition)" = "$DEF_PART" ] && [ "$(J $W1 qos)" = "$DEF_QOS" ]'
+t "--watch: the root, the site, the service and the minutes fixed in the job's arguments" eval '[ "$(J $W1 args | tr "\n" " ")" = "--tick --every 7 --site wayne --root $ROOT --service $SVC --partition $DEF_PART --qos $DEF_QOS " ]'
+echo "# changed by hand" >> "$WD/bin/grid_access.sh"
+ga --watch --every 9
+t "--watch again while a job is queued: submits nothing, refreshes the chain's copy, says so" eval 'rc_is 0 && has "^already watching \(job $W1\); its scripts now come from this copy$" && [ "$(scalls sbatch)" = 1 ] && [ "$(scalls squeue)" = 2 ] && same_bin "$REPO/tools"'
+mkdir -p "$T/tools2"; cp "$REPO/tools/grid_access.sh" "$REPO/tools/grid_access_watch.sbatch" "$T/tools2/"; echo 'if' >> "$T/tools2/grid_access_watch.sbatch"
+OUT=$(bash "$T/tools2/grid_access.sh" --site wayne --root "$ROOT" --watch 2>&1); RC=$?
+t "a copy whose job file does not parse: refused, the chain keeps its scripts" eval 'rc_is 1 && has "grid_access_watch.sbatch is missing or does not parse" && has "keeps the scripts it had" && same_bin "$REPO/tools" && [ "$(scalls sbatch)" = 1 ]'
+
+echo "-- a job of the chain"
+OUT=$(cd "$WD" && env -u SLURM_JOB_ID bash bin/grid_access.sh --tick --every 7 --site wayne --root "$ROOT" 2>&1); RC=$?
+t "--tick outside a job: refused" eval 'rc_is 1 && has "^grid_access: --tick runs inside the chain.s own job; start the chain with tools/grid_access.sh --watch$"'
+OUT=$(SLURM_JOB_ID=77 bash "$GA" --tick --every 7 --site wayne --root "$ROOT" 2>&1); RC=$?
+t "--tick from a checkout: refused, it runs the chain's own copy" eval 'rc_is 1 && has "runs the chain.s own copy, <vendor>/access-watch/bin/grid_access.sh"'
+: > "$T/svc.seen"; c=$(curls); n=$(calls)
+run_tick "$W1"
+W2=$(newest)
+t "a job: its line, then exactly one successor, in 7 minutes, singleton, the same arguments and queue" eval 'rc_is 0 && has "^== tick $W1 on [A-Za-z0-9.-]+ at [0-9T:-]+Z$" && [ "$(pending)" = "$W2" ] && [ "$(J $W2 begin)" = now+7minutes ] && [ "$(J $W2 dependency)" = singleton ] && [ "$(J $W2 args)" = "$(J $W1 args)" ] && [ "$(J $W2 partition)" = "$DEF_PART" ] && [ "$(J $W2 qos)" = "$DEF_QOS" ] && [ "$(J $W2 dir)" = "$WD" ]'
+t "a job: its successor queued before the lists are asked for" eval 'printf "%s\n" "$OUT" | awk "/^next tick: job / && !n { n = NR } /^tick done: / && !m { m = NR } END { exit !(n && m && n < m) }"'
+t "a job: the lists applied here, with the grid token, from the service (not the shell's readers command)" eval 'has "^tick done: exit 0 in [0-9]+s$" && [ "$(tr "\n" " " < "$T/svc.seen")" = "grid grid " ] && [ "$(curls)" = $((c + 2)) ] && [ "$(calls)" = $n ] && grep -qx "# target here:$ROOT" "$STATE" && grep -qx "# read cd5678 shared/data" "$STATE" && [ "$(named)" = "ab1234 cd5678" ]'
+t "a job: its log, last-tick, and the token's folder on the node gone" eval 'grep -q "^== tick $W1 on " "$WD/access.log" && grep -Eq "^[0-9T:-]+Z job $W1 on [A-Za-z0-9.-]+: exit 0 in [0-9]+s$" "$WD/last-tick" && [ ! -e "$(nodetmp $W1)" ]'
+t "a job: the header file was made in the job's own folder on the node's disk, 0600" eval 'grep -q -- " -H @$(nodetmp $W1)/grid_access\.[A-Za-z0-9]*/header " "$SHIM_CURL_CALLS" && ! grep "^header-file-mode " "$SHIM_CURL_CALLS" | grep -v "^header-file-mode 600$" >/dev/null'
+n=$(scalls sbatch)
+run_tick "$W1"
+t "the same job run again (a requeue): no second successor" eval 'rc_is 0 && has "^next tick: job $W2, queued by an earlier run of this job$" && [ "$(scalls sbatch)" = $n ] && [ "$(pending)" = "$W2" ]'
+echo "$W1" > "$WD/next.submitting"; rm -f "$WD/next"; nq=$(scalls squeue)
+run_tick "$W1"
+t "stopped between its successor's sbatch and writing it down: one squeue finds it, no second" eval 'rc_is 0 && [ "$(scalls sbatch)" = $n ] && [ "$(scalls squeue)" = $((nq + 1)) ] && [ "$(pending)" = "$W2" ] && [ ! -e "$WD/next.submitting" ] && [ "$(cat "$WD/next")" = "$W1 $W2" ]'
+t "no file of the chain's folder or the vendor folder's state holds the token; no job's arguments either" eval '! grep -rF -e "$GTOKEN" -e "$TOKEN" "$WD" "$T/vendor/state" "$T/slurm" >/dev/null'
+t "no scheduler call saw GITHUB_TOKEN or GH_TOKEN" eval '[ ! -s "$T/slurm/leaks" ]'
+
+echo "-- --unwatch, STOP, --watch again"
+nq=$(scalls squeue); nc=$(scalls scancel)
+ga --unwatch
+t "--unwatch: STOP written, the queued job cancelled, one squeue and one scancel" eval 'rc_is 0 && [ -s "$WD/STOP" ] && [ "$(J $W2 state)" = CANCELLED ] && [ "$(scalls squeue)" = $((nq + 1)) ] && [ "$(scalls scancel)" = $((nc + 1)) ] && grep -q "^scancel $W2$" "$T/slurm/calls" && has "^cancelled the queued job \(job $W2\)$" && has "^STOP written"'
+set_state "$W2" RUNNING; n=$(scalls sbatch)
+ga --watch --service "$SVC"
+t "--watch while a job still runs and STOP is set: refused, says the chain ends with it" eval 'rc_is 1 && has "job $W2 of the chain is still queued or running, but STOP is set, so the chain ends with it" && [ "$(scalls sbatch)" = $n ] && [ -e "$WD/STOP" ]'
+: > "$T/svc.seen"
+run_tick "$W2"
+t "a job that finds STOP: the chain ends, no successor, nothing applied" eval 'rc_is 0 && has "^STOP is set \($WD/STOP\): the chain ends here" && [ "$(scalls sbatch)" = $n ] && lacks "^tick done" && [ ! -s "$T/svc.seen" ] && [ -z "$(pending)" ]'
+HPCW_ACCESS_PARTITION=accp HPCW_ACCESS_QOS=accq HPCW_CI_PARTITION=cip HPCW_CI_QOS=ciq ga --watch --every 6 --service "$SVC"
+W3=$(newest)
+t "--watch after the chain ended: STOP gone, a job queued, on HPCW_ACCESS_PARTITION and HPCW_ACCESS_QOS, carried on" eval 'rc_is 0 && [ ! -e "$WD/STOP" ] && [ "$(pending)" = "$W3" ] && [ "$(J $W3 partition)" = accp ] && [ "$(J $W3 qos)" = accq ] && [ "$(J $W3 args | tr "\n" " ")" = "--tick --every 6 --site wayne --root $ROOT --service $SVC --partition accp --qos accq " ]'
+mode 401
+run_tick "$W3"
+W4=$(newest)
+t "a job whose child fails: its exit, the chain goes on, on the same queue" eval 'rc_is 1 && has "check grid_token in the vendor folder" && has "^tick done: exit 1 in " && [ "$(pending)" = "$W4" ] && [ "$(J $W4 partition)" = accp ] && [ "$(J $W4 begin)" = now+6minutes ] && grep -q ": exit 1 in " "$WD/last-tick"'
+mode ok
+{ head -c 1100000 /dev/zero | tr '\0' x; echo; } > "$WD/access.log"
+echo "QOSMaxSubmitJobPerUserLimit" > "$T/slurm/refuse"
+run_tick "$W4"
+t "the scheduler refuses the successor: the lists still applied, the chain ends there in words, exit 1" eval 'rc_is 1 && has "^could not queue the next tick: sbatch: error: QOSMaxSubmitJobPerUserLimit$" && has "^tick done: exit 0 in " && has "^the chain ends here: its next job could not be queued" && [ -z "$(pending)" ] && [ ! -e "$WD/next.submitting" ]'
+t "a log over 1 MB: kept as access.log.1, the next job starts a new one" eval '[ "$(wc -c < "$WD/access.log.1")" -gt 1048576 ] && [ ! -e "$WD/access.log" ] && grep -q "^== tick $W4 on " "$WD/access.log.1"'
+rm -f "$T/slurm/refuse"
+HPCW_CI_PARTITION=cip HPCW_CI_QOS=ciq ga --watch --service "$SVC"
+W5=$(newest)
+t "HPCW_CI_PARTITION and HPCW_CI_QOS when the chain's own are not set" eval 'rc_is 0 && [ "$(J $W5 partition)" = cip ] && [ "$(J $W5 qos)" = ciq ] && grep -qx cip "$T/slurm/jobs/$W5/args"'
+mv "$T/vendor/grid_token" "$T/grid_token.kept"; cp "$T/admin_token.kept" "$T/vendor/admin_token"; : > "$T/svc.seen"
+run_tick "$W5"
+t "a job with no grid_token: applies nothing, never falls back to admin_token, and says it is there" eval 'rc_is 1 && has "^no grid_token in the vendor folder \($T/vendor\): the chain reads the lists with the grid token alone" && has "^note: $T/vendor/admin_token is here too; .*: rm $T/vendor/admin_token$" && [ ! -s "$T/svc.seen" ] && [ -n "$(pending)" ]'
+rm "$T/vendor/admin_token"; mv "$T/grid_token.kept" "$T/vendor/grid_token"
+for j in $(pending); do set_state "$j" CANCELLED; done
+ga --watch
+W6=$(newest)
+t "--watch with no --service but \$BEETHOVEN_SERVICE_URL set: that address goes with every job" eval 'rc_is 0 && grep -qx -- "--service" "$T/slurm/jobs/$W6/args" && grep -qx "https://127.0.0.1:1" "$T/slurm/jobs/$W6/args"'
+set_state "$W6" CANCELLED
+env -u BEETHOVEN_SERVICE_URL bash "$GA" --site wayne --root "$ROOT" --watch >/dev/null 2>&1
+W7=$(newest)
+t "--watch with no service named: none in the job's arguments (each job's child takes the tool's own)" eval '[ "$W7" != "$W6" ] && ! grep -qx -- "--service" "$T/slurm/jobs/$W7/args"'
+set_state "$W7" CANCELLED
+t "after all of it: no token in the chain's folder, the state or the scheduler's records; no token variable reached it" eval '! grep -rF -e "$GTOKEN" -e "$TOKEN" "$WD" "$T/vendor/state" "$T/slurm" >/dev/null && [ ! -s "$T/slurm/leaks" ] && [ ! -s "$T/slurm/refused" ]'
+unset GITHUB_TOKEN GH_TOKEN CURL_CA_BUNDLE
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

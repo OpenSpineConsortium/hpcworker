@@ -303,15 +303,67 @@ the root's ACL.
 service for them itself: `GET /admin/roster.txt` for the approved list and `GET /admin/readers.txt`
 for the readers (below), two plain-text answers from
 `https://beethoven-access.openspineconsortium.workers.dev` (another address only with `--service URL`
-or `BEETHOVEN_SERVICE_URL`; most people never set it), with the admin token. The token is the file
-`admin_token` in the vendor folder (`BEETHOVEN_VENDOR_DIR`, else `~/.beethoven-vendor`, which in WSL
-is not your Windows folder unless you name it): the maintainer's, one line, and the file must be
-yours alone (`chmod 600`; the tool refuses a file that group or other can read and says so). The
+or `BEETHOVEN_SERVICE_URL`; most people never set it), with a token from the vendor folder
+(`BEETHOVEN_VENDOR_DIR`, else `~/.beethoven-vendor`): the file `grid_token` when it is there, else
+`admin_token`. The **grid token** is made on the admin page and reads those two lists and nothing
+else, so it is the one the grid keeps. The **admin token** is the maintainer's and can also approve
+accounts, so it stays on your own PC and never goes to the grid (the grid's way below refuses to
+start while one sits in the grid's vendor folder). Either file is one line and must be yours alone
+(`chmod 600`; the tool refuses a file that group or other can read and says so, naming the file). The
 token never appears on a command line, in the log or in a message: curl reads it from a header file
 of the run's own, mode `0600`, in a temporary folder the run removes. The tool looks for nothing
 beside its own checkout and runs no other repository's code; your own list stands in for the
 service's when you name one (`--roster-file FILE` and `--readers-file FILE`, or a command in
-`BEETHOVEN_ROSTER_CMD` and `BEETHOVEN_READERS_CMD`). The easy way, from PowerShell in the checkout:
+`BEETHOVEN_ROSTER_CMD` and `BEETHOVEN_READERS_CMD`).
+
+**At Wayne State the grid applies the lists itself** (decided 2026-10-07: the maintainer's PC has no
+WSL). Once, three steps:
+
+1. On the admin page (`https://openspineconsortium.com/beethoven/admin.html`), make the grid token;
+   the page saves it as a file named `grid_token` (in your Downloads folder) and shows it only that
+   once. Making another replaces it, and the grid's copy then stops working until you copy the new
+   one; withdrawing it on the page stops it at once.
+2. In Git Bash on your PC, with the VPN on, copy it into the grid's vendor folder, readable by you
+   alone, and remove the download. The token travels on ssh's input, never on a command line:
+
+   ```
+   ssh go2432@grid.wayne.edu 'umask 077 && mkdir -p ~/.beethoven-vendor && cat > ~/.beethoven-vendor/grid_token' < ~/Downloads/grid_token
+   rm ~/Downloads/grid_token
+   ```
+
+3. In a grid shell (the portal's Shell app, or ssh), in a fresh clone of this repository, start the
+   chain:
+
+   ```
+   gh repo clone OpenSpineConsortium/hpcworker ~/hpcworker-access && cd ~/hpcworker-access
+   bash tools/grid_access.sh --watch
+   ```
+
+`--watch` refuses, and starts nothing, while `~/.beethoven-vendor/grid_token` is missing, empty or
+readable by others, and while `~/.beethoven-vendor/admin_token` is there too (it prints the `rm` that
+removes it). On the login node it is file work, one `squeue` and one `sbatch`: it copies its two
+scripts to `~/.beethoven-vendor/access-watch/bin/` (the clone may go afterwards) and queues the first
+job, which looks at once. It says
+
+```
+copying the access lists to /rs/rs_grp_oschome every 15 minutes: job 40561234 looks now
+its log is <your home folder>/.beethoven-vendor/access-watch/access.log; tools/grid_access.sh --unwatch stops it
+```
+
+Each job (`tools/grid_access_watch.sbatch`: one core, 1 GB, thirty minutes at most, on the queue the
+grid's CI lane uses, `reqp` with QoS `requeue`; `HPCW_ACCESS_PARTITION` and `HPCW_ACCESS_QOS` set before
+`--watch` choose another) first queues the next one, fifteen minutes on (`--every N`, 5 to 1440, for
+another interval), then runs the tool once on its compute node as `--here --quiet` with the service as
+the source of both lists, and ends. Its lines go to `access.log` in that folder (one older log kept as
+`access.log.1`), and `last-tick` says when the last one ran, where, with which exit and how long it
+took. A job writes the token's header file on its node's own disk, never on the volume. `--watch` again
+while the chain runs starts nothing and gives the chain the scripts of the clone it was typed in;
+`bash tools/grid_access.sh --unwatch` stops it (the job running then finishes and none follows).
+Started once, it needs nobody: the list follows the service whether your PC is on or not.
+
+**The other way, where WSL is at hand,** is the scheduled task on the PC (below, "Every fifteen
+minutes, by itself"), which uses `admin_token` on the PC (or `grid_token`, if you keep one there);
+run one of the two, not both. By hand, from PowerShell in the checkout:
 
 ```
 powershell -NoProfile -File tools\grid_access_task.ps1 -Run -ToolArgs '--dry-run --force'   # the grid's entries now, and what it would add and remove; changes nothing
@@ -326,6 +378,16 @@ tools/grid_access.sh --dry-run --force
 tools/grid_access.sh
 ```
 
+On the grid, the same by hand runs in a shell on a compute node, never on the login node (the tool
+reads the service there with `curl` and, for a reader of `.`, walks the whole volume):
+
+```
+srun -p secp --qos=secondary -t 00:30:00 --pty bash        # a shell on a compute node
+export TMPDIR=/tmp/$USER/grid_access_by_hand; mkdir -p -m 700 "$TMPDIR"   # the node's own disk, not the volume
+cd ~/hpcworker-access && bash tools/grid_access.sh --here --dry-run --force
+rm -rf "$TMPDIR"; exit
+```
+
 **What the service gives.** To see the two lists as the service gives them, open the admin page
 (`https://openspineconsortium.com/beethoven/admin.html`), or run `node admin.mjs roster` and
 `node admin.mjs readers` in the service's own repository, `OpenSpineConsortium/beethoven-access`,
@@ -333,27 +395,40 @@ which print the two answers byte for byte and read the same `admin_token`. Never
 a command of your own.
 
 **When the tool refuses.** A refusal changes nothing on the grid, writes no state and leaves one line
-in the log (`state\grid_access.log`); each says what to do:
+in the log (`state/grid_access.log` in the vendor folder: on the PC `state\grid_access.log`, on the
+grid `~/.beethoven-vendor/state/grid_access.log`, and the chain's job also writes it to its own
+`access.log`); each says what to do:
 
-- `no admin_token in the vendor folder (...)`: put the maintainer's token in that file, one line.
-- `admin_token is readable by group or other (mode 644); make it yours alone first: chmod 600 ...`:
-  in WSL, `chmod 600` the file (a link is judged by the file it names). Your vendor folder is on a
-  Windows drive (`/mnt/c`): when WSL mounts it without `metadata`, which is WSL's default, every file
-  there reads as 0777 and `chmod` does nothing, so the tool does not check the mode there and says so
-  in a note instead (`admin_token is on a Windows drive WSL shows without file modes...`); the Windows
-  folder's own permissions keep the file yours (a folder under `C:\Users\<you>` is your account's
-  alone unless you shared it). With `metadata` (`[automount]` `options = "metadata"` in
-  `/etc/wsl.conf`, then `wsl --shutdown`) the modes are real and the tool checks them as anywhere
-  else. Which of the two your PC has is not yet measured.
-- `did not accept the token for the approved list (HTTP 401)` (or `403`): the token in `admin_token`
-  is not the one the deployed service knows; check the file against the vendor folder's copy the
-  service was deployed with.
+- `no grid_token or admin_token in the vendor folder (...)`: put a token in one of them, one line
+  (`grid_token` on the grid, made on the admin page; on the PC either). `--watch` names only
+  `grid_token` (`no grid_token in the vendor folder (...)`), since the chain uses nothing else.
+- `.../grid_token is readable by group or other (mode 644); make it yours alone first: chmod 600 ...`
+  (or `admin_token`, whichever the run took): `chmod 600` the file it names (a link is judged by the
+  file it names). On the grid that is all. On the PC your vendor folder is on a Windows drive
+  (`/mnt/c`): when WSL mounts it without `metadata`, which is WSL's default, every file there reads as
+  0777 and `chmod` does nothing, so the tool does not check the mode there and says so in a note
+  instead (`... is on a Windows drive WSL shows without file modes...`); the Windows folder's own
+  permissions keep the file yours (a folder under `C:\Users\<you>` is your account's alone unless you
+  shared it). With `metadata` (`[automount]` `options = "metadata"` in `/etc/wsl.conf`, then
+  `wsl --shutdown`) the modes are real and the tool checks them as anywhere else. Which of the two
+  your PC has is not yet measured.
+- `.../admin_token is here too: ... Remove it first: rm ...` (`--watch` only): the admin token can
+  approve accounts and does not belong on a machine others log in to; run the `rm` it prints (for a
+  link it names both the link and the file behind it), then `--watch` again.
+- `did not accept the token for the approved list (HTTP 401): check grid_token in the vendor folder
+  (...)` (or `403`, or `admin_token`): the token in the file it names is not one the deployed service
+  knows. A grid token stops working when a new one is made or it is withdrawn on the admin page; make
+  one and copy it again (step 1 and 2 above). An admin token must match the vendor folder's copy the
+  service was deployed with. The chain keeps running and says so again every fifteen minutes until the
+  file is right; the list on the grid stays as it was.
 - `does not give the approved list yet (HTTP 404): deploy the service`: the service deployed is older
-  than the two routes (they landed 2026-10-07); deploy it, under both names, before the task runs.
+  than the two routes (they landed 2026-10-07); deploy it, under both names, before the chain or the
+  task runs.
 - `answered the approved list as text/html, not as text: a sign-in page or another service stands in
   front of it`: something answers in the service's place (a sign-in page, a captive network); check
-  the address and the network from WSL.
-- `could not be reached for the approved list (curl: ...)`: no way to the service from WSL just now;
+  the address and the network from where the tool ran (a compute node, or WSL).
+- `could not be reached for the approved list (curl: ...)`: no way to the service from where the tool
+  ran just now (a compute node, or WSL);
   the message names the host. The grid was not asked.
 - `gave no AccessID; applying that would shut every student out`: the service's approved list is
   empty; `--force` applies it when that is meant.
@@ -374,7 +449,7 @@ and not a link, or yours (below, "A folder in another student's place"); `shared
 every folder on the way enterable; `shared/access` and `go2432` closed. Those checks are cheap and run
 every time. The full sweep, that nothing at all under `shared/beethoven` is closed to others, reads
 tens of thousands of entries on the login node, so it runs only with `--check-tree` or `--open-tree`
-and never from the scheduled task; run `--check-tree` by hand after a publish or after changing
+and never from the chain or the scheduled task; run `--check-tree` by hand after a publish or after changing
 anything under `shared/beethoven`. It ends with the list itself: `grid access list on
 /rs/rs_grp_oschome: hy9698 ...`.
 
@@ -399,8 +474,10 @@ not yours, or when the folder has lost `other::---` or its sticky bit (it prints
 `chmod +t`).
 
 It connects to the grid only when the list differs from the one it last applied. That one is kept in
-the vendor folder on your PC, `state\grid_access.wayne.ids`, with one line per run in
-`state\grid_access.log` beside it. So a run with nothing new costs no ssh connection. `--force`,
+the vendor folder where the tool runs (on your PC `state\grid_access.wayne.ids`, for the chain
+`~/.beethoven-vendor/state/grid_access.wayne.ids` on the grid), with one line per run in
+`grid_access.log` beside it. So a run with nothing new costs no ssh connection, and a look of the
+chain's with nothing new (and no reader's daily sweep due) reads the two lists and touches no ACL. `--force`,
 `--check-tree` and `--open-tree` connect anyway. An approved AccessID that has no grid account yet is
 skipped ("no such account on this system yet") and recorded in that file with the day, as `# unknown
 zz0000 2026-10-02`; a list that differs from the last one only by such ids counts as unchanged, so the
@@ -408,7 +485,8 @@ id is tried again once a day (the first run on a later day connects for it), or 
 until the account exists and it gets its entry. If an id the grid knew stops resolving for a moment,
 its entry is left as it is and the read-back allows for it. On the grid it is file work only, with
 bash, coreutils, sed, awk, `getfacl` and `setfacl`: nothing on warrior's banned list, no scheduler
-call, no temp file.
+call, no temp file. The chain's job does the same work on its compute node, after asking the service
+with `curl`; its one temporary folder, for the token's header file, is on that node's own disk.
 
 **Readers: the group's read on a folder, one account and one folder at a time.** Some people need to
 read lab data without running Beethoven, and ask to be put in the group `oschome` for it, which is
@@ -488,19 +566,32 @@ with the count,
 ```
 
 and nothing below the folder is changed (its own `r-x` is still given); the walk still reads every
-entry to count them. Each sweep walks the whole volume with `getfacl -R` on warrior once for each reader
-of `.`, and once more for each `.` taken off in that run, which is file work like the rest of this tool:
-when the reader list changes, on the first run of each day while there is such a reader, and with
-`--force` or `--check-tree`. How many entries the volume holds and how long that walk takes on the grid
-are not yet measured; `-Run -ToolArgs '--dry-run --force'` walks it, prints the count in the reader's
-line (`... reads as the group reads it (N entries; ...)`, or the `FAILED` line above) and changes
-nothing. Time that run: the scheduled task (below) stops a run after ten minutes (whether that also
-ends the walk on warrior is not yet measured), and a run stopped before it ends records nothing, so
-each later run (every fifteen minutes) would start the whole walk again; approve `.` only after a timed dry run has ended well inside ten minutes. To see it before
-approving `.`, put the lines the service gives today (the admin page's readers, or `node admin.mjs
-readers` in its repository) and the line `<AccessID> .` in a file and name it for that one dry run:
-`-Run -ToolArgs '--dry-run --force --readers-file /mnt/c/Users/grego/readers.txt'` (a readers file
-takes the place of the service's answer for that run).
+entry to count them. Each sweep walks the whole volume with `getfacl -R` once for each reader of `.`,
+and once more for each `.` taken off in that run: on the chain's compute node (the grid's way), or on
+warrior over ssh (the PC's way), file work like the rest of this tool. It runs when the reader list
+changes, on the first run of each day while there is such a reader, and with `--force` or
+`--check-tree`. How many entries the volume holds and how long that walk takes on the grid are not
+yet measured. A chain's job has thirty minutes and the PC's task stops a run after ten (whether that
+also ends the walk on warrior is not yet measured); a run cut off before it ends records nothing, so
+every later run would start the whole walk again. So time it before approving `.`, on a compute
+node, never on the login node: put the lines the service gives today (the admin page's readers, or
+`node admin.mjs readers` in its repository) and the line `<AccessID> .` in a file, and name that file
+for one dry run, which walks the volume, prints the count in the reader's line (`... reads as the
+group reads it (N entries; ...)`, or the `FAILED` line above) and changes nothing:
+
+```
+srun -p secp --qos=secondary -t 00:30:00 --pty bash        # a shell on a compute node
+export TMPDIR=/tmp/$USER/grid_access_by_hand; mkdir -p -m 700 "$TMPDIR"   # the node's own disk
+cat > "$TMPDIR/readers.txt"                                 # paste today's lines and `<AccessID> .`, then Ctrl-D
+cd ~/hpcworker-access && time bash tools/grid_access.sh --here --dry-run --force --readers-file "$TMPDIR/readers.txt"
+rm -rf "$TMPDIR"; exit
+```
+
+The readers file takes the place of the service's answer for that run only; the approved list still
+comes from the service, with the grid token. Approve `.` only after that run has ended well inside the
+limit of the way you use: thirty minutes for the chain, ten for the PC's task, with room for the
+volume to grow. On the PC the same run is `-Run -ToolArgs '--dry-run --force --readers-file
+/mnt/c/Users/grego/readers.txt'`, which times the walk from warrior instead.
 Taking `.` off removes every entry of that reader's without write under the folder, but not the
 folder's own entry, which follows the reader list: `--x` while the reader still reads another folder,
 gone when they read none. A reader moved from `.` to named folders, or back, is right after one run
@@ -536,7 +627,7 @@ not is a `FAILED` line of its own, exit 2, for example
   FAILED  the root's entries: cd5678 (directory) belongs to hy9698, not to cd5678, so it has taken the place of cd5678's own folder (LAB_LEAD.md, section 9)
 ```
 
-An entry the system cannot name at that moment (getfacl shows a bare number) is left alone and reported as `left`; remove it by hand with `setfacl -x u:<number> /rs/rs_grp_oschome` only when that account is really gone. Run `-Run -ToolArgs '--force'` just before telling a newly approved student to start, so the root is checked at that moment.
+An entry the system cannot name at that moment (getfacl shows a bare number) is left alone and reported as `left`; remove it by hand with `setfacl -x u:<number> /rs/rs_grp_oschome` only when that account is really gone. Just before telling a newly approved student to start, run the tool with `--force` (on the grid `--here --force` in a shell on a compute node, as above; on the PC `-Run -ToolArgs '--force'`), so the root is checked at that moment.
 
 The list is still applied. Then, on warrior as yourself (the root is yours, and in a sticky folder its
 owner may remove or rename any entry):
@@ -553,7 +644,9 @@ that made it removes it. Tell that student what was removed or renamed and why, 
 whose name it took; if that student had already run, ask them to stop their worker first, since its
 files were in that folder. Not tried on the grid.
 
-**Every fifteen minutes, by itself.** In PowerShell on your PC, no administrator rights:
+**Every fifteen minutes, by itself, from the PC** (the other way, where WSL is at hand; at Wayne State
+the chain above does this, and the two are never run together: with the chain running, `-Remove` the
+task). In PowerShell on your PC, no administrator rights:
 
 ```
 powershell -NoProfile -File tools\grid_access_task.ps1 -Install
@@ -577,7 +670,7 @@ registering it again does no harm. Run `-Run -ToolArgs '--dry-run --force'` once
 `-Install` again, which replaces the task. The task never sweeps the whole tree; its first run of
 each day sweeps the readers' folders, while there is a reader or a folder not yet taken back.
 While your PC is off or you are signed out, nothing runs: a student approved then waits until it is on
-again.
+again (the chain has no such wait).
 
 **By hand**, on warrior as yourself (the trailing `/` names the folder behind the link):
 
@@ -600,7 +693,8 @@ gives:
 setup: failed (the setup line ended with exit 126: bash: /rs/rs_grp_oschome/shared/beethoven/hpcworker/current/bin/hpcworker: Permission denied)
 ```
 
-That is this list, not the student's computer. Run the tool (or wait for the task); then the student
+That is this list, not the student's computer. Run the tool (or wait for the chain's next look, at
+most fifteen minutes); then the student
 closes Chrome completely, opens it again and clicks **Connect** (`USE.md`, part 7).
 
 **Taking an AccessID off.** Withdrawing an approval takes the entry away at the next run. That
@@ -622,7 +716,12 @@ was run only in the test's temporary folder, with the emulated `setfacl`. The ac
 tool's source was run only against a stand-in on `127.0.0.1` that answers the service's published
 vectors (`tools/tests/test_grid_access.sh`); the deployed service has not yet answered the tool,
 and whether your vendor folder under `/mnt/c` has real file modes is not yet measured (above, "When
-the tool refuses"; the tool runs either way). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
+the tool refuses"; the tool runs either way). The chain (`--watch`, its jobs and `--unwatch`) was run only against a
+stand-in scheduler that records each call and whose jobs the test runs in place
+(`tools/tests/test_grid_access.sh`); it has not run on the grid, and whether a compute node reaches
+the service, whether `getfacl` and `setfacl` are there outside a container, and how Wayne State's
+Slurm treats the `--begin`/`--dependency=singleton` chain are not yet measured
+(`docs/OPEN_QUESTIONS.md`). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
 been seen to work, and no reader yet. Run `--dry-run --force` first.
 
 ## 10. Not proven

@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
   The Windows Scheduled Task that keeps the grid's approved list: tools/grid_access.sh --quiet, run in
-  WSL every 15 minutes while you are signed in to Windows.
+  WSL every 15 minutes while you are signed in to Windows. The other way, where the PC has no WSL, is
+  the cluster's own chain (grid_access.sh --watch, LAB_LEAD.md section 9); run one of the two, not both.
 
 .DESCRIPTION
   -Install  registers the task "Beethoven grid access" for the Windows account running this script. No
@@ -31,8 +32,9 @@
   %USERPROFILE%\.beethoven-vendor and <tool> grid_access.sh in this folder, both as WSL paths
   (wslpath). The network goes through WSL, where ssh to wsu-grid works. grid_access.sh reads the
   approved list and the readers' folders from the access service itself (GET /admin/roster.txt and
-  /admin/readers.txt), with the admin token it finds in the vendor folder (the file admin_token, the
-  maintainer's, which must be readable by its owner alone: chmod 600 in WSL); the token travels in a
+  /admin/readers.txt), with the token it finds in the vendor folder (the file grid_token when it is
+  there, made on the admin page, which reads the two lists and nothing else; else admin_token, the
+  maintainer's; either must be readable by its owner alone: chmod 600 in WSL); the token travels in a
   header file curl reads, never on a command line. When the list has not changed since the last run,
   grid_access.sh does not connect to the grid at all (an approved AccessID the grid does not know yet
   is tried again once a day), and the task's runs never sweep the whole tree (that is --check-tree, by
