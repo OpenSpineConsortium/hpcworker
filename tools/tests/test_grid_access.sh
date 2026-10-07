@@ -4,8 +4,9 @@
 # Everything happens in a temporary folder under /tmp that stands for the grid's volume: vol/ is its
 # physical root and rs_grp_oschome a link to it, as on the grid. Nothing reaches the grid, the access
 # service or the real vendor folder: ssh is tests/shim/ssh (it records each call and runs the grid side
-# here, with the script on stdin as sshd would), and HOME, BEETHOVEN_VENDOR_DIR and BEETHOVEN_SERVICE_DIR
-# point into the temporary folder; BEETHOVEN_ROSTER_CMD is unset.
+# here, with the script on stdin as sshd would), and HOME and BEETHOVEN_VENDOR_DIR point into the
+# temporary folder; BEETHOVEN_ROSTER_CMD is unset. The access service's admin.mjs is a stand-in shell
+# script ($T/admin-stub) named through the two commands, as the scheduled task names the real one.
 # setfacl and getfacl are always tests/shim/acl, an emulation of the POSIX ACL behaviour the tool relies
 # on (WSL has no acl package, and the grid's AccessIDs exist on no test machine, so even a real setfacl
 # could not name them); `id` answers for the test's accounts (tests/shim/id); `stat` answers another
@@ -28,7 +29,7 @@ for s in acl id ssh stat; do cp "$SHIMS/$s" "$T/bin/$s.shim" && chmod 755 "$T/bi
 ln -s acl.shim "$T/bin/setfacl"; ln -s acl.shim "$T/bin/getfacl"; ln -s id.shim "$T/bin/id"; ln -s ssh.shim "$T/bin/ssh"; ln -s stat.shim "$T/bin/stat"
 export PATH="$T/bin:$PATH" SHIM_ACL_STORE="$T/acl" SHIM_LOG="$T/shim.log" SHIM_SSH_CALLS="$T/ssh.calls" SHIM_OWNERS="$T/owners"
 export SHIM_USERS="hy9698 ab1234 cd5678 ef9012"
-export HOME="$T/home" BEETHOVEN_VENDOR_DIR="$T/vendor" BEETHOVEN_SERVICE_DIR="$T/no-service"
+export HOME="$T/home" BEETHOVEN_VENDOR_DIR="$T/vendor"
 unset BEETHOVEN_ROSTER_CMD SHIM_SSH_MODE SHIM_ACL_FAIL SHIM_GROUP_OWNERS GA_READ_CAP
 export BEETHOVEN_READERS_CMD=true   # no reader until the readers' section
 ME=$(id -un); GRP=$(id -gn)
@@ -282,18 +283,16 @@ n=$(calls); ga
 t "a failing roster command: refused, no connection" eval 'rc_is 1 && has "ended with exit 3" && [ "$(calls)" = $n ]'
 unset BEETHOVEN_ROSTER_CMD
 ga
-t "no service checkout: refused, no connection" eval 'rc_is 1 && has "no $T/no-service/tools/intake/admin.mjs" && [ "$(calls)" = $n ]'
-if command -v node >/dev/null 2>&1; then
-  mkdir -p "$T/svc/tools/intake"
-  printf '%s\n' "if (process.argv[2] !== 'roster') { console.error('usage'); process.exit(2); }" "console.log('hy9698'); console.log('cd5678');" > "$T/svc/tools/intake/admin.mjs"
-  BEETHOVEN_SERVICE_DIR="$T/svc" ga
-  t "admin.mjs roster from \$BEETHOVEN_SERVICE_DIR: applied" eval 'rc_is 0 && has "^  added   cd5678" && has "^  removed ef9012" && [ "$(named)" = "cd5678 hy9698" ] && [ "$(calls)" = $((n + 1)) ]'
-  printf '%s\n' "process.exit(4);" > "$T/svc/tools/intake/admin.mjs"
-  BEETHOVEN_SERVICE_DIR="$T/svc" ga
-  t "admin.mjs failing: refused, no connection" eval 'rc_is 1 && has "ended with exit 4" && [ "$(calls)" = $((n + 1)) ]'
-else
-  echo "skip the admin.mjs tests: no node on PATH"
-fi
+t "no roster file or command: refused, no connection (nothing beside this checkout is looked for)" eval 'rc_is 1 && has "no approved list named: give --roster-file FILE, or set .BEETHOVEN_ROSTER_CMD" && [ "$(calls)" = $n ]'
+# the stand-in for the access service's admin.mjs: roster, readers, or a failure with its exit code
+printf '%s\n' 'case "$1" in' '  roster) printf "%s\n" ${STUB_ROSTER:-hy9698 cd5678};;' '  readers) [ -z "${STUB_READERS_EXIT:-}" ] || exit "$STUB_READERS_EXIT"; printf "%s\n" "${STUB_READERS:-}";;' '  *) echo usage >&2; exit 2;;' 'esac' > "$T/admin-stub"
+export BEETHOVEN_ROSTER_CMD="bash $T/admin-stub roster"
+ga
+t "a roster command that prints a changed list: applied" eval 'rc_is 0 && has "^  added   cd5678" && has "^  removed ef9012" && [ "$(named)" = "cd5678 hy9698" ] && [ "$(calls)" = $((n + 1)) ]'
+export BEETHOVEN_ROSTER_CMD="bash $T/admin-stub nothing"
+ga
+t "a roster command failing: refused, no connection" eval 'rc_is 1 && has "ended with exit 2" && [ "$(calls)" = $((n + 1)) ]'
+unset BEETHOVEN_ROSTER_CMD
 
 echo "== the root from the site profile, and --here"
 roster hy9698 cd5678
@@ -308,7 +307,7 @@ n=$(calls)
 ga --here --roster-file "$T/roster"
 t "--here: applied without ssh" eval 'rc_is 0 && has "^  removed (cd5678|ef9012)" && [ "$(named)" = hy9698 ] && [ "$(calls)" = $n ] && grep -q "^# target here:$ROOT$" "$STATE"'
 ga --here
-t "--here with no roster file or command: refused" eval 'rc_is 1 && has "with --here give --roster-file"'
+t "--here with no roster file or command: refused" eval 'rc_is 1 && has "no approved list named"'
 roster '# nobody'
 ga --roster-file "$T/roster" --force
 t "an empty list with --force: every named entry removed, (none)" eval 'rc_is 0 && [ -z "$(named)" ] && has "^grid access list on $ROOT: \(none\)$" && [ -z "$(state_ids)" ]'
@@ -410,20 +409,20 @@ ga
 t "a failing readers command: refused, no connection" eval 'rc_is 1 && has "the readers command .* ended with exit 5" && unchanged $n'
 unset BEETHOVEN_READERS_CMD
 ga --here --roster-file "$T/roster"
-t "--here with no readers file or command: refused" eval 'rc_is 1 && has "with --here give --readers-file" && unchanged $n'
+t "--here with no readers file or command: refused" eval 'rc_is 1 && has "no reader list named: give --readers-file FILE, or set .BEETHOVEN_READERS_CMD" && unchanged $n'
+ga --roster-file "$T/roster"
+t "no readers file or command: refused, no connection (nothing beside this checkout is looked for)" eval 'rc_is 1 && has "no reader list named" && unchanged $n'
 readers "ab1234 shared/access"
 OUT=$(SHIM_SSH_MODE=record bash "$GA" --site wayne --roster-file "$T/roster" --readers-file "$T/readers" 2>&1); RC=$?; runs=$((runs + 1))
 t "the pairs travel to the grid side, with the sweep" eval 'tail -1 "$SHIM_SSH_CALLS" | grep -E "bash -s -- --apply --sweep-readers --read ab1234:shared/access /rs/rs_grp_oschome cd5678 hy9698 2>&1$" >/dev/null'
 OUT=$(bash "$GA" --apply --read 'ab1234:../x' "$ROOT" hy9698 2>&1); RC=$?
 t "grid side: a bad --read refused, nothing changed" eval 'rc_is 1 && has "is not an AccessID and a folder" && unchanged $((n + 1))'
-if command -v node >/dev/null 2>&1; then
-  printf '%s\n' "const c = process.argv[2];" "if (c === 'roster') { console.log('hy9698'); console.log('cd5678'); }" "else if (c === 'readers') { console.log('ab1234 shared/access'); }" "else { console.error('usage'); process.exit(2); }" > "$T/svc/tools/intake/admin.mjs"
-  BEETHOVEN_SERVICE_DIR="$T/svc" ga
-  t "admin.mjs readers from \$BEETHOVEN_SERVICE_DIR: applied" eval 'rc_is 0 && has "^  added   ab1234 \(--x, a reader\)" && grep -qx "# read ab1234 shared/access" "$STATE"'
-  printf '%s\n' "if (process.argv[2] === 'readers') process.exit(6); console.log('hy9698');" > "$T/svc/tools/intake/admin.mjs"
-  n=$(calls); BEETHOVEN_SERVICE_DIR="$T/svc" ga --force
-  t "admin.mjs readers failing (a service without the reader list): refused, no connection" eval 'rc_is 1 && has "admin.mjs readers ended with exit 6" && [ "$(calls)" = $n ]'
-fi
+# one stand-in command, two subcommands, as the scheduled task names the access service's admin.mjs
+export BEETHOVEN_ROSTER_CMD="bash $T/admin-stub roster" BEETHOVEN_READERS_CMD="bash $T/admin-stub readers"
+STUB_READERS="ab1234 shared/access" ga
+t "the readers command's pairs: applied" eval 'rc_is 0 && has "^  added   ab1234 \(--x, a reader\)" && grep -qx "# read ab1234 shared/access" "$STATE"'
+n=$(calls); STUB_READERS_EXIT=1 ga --force
+t "the readers command failing (a service without the reader list): refused, no connection" eval 'rc_is 1 && has "the readers command .* ended with exit 1" && [ "$(calls)" = $n ]'
 export BEETHOVEN_READERS_CMD=true
 roster hy9698 cd5678
 ga

@@ -19,22 +19,25 @@
 #                        [--dry-run] [--force] [--quiet] [--open-tree] [--check-tree]
 #   tools/grid_access.sh --here --roster-file FILE --readers-file FILE [the same options]   on the cluster
 #
-# The approved AccessIDs come from, in order: --roster-file FILE (one per line; blank lines and lines
-# starting with # are skipped), the command in $BEETHOVEN_ROSTER_CMD, else `node
-# <service>/tools/intake/admin.mjs roster`, where <service> is $BEETHOVEN_SERVICE_DIR or the checkout
-# `ashley` beside this one (admin.mjs finds the admin token itself). `roster` prints the accounts
-# approved with the extension grant, and only those: not the store reviewers' mock account, and not an
-# account approved for the lab only (approve-lab, grant lab), which therefore never reaches the grid's
-# folders. Each must look like ab1234 (^[a-z]{2}[0-9]{4}$) or the run refuses, naming the line, and
-# nothing changes. An empty list is refused unless --force: it would shut every student out. With
-# --here (on the cluster, where the login node bans node) give --roster-file or $BEETHOVEN_ROSTER_CMD.
+# Both lists come from outside this repository, through two plain-text contracts and nothing else: this
+# tool runs no other repository's code of its own accord and assumes no checkout beside it. The person
+# names each source, a file or a command (the scheduled task names the access service's admin.mjs:
+# grid_access_task.ps1 -AdminTool), and with neither the run refuses.
 #
-# The readers come from --readers-file FILE, the command in $BEETHOVEN_READERS_CMD, else `node
-# <service>/tools/intake/admin.mjs readers`: one "<id> <folder>" per line (blank and # lines skipped),
-# the folder relative to the root, plain characters (letters, digits, . _ -) with no part starting with a
-# dot or a dash, so no "..", no absolute path and nothing hidden. A bad line refuses, naming it. An empty
-# reader list is fine; a source that fails refuses (applying the list without the readers would take
-# their traverse away). With --here give --readers-file or $BEETHOVEN_READERS_CMD too.
+# The approved AccessIDs: --roster-file FILE, else the command in $BEETHOVEN_ROSTER_CMD (run with bash
+# -c, stdin closed), one AccessID per line (blank lines and lines starting with # are skipped). The
+# access service's `admin.mjs roster` prints the accounts approved with the extension grant, and only
+# those: not the store reviewers' mock account, and not an account approved for the lab only
+# (approve-lab, grant lab), which therefore never reaches the grid's folders. Each must look like
+# ab1234 (^[a-z]{2}[0-9]{4}$) or the run refuses, naming the line, and nothing changes. An empty list is
+# refused unless --force: it would shut every student out. A command that fails refuses.
+#
+# The readers: --readers-file FILE, else the command in $BEETHOVEN_READERS_CMD (`admin.mjs readers`):
+# one "<id> <folder>" per line (blank and # lines skipped), the folder relative to the root, plain
+# characters (letters, digits, . _ -) with no part starting with a dot or a dash, so no "..", no
+# absolute path and nothing hidden. A bad line refuses, naming it. An empty reader list is fine (a
+# command that prints nothing, such as `true`, says there is no reader); a source that fails refuses
+# (applying the list without the readers would take their traverse away).
 #
 # What it keeps, on the machine that runs it, under $BEETHOVEN_VENDOR_DIR (default ~/.beethoven-vendor):
 #   state/grid_access.<site>.ids  the list last applied and where; written only after the grid side
@@ -578,14 +581,7 @@ elif [ -n "${BEETHOVEN_ROSTER_CMD:-}" ]; then
   raw=$(bash -c "$BEETHOVEN_ROSTER_CMD" < /dev/null); rc=$?
   [ $rc = 0 ] || refuse "the roster command (\$BEETHOVEN_ROSTER_CMD) ended with exit $rc; nothing changed"
 else
-  [ $local_run = 0 ] || refuse "with --here give --roster-file FILE or \$BEETHOVEN_ROSTER_CMD (the grid's login node bans node); nothing changed"
-  svc=${BEETHOVEN_SERVICE_DIR:-$(dirname "$HERE")/ashley}
-  adm="$svc/tools/intake/admin.mjs"
-  src="node $adm roster"
-  [ -f "$adm" ] || refuse "no $adm (set BEETHOVEN_SERVICE_DIR, BEETHOVEN_ROSTER_CMD or --roster-file); nothing changed"
-  command -v node >/dev/null 2>&1 || refuse "node is not on PATH, so $adm cannot run; nothing changed"
-  raw=$(node "$adm" roster < /dev/null); rc=$?
-  [ $rc = 0 ] || refuse "$src ended with exit $rc; nothing changed"
+  refuse "no approved list named: give --roster-file FILE, or set \$BEETHOVEN_ROSTER_CMD to a command that prints one AccessID a line (the access service's admin.mjs roster); nothing changed"
 fi
 # one id per line; CR, surrounding blanks, blank lines and # lines dropped; the first bad line refuses
 numbered=$(printf '%s\n' "$raw" | awk '{ sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == "" || substr($0, 1, 1) == "#") next; print NR ":" $0 }')
@@ -615,14 +611,7 @@ elif [ -n "${BEETHOVEN_READERS_CMD:-}" ]; then
   rraw=$(bash -c "$BEETHOVEN_READERS_CMD" < /dev/null); rc=$?
   [ $rc = 0 ] || refuse "the readers command (\$BEETHOVEN_READERS_CMD) ended with exit $rc; nothing changed"
 else
-  [ $local_run = 0 ] || refuse "with --here give --readers-file FILE or \$BEETHOVEN_READERS_CMD as well (the grid's login node bans node); nothing changed"
-  svc=${BEETHOVEN_SERVICE_DIR:-$(dirname "$HERE")/ashley}
-  adm="$svc/tools/intake/admin.mjs"
-  rsrc="node $adm readers"
-  [ -f "$adm" ] || refuse "no $adm (set BEETHOVEN_SERVICE_DIR, BEETHOVEN_READERS_CMD or --readers-file); nothing changed"
-  command -v node >/dev/null 2>&1 || refuse "node is not on PATH, so $adm cannot run; nothing changed"
-  rraw=$(node "$adm" readers < /dev/null); rc=$?
-  [ $rc = 0 ] || refuse "$rsrc ended with exit $rc; nothing changed"
+  refuse "no reader list named: give --readers-file FILE, or set \$BEETHOVEN_READERS_CMD to a command that prints one \"<AccessID> <folder>\" a line (the access service's admin.mjs readers; \`true\` for no reader); nothing changed"
 fi
 numbered=$(printf '%s\n' "$rraw" | awk '{ sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); gsub(/[ \t]+/, " "); if ($0 == "" || substr($0, 1, 1) == "#") next; print NR ":" $0 }')
 pairs=""

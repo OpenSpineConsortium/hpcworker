@@ -297,13 +297,16 @@ for one of them (below, "Readers") gets the group's read there by a named entry,
 publishes each new version that way, open to others for reading, never for writing, and never touches
 the root's ACL.
 
-**The tool.** `tools/grid_access.sh` keeps the list equal to those accounts
-(`node ../ashley/tools/intake/admin.mjs roster`, which prints them one per line). It runs in WSL, and
-both it and `admin.mjs` find the vendor folder through `BEETHOVEN_VENDOR_DIR` (else
-`~/.beethoven-vendor`, which in WSL is not your Windows folder). The easy way, from PowerShell in the
-checkout, sets that for you:
+**The tool.** `tools/grid_access.sh` keeps the list equal to those accounts. It takes them from a
+command you name, `admin.mjs roster` in the access service's repository, which prints them one per
+line, and the readers (below) from `admin.mjs readers`; it looks for nothing beside its own checkout
+and runs no other repository's code unless you name it (`--roster-file` and `--readers-file` take a
+file instead). It runs in WSL, and both it and `admin.mjs` find the vendor folder through
+`BEETHOVEN_VENDOR_DIR` (else `~/.beethoven-vendor`, which in WSL is not your Windows folder). The easy
+way, from PowerShell in the checkout, sets all of that from the one path you give:
 
 ```
+$env:BEETHOVEN_ADMIN_TOOL = 'C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs'   # or -AdminTool <path> on each line
 powershell -NoProfile -File tools\grid_access_task.ps1 -Run -ToolArgs '--dry-run --force'   # the grid's entries now, and what it would add and remove; changes nothing
 powershell -NoProfile -File tools\grid_access_task.ps1 -Run                                 # adds and removes, then checks what students need
 ```
@@ -311,9 +314,14 @@ powershell -NoProfile -File tools\grid_access_task.ps1 -Run                     
 or, in a WSL shell in the checkout:
 
 ```
-BEETHOVEN_VENDOR_DIR=/mnt/c/Users/grego/.beethoven-vendor tools/grid_access.sh --dry-run --force
-BEETHOVEN_VENDOR_DIR=/mnt/c/Users/grego/.beethoven-vendor tools/grid_access.sh
+export BEETHOVEN_VENDOR_DIR=/mnt/c/Users/grego/.beethoven-vendor
+export BEETHOVEN_ROSTER_CMD='node /mnt/c/Users/grego/OneDrive/Desktop/ashley/tools/intake/admin.mjs roster'
+export BEETHOVEN_READERS_CMD='node /mnt/c/Users/grego/OneDrive/Desktop/ashley/tools/intake/admin.mjs readers'
+tools/grid_access.sh --dry-run --force
+tools/grid_access.sh
 ```
+
+With no list named, the tool refuses and changes nothing.
 
 `--dry-run --force` is the way to see the grid's entries as they are: a dry run alone does not connect
 when the list has not changed since the last apply, and `--force` makes it connect. It prints `grid
@@ -444,7 +452,7 @@ files were in that folder. Not tried on the grid.
 **Every fifteen minutes, by itself.** In PowerShell on your PC, no administrator rights:
 
 ```
-powershell -NoProfile -File tools\grid_access_task.ps1 -Install
+powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Install
 ```
 
 registers a Windows Scheduled Task, **Beethoven grid access**, that runs the tool with `--quiet` in
@@ -452,8 +460,10 @@ WSL every fifteen minutes while you are signed in to Windows, in a hidden window
 `-Run` has applied the list once while you watched (until `state\grid_access.wayne.ids` exists), so the
 task never makes the first change unseen. `-Run` runs it once in front of you (`-Run -ToolArgs
 '--dry-run --force'` to look first), `-Remove` takes the task away, and the script with no option says
-what the task runs, whether the list has been applied once, and when the task last ran. The task never
-sweeps the whole tree; its first run of each day sweeps the readers' folders, while there is a reader.
+what the task runs, whether the list has been applied once, and when the task last ran. A task
+registered before 2026-10-07 runs the tool without naming the list, which it now refuses on every run
+(the log says "no approved list named"): run `-Install` again with `-AdminTool`, which replaces it.
+The task never sweeps the whole tree; its first run of each day sweeps the readers' folders, while there is a reader.
 While your PC is off or you are signed out, nothing runs: a student approved then waits until it is on
 again.
 

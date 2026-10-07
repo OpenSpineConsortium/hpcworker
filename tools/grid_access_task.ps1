@@ -20,29 +20,35 @@
             task is registered.
   -WhatIf   with -Install, -Remove or -Run: says what would be done and does nothing.
 
+  -AdminTool  the access service's admin.mjs, a Windows path (or $env:BEETHOVEN_ADMIN_TOOL). Every
+            option but the bare one needs it: grid_access.sh reads its two lists only from a command the
+            person names, and assumes no checkout beside this one (the two repositories meet only at
+            those two plain-text lists). The path may hold letters, digits and . _ - / \ : only.
+
   The command is
-    conhost.exe --headless wsl.exe -e bash -lc "BEETHOVEN_VENDOR_DIR='<vendor>' exec bash '<tool>' --quiet"
-  where <vendor> is %USERPROFILE%\.beethoven-vendor and <tool> is grid_access.sh in this folder, both as
-  WSL paths (wslpath). The network goes through WSL, where ssh to wsu-grid works; grid_access.sh reads the
-  approved list with the access service's admin.mjs (node, in WSL), which finds its own admin token in the
-  vendor folder. When the list has not changed since the last run, grid_access.sh does not connect to the
+    conhost.exe --headless wsl.exe -e bash -lc "BEETHOVEN_VENDOR_DIR='<vendor>' BEETHOVEN_ROSTER_CMD='node <admin> roster' BEETHOVEN_READERS_CMD='node <admin> readers' exec bash '<tool>' --quiet"
+  where <vendor> is %USERPROFILE%\.beethoven-vendor, <admin> the -AdminTool path and <tool> grid_access.sh
+  in this folder, all as WSL paths (wslpath). The network goes through WSL, where ssh to wsu-grid works;
+  admin.mjs (node, in WSL) finds its own admin token in the vendor folder, and prints the approved list
+  (roster) and the readers' folders (readers). When the list has not changed since the last run, grid_access.sh does not connect to the
   grid at all (an approved AccessID the grid does not know yet is tried again once a day), and the task's
   runs never sweep the whole tree (that is --check-tree, by hand). Each run adds one line to
   <vendor>\state\grid_access.log.
 
 .EXAMPLE
-  powershell -NoProfile -File tools\grid_access_task.ps1 -Run -ToolArgs '--dry-run --force'
+  powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Run -ToolArgs '--dry-run --force'
 .EXAMPLE
-  powershell -NoProfile -File tools\grid_access_task.ps1 -Run
+  powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Run
 .EXAMPLE
-  powershell -NoProfile -File tools\grid_access_task.ps1 -Install
+  powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Install
 #>
 [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Show')]
 param(
   [Parameter(ParameterSetName = 'Install', Mandatory = $true)][switch]$Install,
   [Parameter(ParameterSetName = 'Remove', Mandatory = $true)][switch]$Remove,
   [Parameter(ParameterSetName = 'Run', Mandatory = $true)][switch]$Run,
-  [Parameter(ParameterSetName = 'Run')][string[]]$ToolArgs = @()
+  [Parameter(ParameterSetName = 'Run')][string[]]$ToolArgs = @(),
+  [string]$AdminTool = $env:BEETHOVEN_ADMIN_TOOL
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -63,15 +69,28 @@ function ConvertTo-WslPath([string]$WindowsPath) {
 }
 
 function Get-BashCommand {
-  # what bash -lc runs; the two paths in single quotes, so a space in a folder name is fine
+  # what bash -lc runs; the tool's and the vendor folder's paths in single quotes, so a space in a folder
+  # name is fine. The admin tool's path sits inside a command grid_access.sh runs with bash -c, so it is
+  # held to plain characters instead of being quoted twice.
+  if (-not $AdminTool) {
+    throw ("Name the access service's admin.mjs: -AdminTool <path>, or `$env:BEETHOVEN_ADMIN_TOOL. grid_access.sh " +
+      "takes the approved list and the readers only from a command you name, and looks for nothing beside this checkout.")
+  }
+  if ($AdminTool -notmatch '^[A-Za-z0-9_.:\\/-]+$') {
+    throw "the path $AdminTool holds characters the task's command line does not carry (letters, digits and . _ - / \ : only)"
+  }
+  if (-not (Test-Path -LiteralPath $AdminTool -PathType Leaf)) { throw "there is no file $AdminTool" }
   $tool = Join-Path $PSScriptRoot 'grid_access.sh'
   if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "grid_access.sh is not beside this script ($tool)" }
   $wslTool = ConvertTo-WslPath $tool
   $wslVendor = ConvertTo-WslPath $Vendor
+  $wslAdmin = ConvertTo-WslPath (Resolve-Path -LiteralPath $AdminTool).Path
   foreach ($p in @($wslTool, $wslVendor)) {
     if ($p -match "['`"]") { throw "the path $p holds a quote; the task's command line cannot carry it" }
   }
-  return "BEETHOVEN_VENDOR_DIR='$wslVendor' exec bash '$wslTool'"
+  if ($wslAdmin -notmatch '^[A-Za-z0-9_./-]+$') { throw "the WSL path $wslAdmin holds characters the task's command line does not carry" }
+  return ("BEETHOVEN_VENDOR_DIR='$wslVendor' BEETHOVEN_ROSTER_CMD='node $wslAdmin roster' " +
+    "BEETHOVEN_READERS_CMD='node $wslAdmin readers' exec bash '$wslTool'")
 }
 
 function Get-Task {
@@ -141,9 +160,13 @@ switch ($PSCmdlet.ParameterSetName) {
     }
   }
   default {
-    $bash = Get-BashCommand
     Write-Output "Task:     $TaskPath$TaskName"
-    Write-Output "Runs:     $conhost --headless wsl.exe -e bash -lc `"$bash --quiet`""
+    if ($AdminTool) {
+      $bash = Get-BashCommand
+      Write-Output "Runs:     $conhost --headless wsl.exe -e bash -lc `"$bash --quiet`""
+    } else {
+      Write-Output 'Runs:     (name the access service''s admin.mjs with -AdminTool <path> to see the command)'
+    }
     if (Test-Path -LiteralPath $StateFile -PathType Leaf) {
       Write-Output "Applied:  yes, once at least ($StateFile exists)"
     } else {
