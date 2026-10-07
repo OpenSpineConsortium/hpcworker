@@ -25,9 +25,10 @@ SCRATCH = "/scratch"
 UTC = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 FIXED_UTC = "2026-10-01T12:00:00Z"
 MINUTES = re.compile(r"\b[0-9]+ min (so far|after you asked)")
-# values that belong to the machine the scenario ran on, not to the framework: the job's process id and the
-# node it ran on (`hostname -s`); a non-empty value becomes a fixed one, an empty one stays empty
-VOLATILE = {"pid": 4242, "node": "node01"}
+# values that belong to the machine the scenario ran on, not to the framework: the job's process id, the
+# node it ran on (`hostname -s`) and whether that node has tmux (the job falls back to `script` without
+# it, as in CI's CentOS 7 container); a non-empty value becomes a fixed one, an empty one stays empty
+VOLATILE = {"pid": 4242, "node": "node01", "tmux": True}
 
 
 def _text(s, scratch):
