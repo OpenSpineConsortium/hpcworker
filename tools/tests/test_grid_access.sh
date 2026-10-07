@@ -29,7 +29,8 @@ ln -s acl.shim "$T/bin/setfacl"; ln -s acl.shim "$T/bin/getfacl"; ln -s id.shim 
 export PATH="$T/bin:$PATH" SHIM_ACL_STORE="$T/acl" SHIM_LOG="$T/shim.log" SHIM_SSH_CALLS="$T/ssh.calls" SHIM_OWNERS="$T/owners"
 export SHIM_USERS="hy9698 ab1234 cd5678 ef9012"
 export HOME="$T/home" BEETHOVEN_VENDOR_DIR="$T/vendor" BEETHOVEN_SERVICE_DIR="$T/no-service"
-unset BEETHOVEN_ROSTER_CMD SHIM_SSH_MODE SHIM_ACL_FAIL
+unset BEETHOVEN_ROSTER_CMD SHIM_SSH_MODE SHIM_ACL_FAIL SHIM_GROUP_OWNERS GA_READ_CAP
+export BEETHOVEN_READERS_CMD=true   # no reader until the readers' section
 ME=$(id -un); GRP=$(id -gn)
 STATE="$T/vendor/state/grid_access.wayne.ids"; LOG="$T/vendor/state/grid_access.log"
 : > "$SHIM_SSH_CALLS"; : > "$SHIM_LOG"; : > "$SHIM_OWNERS"
@@ -312,6 +313,122 @@ roster '# nobody'
 ga --roster-file "$T/roster" --force
 t "an empty list with --force: every named entry removed, (none)" eval 'rc_is 0 && [ -z "$(named)" ] && has "^grid access list on $ROOT: \(none\)$" && [ -z "$(state_ids)" ]'
 t "at the end: owner, group, named group, mask and other entries as at the start" eval '[ "$(base)" = "$BASE0" ] && [ "$(stat -c %A "$V")" = drwxrws--T ]'
+
+echo "== readers: the group's read on approved folders"
+export SHIM_GROUP_OWNERS="$T/group_owners"; : > "$SHIM_GROUP_OWNERS"
+D="$V/$ME/data"
+chmod 2750 "$D"; chmod 640 "$D/results.csv"
+echo secret > "$D/secret.txt"; chmod 600 "$D/secret.txt"
+echo token > "$D/job.token"; chmod 600 "$D/job.token"
+printf '#!/bin/sh\n' > "$D/run.sh"; chmod 750 "$D/run.sh"
+echo open > "$D/notes.txt"; chmod 604 "$D/notes.txt"
+echo public > "$D/public.csv"; chmod 644 "$D/public.csv"
+mkdir "$D/sub"; chmod 2750 "$D/sub"; echo deep > "$D/sub/deep.csv"; chmod 640 "$D/sub/deep.csv"
+echo odd > "$D/odd\\name"; chmod 640 "$D/odd\\name"
+echo theirs > "$D/theirs.csv"; chmod 640 "$D/theirs.csv"; owns "$D/theirs.csv" hy9698
+echo elsewhere > "$D/elsewhere.csv"; chmod 640 "$D/elsewhere.csv"; printf '%s %s\n' "$D/elsewhere.csv" othergrp >> "$SHIM_GROUP_OWNERS"
+ln -s ../../shared/access/admin_token "$D/token.link"
+ue() { getfacl -p --omit-header "$1" 2>/dev/null | sed -n "s/^user:$2:\([-rwx]*\).*/\1/p"; }   # PATH ID -> the named entry's perms
+uem() { getfacl -p --omit-header "$1" 2>/dev/null | grep "^user:$2:" | grep '#effective' >/dev/null; }   # the mask cuts it
+readers() { printf '%s\n' "$@" > "$T/readers"; }
+export BEETHOVEN_READERS_CMD="cat $T/readers" BEETHOVEN_ROSTER_CMD="cat $T/roster"
+roster hy9698 cd5678
+readers "hy9698 $ME/data" '# approved 2026-10-07' '' $'  ab1234\tshared/access \r'
+MODES0=$(find "$D" "$V/$ME" -printf '%m %p\n' | sort)
+n=$(calls)
+ga --dry-run
+t "readers, dry run: the reader's traverse and the folder's grant, as would" eval 'has "would add ab1234 \(--x, a reader\)" && has "^  would grant hy9698 $ME/data: 5 entries set to the group.s read, 0 removed where the group may not read, 1 folders on the way made enterable"'
+t "readers, dry run: nothing changed, no state" eval '[ -z "$(ue "$D" hy9698)" ] && [ -z "$(ue "$V" ab1234)" ] && ! grep -q "^# read" "$STATE" && [ "$(calls)" = $((n + 1)) ]'
+ga
+t "readers: ab1234 gets --x on the root, the list keeps rwx" eval 'has "^  added   ab1234 \(--x, a reader\)" && [ "$(ue "$V" ab1234)" = --x ] && [ "$(ue "$V" hy9698)" = rwx ] && [ "$(ue "$V" cd5678)" = rwx ]'
+t "readers: granted, read back, exit 0" eval 'rc_is 0 && has "^  granted hy9698 $ME/data: 5 entries" && has "^  ok      reader hy9698: $ME/data reads as the group reads it \(12 entries, read back"'
+t "readers: the folder and what the group reads get r-x or r--" eval '[ "$(ue "$D" hy9698)" = r-x ] && [ "$(ue "$D/results.csv" hy9698)" = r-- ] && [ "$(ue "$D/run.sh" hy9698)" = r-x ] && [ "$(ue "$D/sub" hy9698)" = r-x ] && [ "$(ue "$D/sub/deep.csv" hy9698)" = r-- ]'
+t "readers: the owner's folder on the way gets --x only (enter, not list)" eval '[ "$(ue "$V/$ME" hy9698)" = --x ]'
+t "readers: nothing on what the group may not read (0600 files: the secret, a job token)" eval '[ -z "$(ue "$D/secret.txt" hy9698)" ] && [ -z "$(ue "$D/job.token" hy9698)" ]'
+t "readers: nothing where other reads already, where only other reads, on another's file, another group's, an escaped name" eval '[ -z "$(ue "$D/public.csv" hy9698)" ] && [ -z "$(ue "$D/notes.txt" hy9698)" ] && [ -z "$(ue "$D/theirs.csv" hy9698)" ] && [ -z "$(ue "$D/elsewhere.csv" hy9698)" ] && [ -z "$(ue "$D/odd\\name" hy9698)" ]'
+t "readers: the check line counts what was left out" eval 'has "1 open to other already; 1 not $ME.s, left as they are; 1 whose names getfacl escapes"'
+t "readers: no entry the mask cuts, no mode changed, no default entry, the link not followed" eval '! uem "$D/results.csv" hy9698 && ! uem "$D" hy9698 && [ "$(find "$D" "$V/$ME" -printf "%m %p\n" | sort)" = "$MODES0" ] && ! getfacl -R -p "$V/$ME" | grep "^default:" >/dev/null && [ -z "$(ue "$V/shared/access/admin_token" hy9698)" ]'
+t "readers: shared/access closed to the group (2700): nothing for ab1234 there, ok" eval 'has "^  ok      reader ab1234: shared/access reads as the group reads it \(2 entries\)$" && [ -z "$(ue "$V/shared/access" ab1234)" ] && [ -z "$(ue "$V/shared/access/admin_token" ab1234)" ]'
+t "readers: shared/access and the owner's folder still closed to other" eval 'has "^  ok      shared/access is closed to other" && has "^  ok      $ME \(the owner.s folder\) is closed to other"'
+t "readers: the readers' line, then the list of rwx entries" eval 'has "^readers on $ROOT: ab1234 \(shared/access\); hy9698 \($ME/data\)$" && last_line_is_list && has "^grid access list on $ROOT: cd5678 hy9698$"'
+t "readers: the state records each pair and the sweep" eval 'grep -qx "# read hy9698 $ME/data" "$STATE" && grep -qx "# read ab1234 shared/access" "$STATE" && grep -qx "# swept $TODAY" "$STATE" && [ "$(state_ids)" = "cd5678 hy9698" ]'
+n=$(calls); ga
+t "readers unchanged the same day: no connection, the readers named" eval 'rc_is 0 && has "not connecting" && has "^readers on $ROOT: ab1234:shared/access hy9698:$ME/data$" && [ "$(calls)" = $n ]'
+ga --quiet
+t "and --quiet says nothing" eval 'rc_is 0 && [ -z "$OUT" ] && [ "$(calls)" = $n ]'
+echo new > "$D/new.csv"; chmod 640 "$D/new.csv"
+sed -i "s/^# swept .*/# swept 2000-01-01/" "$STATE"
+ga --quiet
+t "on a later day the folders are swept again: a new file gets its entry; --quiet prints the grant" eval 'rc_is 0 && [ "$(calls)" = $((n + 1)) ] && has "^  granted hy9698 $ME/data: 1 entries" && has "^readers on " && [ "$(ue "$D/new.csv" hy9698)" = r-- ] && grep -qx "# swept $TODAY" "$STATE"'
+chmod 600 "$D/results.csv"
+ga --force
+t "a file the lab lead closes to the group: its reader entry goes" eval 'rc_is 0 && has "^  granted hy9698 $ME/data: 0 entries set to the group.s read, 1 removed" && [ -z "$(ue "$D/results.csv" hy9698)" ]'
+chmod 640 "$D/results.csv"; setfacl -n -m u:hy9698:rw- "$D/run.sh"
+ga --force
+t "a reader's entry with w is not this tool's: left as it is, and said" eval 'rc_is 0 && [ "$(ue "$D/run.sh" hy9698)" = rw- ] && [ "$(ue "$D/results.csv" hy9698)" = r-- ] && has "1 where hy9698 has w, not this tool.s, left as they are"'
+GA_READ_CAP=3 ga --force
+t "a folder with more entries than the cap: FAILED, not swept, exit 2" eval 'rc_is 2 && has "^  FAILED  reader hy9698: $ME/data holds 13 entries, more than 3; not swept" && lacks "granted hy9698"'
+chmod 2710 "$V/shared/access"
+ga --force
+t "shared/access as on the grid (2710): ab1234 may enter it and read nothing in it" eval 'rc_is 0 && [ "$(ue "$V/shared/access" ab1234)" = --x ] && [ -z "$(ue "$V/shared/access/admin_token" ab1234)" ] && has "^  ok      shared/access is closed to other"'
+chmod 2700 "$V/shared/access"
+ga --force
+t "closed to the group again: ab1234's --x goes with it" eval 'rc_is 0 && [ -z "$(ue "$V/shared/access" ab1234)" ]'
+
+echo "== readers: folders that cannot be granted"
+mkdir -m 2700 "$V/closed"; mkdir -m 2750 "$V/closed/inner"; mkdir -m 2750 "$V/$ME/theirs"; owns "$V/$ME/theirs" hy9698
+readers "hy9698 $ME/data" "ab1234 shared/access" "cd5678 $ME/nope" "cd5678 shared/ashley" "cd5678 $ME/theirs" "cd5678 closed/inner"
+ga
+t "a missing folder, a link, another's folder, a closed way: each FAILED, exit 2" eval 'rc_is 2 && has "^  FAILED  reader cd5678: $ME/nope is not a plain folder" && has "^  FAILED  reader cd5678: shared/ashley is not a plain folder" && has "^  FAILED  reader cd5678: $ME/theirs belongs to hy9698, not to $ME" && has "^  FAILED  reader cd5678: the group may not enter closed, on the way to closed/inner"'
+t "nothing given to cd5678 under them" eval '[ -z "$(ue "$V/closed" cd5678)" ] && [ -z "$(ue "$V/closed/inner" cd5678)" ] && [ -z "$(ue "$V/$ME/theirs" cd5678)" ]'
+t "the state records the pairs all the same (applied, a check failed)" eval 'grep -qx "# read cd5678 closed/inner" "$STATE"'
+rmdir "${V:?}/closed/inner" "${V:?}/closed" "${V:?}/${ME:?}/theirs"; : > "$SHIM_OWNERS"; owns "$D/theirs.csv" hy9698
+
+echo "== readers: taking read back"
+readers "ab1234 shared/access"
+ga
+t "a reader taken off: its entries under the folder go, and the --x on the way" eval 'rc_is 0 && has "^  revoked hy9698 $ME/data: " && has "^  revoked hy9698 $ME: its --x \(on the way to $ME/data\)" && [ -z "$(ue "$V/$ME" hy9698)" ] && [ -z "$(ue "$D" hy9698)" ] && [ -z "$(ue "$D/sub/deep.csv" hy9698)" ]'
+t "but not its entry with w, and not its rwx on the root (the list)" eval '[ "$(ue "$D/run.sh" hy9698)" = rw- ] && [ "$(ue "$V" hy9698)" = rwx ]'
+t "the state no longer records the pairs taken off" eval '! grep -q "^# read hy9698" "$STATE" && ! grep -q "^# read cd5678" "$STATE" && grep -qx "# read ab1234 shared/access" "$STATE"'
+setfacl -n -x u:hy9698 "$D/run.sh"
+readers '# none'
+ga
+t "the last reader taken off: its --x on the root goes, no readers' line" eval 'rc_is 0 && has "^  removed ab1234 \(was --x\)" && [ -z "$(ue "$V" ab1234)" ] && lacks "^readers on " && ! grep -q "^# read" "$STATE"'
+n=$(calls); ga --force
+t "no reader at all: --force does not sweep" eval 'rc_is 0 && lacks "readers. folders" && lacks "^  (ok|FAILED)  reader " && [ "$(calls)" = $((n + 1)) ]'
+t "nothing of the readers' left under the owner's folder" eval '! getfacl -R -p "$V/$ME" | grep -E "^user:(hy9698|ab1234|cd5678):" >/dev/null'
+
+echo "== readers: sources and refusals"
+cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
+for bad in "hy9698 ../etc" "hy9698 /etc" "hy9698 .hidden" "hy9698 data/-x" "hy9698" "hy9698 a b" "HY9698 data" "hy9698 data;rm"; do
+  readers "ab1234 shared/access" "$bad"
+  ga
+  t "a bad reader line ($bad): refused, names line 2, no connection" eval 'rc_is 1 && has "line 2 of .* is not an AccessID and a folder" && unchanged $n'
+done
+export BEETHOVEN_READERS_CMD="exit 5"
+ga
+t "a failing readers command: refused, no connection" eval 'rc_is 1 && has "the readers command .* ended with exit 5" && unchanged $n'
+unset BEETHOVEN_READERS_CMD
+ga --here --roster-file "$T/roster"
+t "--here with no readers file or command: refused" eval 'rc_is 1 && has "with --here give --readers-file" && unchanged $n'
+readers "ab1234 shared/access"
+OUT=$(SHIM_SSH_MODE=record bash "$GA" --site wayne --roster-file "$T/roster" --readers-file "$T/readers" 2>&1); RC=$?; runs=$((runs + 1))
+t "the pairs travel to the grid side, with the sweep" eval 'tail -1 "$SHIM_SSH_CALLS" | grep -E "bash -s -- --apply --sweep-readers --read ab1234:shared/access /rs/rs_grp_oschome cd5678 hy9698 2>&1$" >/dev/null'
+OUT=$(bash "$GA" --apply --read 'ab1234:../x' "$ROOT" hy9698 2>&1); RC=$?
+t "grid side: a bad --read refused, nothing changed" eval 'rc_is 1 && has "is not an AccessID and a folder" && unchanged $((n + 1))'
+if command -v node >/dev/null 2>&1; then
+  printf '%s\n' "const c = process.argv[2];" "if (c === 'roster') { console.log('hy9698'); console.log('cd5678'); }" "else if (c === 'readers') { console.log('ab1234 shared/access'); }" "else { console.error('usage'); process.exit(2); }" > "$T/svc/tools/intake/admin.mjs"
+  BEETHOVEN_SERVICE_DIR="$T/svc" ga
+  t "admin.mjs readers from \$BEETHOVEN_SERVICE_DIR: applied" eval 'rc_is 0 && has "^  added   ab1234 \(--x, a reader\)" && grep -qx "# read ab1234 shared/access" "$STATE"'
+  printf '%s\n' "if (process.argv[2] === 'readers') process.exit(6); console.log('hy9698');" > "$T/svc/tools/intake/admin.mjs"
+  n=$(calls); BEETHOVEN_SERVICE_DIR="$T/svc" ga --force
+  t "admin.mjs readers failing (a service without the reader list): refused, no connection" eval 'rc_is 1 && has "admin.mjs readers ended with exit 6" && [ "$(calls)" = $n ]'
+fi
+export BEETHOVEN_READERS_CMD=true
+roster hy9698 cd5678
+ga
+t "back to no reader: ab1234's --x goes" eval 'rc_is 0 && [ -z "$(ue "$V" ab1234)" ]'
+unset SHIM_GROUP_OWNERS BEETHOVEN_ROSTER_CMD
 
 echo "== the log"
 t "one log line per run ($runs runs)" eval '[ "$(wc -l < "$LOG" | tr -d " ")" = "$runs" ]'

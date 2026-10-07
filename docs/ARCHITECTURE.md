@@ -263,7 +263,11 @@ Below the gate, `shared/` and everything under `shared/beethoven` is readable by
 `r-x`, files `r--` or `r-x` where they run, a default `o::r-x` on every folder so new files inherit
 it), and the published tree gives the group and others read and execute and no write, so a student
 can run the lab's code and cannot change it; `shared/access` and the lab lead's own folder stay
-closed by their own modes. The directory above the copy, `shared/beethoven`, stays group-writable, so
+closed to others by their own modes. Beside the list, `tools/grid_access.sh` keeps the **readers**
+(`admin.mjs readers`, the access service's read-only approvals, one AccessID and one folder under the
+root at a time): `--x` on the root, and under each approved folder a named entry equal to the read
+and enter the group `oschome` has on each entry there, never write and never a default entry, swept
+when the reader list changes and once a day (`docs/guides/LAB_LEAD.md`, section 9). The directory above the copy, `shared/beethoven`, stays group-writable, so
 a member of the group could still rename `hpcworker/` itself (`OPEN_QUESTIONS.md`).
 
 **Where workflow-engine templates would go.** Not built now. A site profile already holds what a

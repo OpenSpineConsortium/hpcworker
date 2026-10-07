@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: run the suite
         run: HPCW_PYTHON=python3 bash framework/tests/run.sh
+      - name: the grid access tool (tools/grid_access.sh, against a temporary volume; setfacl emulated)
+        run: bash tools/tests/test_grid_access.sh
 
   suite-centos7:
     # the login node's own stack: CentOS 7, python 3.6.8, bash 4.2.46, util-linux 2.23. The

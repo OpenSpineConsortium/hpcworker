@@ -113,7 +113,7 @@ switch ($PSCmdlet.ParameterSetName) {
       $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
       $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
         -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-      $description = 'Beethoven: keeps the grid''s approved list (the named-user ACL on the lab volume''s root) in step with the access service. tools/grid_access.sh --quiet in WSL; log in .beethoven-vendor\state\grid_access.log.'
+      $description = 'Beethoven: keeps the grid''s approved list (the named-user ACL on the lab volume''s root) and its readers (the group''s read on approved folders) in step with the access service. tools/grid_access.sh --quiet in WSL; log in .beethoven-vendor\state\grid_access.log.'
       Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Action $action -Trigger $trigger `
         -Principal $principal -Settings $settings -Description $description -Force | Out-Null
       $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath

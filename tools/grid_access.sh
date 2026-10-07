@@ -8,9 +8,16 @@
 # shared/beethoven and all under it) is readable by other; shared/access and the owner's own folder
 # stay closed by their own modes. The Unix group (oschome) is C&IT's to change and is not the list.
 #
+# Beside the list it keeps the readers: accounts the lab lead approved to read named folders under the
+# root, as the lab's group reads them (the access service's reader list; LAB_LEAD.md, section 9). A
+# reader gets user:<id>:--x on the root (or keeps rwx, if also on the list) and, under each of its
+# folders, a named entry equal to the read and enter the root's group has on each entry there, never w,
+# never a default entry; see "readers" below.
+#
 #   tools/grid_access.sh [--site wayne] [--host wsu-grid] [--root DIR] [--roster-file FILE]
+#                        [--readers-file FILE]
 #                        [--dry-run] [--force] [--quiet] [--open-tree] [--check-tree]
-#   tools/grid_access.sh --here --roster-file FILE [the same options]   on the cluster, from a checkout
+#   tools/grid_access.sh --here --roster-file FILE --readers-file FILE [the same options]   on the cluster
 #
 # The approved AccessIDs come from, in order: --roster-file FILE (one per line; blank lines and lines
 # starting with # are skipped), the command in $BEETHOVEN_ROSTER_CMD, else `node
@@ -22,28 +29,41 @@
 # nothing changes. An empty list is refused unless --force: it would shut every student out. With
 # --here (on the cluster, where the login node bans node) give --roster-file or $BEETHOVEN_ROSTER_CMD.
 #
+# The readers come from --readers-file FILE, the command in $BEETHOVEN_READERS_CMD, else `node
+# <service>/tools/intake/admin.mjs readers`: one "<id> <folder>" per line (blank and # lines skipped),
+# the folder relative to the root, plain characters (letters, digits, . _ -) with no part starting with a
+# dot or a dash, so no "..", no absolute path and nothing hidden. A bad line refuses, naming it. An empty
+# reader list is fine; a source that fails refuses (applying the list without the readers would take
+# their traverse away). With --here give --readers-file or $BEETHOVEN_READERS_CMD too.
+#
 # What it keeps, on the machine that runs it, under $BEETHOVEN_VENDOR_DIR (default ~/.beethoven-vendor):
 #   state/grid_access.<site>.ids  the list last applied and where; written only after the grid side
 #                                 applied it. An approved id the grid does not know yet (no account) is
 #                                 skipped there and recorded on a line "# unknown <id> <date>" instead
-#                                 (UTC date of the try), not in the list.
+#                                 (UTC date of the try), not in the list. Each reader's folder on a line
+#                                 "# read <id> <folder>", and "# swept <date>", the last sweep of them.
 #   state/grid_access.log         one line per run
 # When the target is the one last applied and the list, less the ids recorded as unknown, is the list
 # last applied, it does not connect to the grid at all; an id recorded as unknown is tried again at most
-# once a day (the first run on a later UTC date connects for it), or at once with --force. --force,
+# once a day (the first run on a later UTC date connects for it), or at once with --force. The readers'
+# folders are swept when the reader list differs from the one last applied (a folder taken off is
+# swept to take its entries back), on the first run of a UTC day while there is a reader (so that a
+# file added since gets its entry), and with --force or --check-tree. --force,
 # --open-tree or --check-tree connects anyway. --dry-run connects when a run would, changes nothing on
 # the grid and writes no state; `--dry-run --force` is the way to see the grid's entries as they are
 # now. --quiet prints nothing unless the grid side changed something, skipped an id or a check failed
 # (errors always go to stderr; the log has every run): for the scheduled task.
 #
-# The grid side (--apply [--dry-run] [--open-tree] [--check-tree] ROOT id...) runs over ssh (BatchMode)
-# as `bash -s` with this script on stdin and the ids as arguments. It is file work only on the login
-# node (stat, readlink, getfacl, setfacl, chmod, find, id): no scheduler call, no container, no python
+# The grid side (--apply [--dry-run] [--open-tree] [--check-tree] [--sweep-readers] [--read ID:FOLDER]...
+# [--unread ID:FOLDER]... ROOT id...) runs over ssh (BatchMode) as `bash -s` with this script on stdin
+# and the ids as arguments. It is file work only on the login node (stat, readlink, getfacl, setfacl,
+# chmod, find, id, and sed, awk and xargs on their output): no scheduler call, no container, no python
 # or node, no temp file (no here-documents or here-strings: bash writes those to a temp file). In order:
 #   1. resolves ROOT's physical path, refuses unless this account owns it, and refuses unless it keeps
 #      other::--- and the sticky bit (it prints the fix: chmod +t, chmod o-rwx). Nothing has changed yet;
-#   2. adds user:<id>:rwx for each id (skipping, with a line, an id `id` does not know, and the owner),
-#      removes every named user entry not on the list, and prints each addition and removal. A skipped
+#   2. adds user:<id>:rwx for each id, and user:<id>:--x for each reader not on the list (skipping, with
+#      a line, an id `id` does not know, and the owner), removes every named user entry that is neither,
+#      and prints each addition and removal. A skipped
 #      id's entry, if it has one, is left as it is. It runs setfacl with -n, so the mask is never
 #      recalculated: the owner's user:: entry and the group, mask and other entries are never changed,
 #      and no default entry is touched;
@@ -52,6 +72,13 @@
 #      setfacl -d -m o::r-x on each folder under ROOT/shared/beethoven. It never touches
 #      ROOT/shared/access or ROOT/<owner>, nor deploy_shared's staging folders
 #      (shared/beethoven/hpcworker/.incoming-*, closed while a publish runs, left behind by one that failed);
+#  3b. with --sweep-readers, the readers' folders: first each --unread pair (a folder taken off) loses
+#      every entry of that reader's without w under it, and then each --read pair is given the group's
+#      read (getfacl -R read once, setfacl -n on what differs, read back), and the folders on the way get
+#      --x where the group may enter and other may not; last, a --x on the way to a folder taken off goes
+#      unless a folder still read needs it. A folder missing, reached through a link, owned by another,
+#      behind a folder the group may not enter, or holding more than $GA_READ_CAP entries is a FAILED
+#      check and gets nothing. Without --sweep-readers, only the root's --x;
 #   4. checks what a student needs and prints one line per check (ok or FAILED). Every run, cheap: the
 #      gate still holds (owner, sticky, other::---) and the mask lets the entries' rwx through; the list
 #      read back is the list applied (entries of skipped ids aside); the root's entries: each is named
@@ -60,10 +87,12 @@
 #      shared and shared/beethoven open to other (read and enter); hpcworker/current/bin/hpcworker
 #      readable and runnable by other, and every folder on the way enterable; the sandbox
 #      (containers/claude-node22) and npm-claude-node22 likewise; shared/access and ROOT/<owner> closed
-#      to other (no r, no x). Only with --open-tree or --check-tree, the full sweep: nothing under
+#      to other (no r, no x); each reader's folder read as the group reads it, when swept. Only with
+#      --open-tree or --check-tree, the full sweep: nothing under
 #      shared/beethoven closed to other (tens of thousands of entries; the staging folders left out).
 #      A failed check does not undo the list.
-# Its output ends with the resulting list: "grid access list on ROOT: id id id".
+# Its output ends with the readers, "readers on ROOT: id (folder, folder); id (folder)", when there are
+# any, and then the resulting list: "grid access list on ROOT: id id id".
 #
 # Exit 0: done (or unchanged, not connected); 1: refused or failed (a refusal changes nothing; the state
 # file is not written); 2: the list was applied but a check failed (the state file is written; the
@@ -153,10 +182,168 @@ ga_closed_under() { # LAB -> the entries under LAB other may not read (files) or
 }
 in_list() { case " $2 " in *" $1 "*) return 0;; esac; return 1; }   # ID " a b c "
 
+# ---- readers: the group's read on approved folders, and nothing more ------------------------------------
+# A reader (READ_RE: "<id>:<folder>", the folder relative to the root, plain characters, no part starting
+# with a dot or a dash) gets traverse on the root and, on each entry under its folder that the root's owner
+# owns, the read and enter the root's group has there: the owning group's entry when the entry belongs to
+# that group, or a named entry for it, within the mask, never w. That is what the lab group's members may
+# read, which is what such a request asks for (the group itself is C&IT's). Where other already has that
+# much, no entry is needed; an entry this account does not own cannot be changed and is counted; a
+# reader's entry with w is not one this tool made and is left as it is. No default entry is ever set: with
+# a default ACL the creator's umask no longer applies, so a job's token written 0600 would come out
+# readable; a new file gets its entry from the next sweep instead.
+READ_RE='^[a-z]{2}[0-9]{4}:[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$'
+GA_READ_CAP=${GA_READ_CAP:-200000}    # entries under one folder; more and the folder is not swept (FAILED)
+# The awk below reads getfacl's records (-p: absolute names; a name holding a backslash or an unprintable
+# character comes escaped and is left out) and prints what the reader's entry should become, one line each:
+# "set PERMS PATH", "del - PATH", "noenter - PATH", then "count N FOREIGN ESCAPED NOTOURS COVERED SET DEL".
+# mode grant: the group's read; check: the same, counting what still differs; revoke: every entry of the
+# reader's without w goes; anc: a folder on the way, made enterable where the group may enter; unanc: the
+# --x such a folder was given goes.
+GA_PLAN='
+function rx(p) { return (substr(p, 1, 1) == "r" ? "r" : "-") "-" (substr(p, 3, 1) == "x" ? "x" : "-") }
+function both(a, b,   i, s, c) { s = ""; for (i = 1; i <= 3; i++) { c = substr(a, i, 1); s = s ((c != "-" && c == substr(b, i, 1)) ? c : "-") }; return s }
+function either(a, b,   i, s, c) { s = ""; for (i = 1; i <= 3; i++) { c = substr(a, i, 1); if (c == "-") c = substr(b, i, 1); s = s c }; return s }
+function act(verb, perm) { if (n <= cap) print verb, perm, path }
+function flush(   g, w, o, e) {
+  if (path == "") return
+  n++
+  g = (fgroup == grp ? G : "---")
+  if (NG != "") g = either(g, NG)
+  w = rx(both(g, (M == "" ? "rwx" : M)))
+  o = rx(O); e = E
+  if (index(path, "\\")) esc++
+  else if (mode == "grant" || mode == "check") {
+    if (fowner != owner) foreign++
+    else if (substr(e, 2, 1) == "w") notours++
+    else if (w == "---") { if (e != "") { nd++; if (mode == "grant") act("del", "-") } }
+    else if (e == "" && both(w, o) == w) covered++
+    else if (e != w) { ns++; if (mode == "grant") act("set", w) }
+  } else if (mode == "revoke") {
+    if (fowner == owner && e != "" && substr(e, 2, 1) != "w") { nd++; act("del", "-") }
+  } else if (mode == "anc") {
+    if (substr(e, 3, 1) == "x" || (e == "" && substr(o, 3, 1) == "x")) covered++
+    else if (fowner != owner || substr(e, 2, 1) == "w" || substr(w, 3, 1) != "x") print "noenter", "-", path
+    else { ns++; act("set", either((e == "" ? "---" : e), "--x")) }
+  } else if (mode == "unanc") {
+    if (fowner == owner && e == "--x") { nd++; act("del", "-") }
+  }
+  path = ""; fowner = ""; fgroup = ""; G = ""; M = ""; NG = ""; E = ""; O = ""
+}
+/^# file: / { flush(); path = substr($0, 9); next }
+/^# owner: / { fowner = substr($0, 10); next }
+/^# group: / { fgroup = substr($0, 10); next }
+/^#/ || /^default:/ { next }
+/^$/ { flush(); next }
+{
+  split($0, f, "\t"); t = f[1]; p = substr(t, length(t) - 2); t = substr(t, 1, length(t) - 4)
+  if (t == "group:") G = p; else if (t == "mask:") M = p; else if (t == "other:") O = p
+  else if (t == "group:" grp) NG = p; else if (t == "user:" id) E = p
+}
+END { flush(); print "count", n + 0, foreign + 0, esc + 0, notours + 0, covered + 0, ns + 0, nd + 0 }'
+ga_readplan() { # MODE ID PATH [-R]
+  # shellcheck disable=SC2086
+  getfacl ${4:-} -P -p -- "$3" 2>/dev/null | awk -v mode="$1" -v id="$2" -v owner="$GA_OWNER" -v grp="$GA_GROUP" -v cap="$GA_READ_CAP" "$GA_PLAN"
+}
+ga_readapply() { # ID PLAN: setfacl for the plan's lines, the paths grouped by what they get; fails when any setfacl did
+  local perm bad=0
+  for perm in r-x r-- --x; do
+    printf '%s\n' "$2" | sed -n "s/^set $perm //p" | xargs -r -d '\n' setfacl -n -m "u:$1:$perm" || bad=1
+  done
+  printf '%s\n' "$2" | sed -n 's/^del - //p' | xargs -r -d '\n' setfacl -n -x "u:$1" || bad=1
+  return $bad
+}
+ga_ancestors() { # REL -> each folder on the way below the root, one per line ("a" and "a/b" for "a/b/c")
+  local rel=$1 acc=""
+  while [ "${rel#*/}" != "$rel" ]; do acc=${acc:+$acc/}${rel%%/*}; rel=${rel#*/}; printf '%s\n' "$acc"; done
+}
+GA_READ_CHECKS=""
+ga_counts() { n=${1:-0} foreign=${2:-0} esc=${3:-0} notours=${4:-0} covered=${5:-0} ns=${6:-0} nd=${7:-0}; }   # a plan's count line, into the caller's locals
+ga_read_check() { GA_READ_CHECKS="$GA_READ_CHECKS$1"$'\n'; }   # "ok TEXT" or "FAILED TEXT", printed with the checks
+ga_readers() { # PROOT: the revocations, then the grants, then the folders on the way no grant still needs
+  local proot=$1 pair id rel p n foreign esc notours covered ns nd plan cnt anc a an extra
+  for pair in $unreads; do
+    id=${pair%%:*} rel=${pair#*:} p="$proot/${pair#*:}"
+    if ! id -u "$id" >/dev/null 2>&1; then say "  left    $id $rel: no such account now; any entry it has stays (a uid alone)"; continue; fi
+    if [ ! -d "$p" ] || [ -L "$p" ] || [ "$(readlink -f -- "$p")" != "$p" ]; then say "  note    $id $rel: no such folder now, nothing to take back"; continue; fi
+    plan=$(ga_readplan revoke "$id" "$p" -R); cnt=$(printf '%s\n' "$plan" | sed -n 's/^count //p')
+    ga_counts $cnt
+    [ "$nd" != 0 ] || continue
+    if [ "$n" -gt "$GA_READ_CAP" ]; then ga_read_check "FAILED reader $id: $rel holds $n entries, more than $GA_READ_CAP; nothing taken back there (remove u:$id by hand)"; continue; fi
+    if [ $dry = 1 ]; then say "  would revoke $id $rel: $nd entries"; continue; fi
+    if ga_readapply "$id" "$plan"; then say "  revoked $id $rel: $nd entries removed"
+    else ga_read_check "FAILED reader $id: setfacl failed taking back $rel (run again)"; fi
+  done
+  for pair in $reads; do
+    id=${pair%%:*} rel=${pair#*:} p="$proot/${pair#*:}"
+    in_list "$id" "$skipsp" && continue
+    if [ ! -d "$p" ] || [ -L "$p" ] || [ "$(readlink -f -- "$p")" != "$p" ]; then
+      ga_read_check "FAILED reader $id: $rel is not a plain folder under the root (missing, or a link on the way)"; continue
+    fi
+    a=$(stat -c %U -- "$p" 2>/dev/null)
+    if [ "$a" != "$GA_OWNER" ]; then ga_read_check "FAILED reader $id: $rel belongs to $a, not to $GA_OWNER, so only $a may let others read it"; continue; fi
+    anc="" an=0
+    for a in $(ga_ancestors "$rel"); do anc="$anc$(ga_readplan anc "$id" "$proot/$a")"$'\n'; done
+    if printf '%s\n' "$anc" | grep '^noenter ' >/dev/null; then
+      ga_read_check "FAILED reader $id: the group may not enter $(printf '%s\n' "$anc" | sed -n "s#^noenter - $proot/##p" | head -1), on the way to $rel, so neither may a reader; nothing given there"; continue
+    fi
+    an=$(printf '%s\n' "$anc" | grep -c '^set ')
+    plan=$(ga_readplan grant "$id" "$p" -R); cnt=$(printf '%s\n' "$plan" | sed -n 's/^count //p')
+    ga_counts $cnt
+    if [ "$n" -gt "$GA_READ_CAP" ]; then ga_read_check "FAILED reader $id: $rel holds $n entries, more than $GA_READ_CAP; not swept"; continue; fi
+    extra=""
+    [ "$covered" = 0 ] || extra="$extra; $covered open to other already"
+    [ "$foreign" = 0 ] || extra="$extra; $foreign not $GA_OWNER's, left as they are"
+    [ "$notours" = 0 ] || extra="$extra; $notours where $id has w, not this tool's, left as they are"
+    [ "$esc" = 0 ] || extra="$extra; $esc whose names getfacl escapes (a backslash or an unprintable character) left out"
+    if [ $((ns + nd + an)) = 0 ]; then
+      ga_read_check "ok reader $id: $rel reads as the group reads it ($n entries$extra)"; continue
+    fi
+    if [ $dry = 1 ]; then
+      say "  would grant $id $rel: $ns entries set to the group's read, $nd removed where the group may not read, $an folders on the way made enterable"
+      ga_read_check "ok reader $id: $rel would read as the group reads it after this run ($n entries$extra)"; continue
+    fi
+    if ! ga_readapply "$id" "$anc$plan"; then ga_read_check "FAILED reader $id: setfacl failed on part of $rel (run again)"; continue; fi
+    say "  granted $id $rel: $ns entries set to the group's read, $nd removed where the group may not read, $an folders on the way made enterable"
+    cnt=$(ga_readplan check "$id" "$p" -R | sed -n 's/^count //p')
+    ga_counts $cnt
+    if [ $((ns + nd)) = 0 ]; then ga_read_check "ok reader $id: $rel reads as the group reads it ($n entries, read back$extra)"
+    else ga_read_check "FAILED reader $id: $((ns + nd)) entries under $rel still differ from the group's read after setfacl"; fi
+  done
+  for pair in $unreads; do
+    id=${pair%%:*} rel=${pair#*:}
+    id -u "$id" >/dev/null 2>&1 || continue
+    for a in $(ga_ancestors "$rel"); do
+      ga_still_needed "$id" "$a" && continue
+      plan=$(ga_readplan unanc "$id" "$proot/$a")
+      printf '%s\n' "$plan" | grep '^del ' >/dev/null || continue
+      if [ $dry = 1 ]; then say "  would revoke $id $a: its --x (on the way to $rel)"; continue; fi
+      if ga_readapply "$id" "$plan"; then say "  revoked $id $a: its --x (on the way to $rel)"
+      else ga_read_check "FAILED reader $id: setfacl failed taking back --x on $a (run again)"; fi
+    done
+  done
+}
+ga_still_needed() { # ID REL: a folder the reader still reads, or one on the way to such a folder
+  local pair f
+  for pair in $reads; do
+    [ "${pair%%:*}" = "$1" ] || continue
+    f=${pair#*:}
+    case "$f/" in "$2/"*) return 0;; esac
+    case "$2/" in "$f/"*) return 0;; esac
+  done
+  return 1
+}
+
 apply() {
-  local dry=0 open=0 sweep=0
+  local dry=0 open=0 sweep=0 sweep_r=0 reads="" unreads="" pair
   while [ $# -gt 0 ]; do case "$1" in
     --dry-run) dry=1; shift;; --open-tree) open=1; shift;; --check-tree) sweep=1; shift;; --) shift; break;;
+    --sweep-readers) sweep_r=1; shift;;
+    --read|--unread)
+      pair=${2:-}
+      { [[ "$pair" =~ $READ_RE ]] && [ ${#pair} -le 207 ]; } || die "$1 '$pair' is not an AccessID and a folder under the root (like ab1234:shared/data); nothing changed"
+      if [ "$1" = --read ]; then reads="$reads $pair"; else unreads="$unreads $pair"; fi
+      shift 2;;
     -*) die "unknown grid-side option $1; nothing changed";; *) break;; esac; done
   [ $open = 1 ] && sweep=1
   [ $# -ge 1 ] || die "no ROOT given; nothing changed"
@@ -182,36 +369,42 @@ apply() {
       { [ -d "$p" ] && [ ! -L "$p" ]; } || die "--open-tree: $p is not a plain folder (a link, or missing); nothing changed"
     done
   fi
+  GA_OWNER=$owner GA_GROUP=$(stat -c %G -- "$proot")
   say "== $(hostname -s) as $me: grid access list on $root ($proot)$([ $dry = 1 ] && echo ', dry run')"
 
-  # 2. the list
-  local want wantsp cur name perm result="" skipsp=" " added=0 removed=0 changed=0 skipped=0 kept=0
+  # 2. the list, and the readers' traverse: rwx for each id on the list, --x for a reader not on it
+  local want wantsp cur name perm wp rids result="" resperm="" skipsp=" " added=0 removed=0 changed=0 skipped=0 kept=0
   want=$(printf '%s\n' "$@" | sed '/^$/d' | sort -u)
   wantsp=" $(printf '%s' "$want" | tr '\n' ' ') "
+  rids=$(for pair in $reads; do printf '%s\n' "${pair%%:*}"; done | sort -u)
   cur=$(ga_named "$proot")
-  for id in $want; do
+  for id in $(printf '%s\n' $want $rids | sed '/^$/d' | sort -u); do
+    wp=rwx; in_list "$id" "$wantsp" || wp=--x
     if [ "$id" = "$owner" ]; then
       say "  owner   $id: owns $root; the owner's own entry covers it"
       # a named entry the owner already has is left as it is, and stays in the list read back
-      printf '%s\n' "$cur" | awk -v n="$id" '$1 == n { f = 1 } END { exit !f }' && result="$result $id"
+      perm=$(printf '%s\n' "$cur" | awk -v n="$id" '$1 == n { print $2; exit }')
+      [ -z "$perm" ] || { result="$result $id"; resperm="$resperm $id:$perm"; }
       continue
     fi
     if ! id -u "$id" >/dev/null 2>&1; then
       say "  skipped $id: no such account on this system yet (id $id failed)"
       skipped=$((skipped + 1)); skipsp="$skipsp$id "; continue
     fi
-    result="$result $id"
+    result="$result $id"; resperm="$resperm $id:$wp"
     perm=$(printf '%s\n' "$cur" | awk -v n="$id" '$1 == n { print $2; exit }')
-    if [ "$perm" = rwx ]; then kept=$((kept + 1)); continue; fi
+    if [ "$perm" = "$wp" ]; then kept=$((kept + 1)); continue; fi
     if [ $dry = 1 ]; then
-      if [ -n "$perm" ]; then say "  would change $id: $perm -> rwx"; else say "  would add $id"; fi
+      if [ -n "$perm" ]; then say "  would change $id: $perm -> $wp"; else say "  would add $id$([ $wp = rwx ] || echo " ($wp, a reader)")"; fi
       continue
     fi
-    setfacl -n -m "u:$id:rwx" "$proot" || die "setfacl could not give $id rwx on $proot; the list is partly applied (run again)"
-    if [ -n "$perm" ]; then say "  changed $id: $perm -> rwx"; changed=$((changed + 1)); else say "  added   $id"; added=$((added + 1)); fi
+    setfacl -n -m "u:$id:$wp" "$proot" || die "setfacl could not give $id $wp on $proot; the list is partly applied (run again)"
+    if [ -n "$perm" ]; then say "  changed $id: $perm -> $wp"; changed=$((changed + 1))
+    else say "  added   $id$([ $wp = rwx ] || echo " ($wp, a reader)")"; added=$((added + 1)); fi
   done
   for name in $(printf '%s\n' "$cur" | awk 'NF { print $1 }'); do
     in_list "$name" "$wantsp" && continue
+    in_list "$name" " $(printf '%s' "$rids" | tr '\n' ' ') " && continue
     perm=$(printf '%s\n' "$cur" | awk -v n="$name" '$1 == n { print $2; exit }')
     # getfacl prints a bare uid for an account the system cannot resolve just now (the same moment `id`
     # fails): that entry is a student's whose name is missing for a while, not one to remove. It is left
@@ -249,6 +442,12 @@ apply() {
     fi
   fi
 
+  # 3b. the readers' folders: swept when the lab lead's side asks (a changed reader list, or once a day)
+  if [ -n "$reads$unreads" ]; then
+    if [ $sweep_r = 1 ]; then ga_readers "$proot"
+    else ga_read_check "note the readers' folders were not swept this run (a changed reader list, the first run of a day or --force sweeps them)"; fi
+  fi
+
   # 4. what a student needs
   say "== checks"
   problems=$(ga_gate "$proot" "$owner")
@@ -262,10 +461,10 @@ apply() {
   else ga_fail "the mask: mask::${mask:-none} cuts the list's rwx, so students cannot make their own folder (fix: setfacl -m m::rwx $proot)"; fi
   if [ $dry = 0 ]; then
     local applied_list names_cmp="" kept_skipped=""
-    applied_list=$(printf '%s\n' $result | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')
+    applied_list=$(printf '%s\n' $resperm | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')
     # an id the grid did not know just now keeps the entry it may have: not the list applied, not wrong
-    for name in $names; do
-      if in_list "$name" "$skipsp"; then kept_skipped="$kept_skipped $name"; else names_cmp="$names_cmp $name"; fi
+    for name in $(ga_named "$proot" | awk 'NF { print $1 ":" $2 }' | sort); do
+      if in_list "${name%%:*}" "$skipsp"; then kept_skipped="$kept_skipped ${name%%:*}"; else names_cmp="$names_cmp $name"; fi
     done
     names_cmp=${names_cmp# }
     if [ "$names_cmp" = "$applied_list" ]; then
@@ -289,12 +488,24 @@ apply() {
   fi
   ga_closed "shared/access" "$sh/access"
   ga_closed "$owner (the owner's folder)" "$proot/$owner"
+  local line
+  while IFS= read -r line; do case "$line" in
+    ok\ *) ga_ok "${line#ok }";; FAILED\ *) ga_fail "${line#FAILED }";; note\ *) say "  note    ${line#note }";;
+  esac; done < <(printf '%s' "$GA_READ_CHECKS")
 
+  # the list is the rwx entries; the readers, each with its folders, on a line of their own before it
+  local rwx_names readers_line=""
+  rwx_names=$(ga_named "$proot" | awk '$2 == "rwx" { print $1 }' | sort | tr '\n' ' ' | sed 's/ $//')
+  for id in $rids; do
+    in_list "$id" "$skipsp" && continue
+    readers_line="$readers_line; $id ($(for pair in $reads; do [ "${pair%%:*}" = "$id" ] && printf '%s, ' "${pair#*:}"; done | sed 's/, $//'))"
+  done
+  [ -z "$readers_line" ] || say "readers on $root: ${readers_line#; }"
   if [ $dry = 1 ]; then
     say "grid access list on $root now: ${names:-(none)}"
-    say "grid access list on $root after this run would be: $(printf '%s\n' $result | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//')"
+    say "grid access list on $root after this run would be: $(printf '%s\n' $resperm | sed -n 's/:rwx$//p' | sort | tr '\n' ' ' | sed 's/ $//')"
   else
-    say "grid access list on $root: ${names:-(none)}"
+    say "grid access list on $root: ${rwx_names:-(none)}"
   fi
   [ "$GA_FAILED" = 0 ] || return 2
   return 0
@@ -306,11 +517,13 @@ if [ "${1:-}" = --apply ]; then shift; apply "$@" < /dev/null; exit $?; fi
 HERE=$(cd "$(dirname "$0")/.." && pwd) || die "cannot find the repository"
 FW="$HERE/framework"
 site=wayne host=wsu-grid root="" roster_file="" dry=0 force=0 quiet=0 open=0 check=0 local_run=0
+readers_file=""
 while [ $# -gt 0 ]; do case "$1" in
   --site) site="${2:-}"; shift 2 || die "--site needs a value";;
   --host) host="${2:-}"; shift 2 || die "--host needs a value";;
   --root) root="${2:-}"; shift 2 || die "--root needs a value";;
   --roster-file) roster_file="${2:-}"; shift 2 || die "--roster-file needs a value";;
+  --readers-file) readers_file="${2:-}"; shift 2 || die "--readers-file needs a value";;
   --dry-run) dry=1; shift;; --force) force=1; shift;; --quiet) quiet=1; shift;;
   --open-tree) open=1; shift;; --check-tree) check=1; shift;; --here) local_run=1; shift;;
   -h|--help) awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0"; exit 0;;
@@ -391,32 +604,77 @@ if [ "$count" = 0 ] && [ $force = 0 ]; then
   refuse "$src gave no AccessID; applying that would shut every student out of $root. Rerun with --force if that is meant; nothing changed"
 fi
 
+# the readers: "<id> <folder>" lines, the folder relative to the root. An empty list is fine (no reader);
+# a source that fails refuses, since applying the list without the readers would take their traverse away
+if [ -n "$readers_file" ]; then
+  rsrc="the file $readers_file"
+  [ -r "$readers_file" ] || refuse "cannot read $readers_file; nothing changed"
+  rraw=$(cat -- "$readers_file") || refuse "cannot read $readers_file; nothing changed"
+elif [ -n "${BEETHOVEN_READERS_CMD:-}" ]; then
+  rsrc="\$BEETHOVEN_READERS_CMD"
+  rraw=$(bash -c "$BEETHOVEN_READERS_CMD" < /dev/null); rc=$?
+  [ $rc = 0 ] || refuse "the readers command (\$BEETHOVEN_READERS_CMD) ended with exit $rc; nothing changed"
+else
+  [ $local_run = 0 ] || refuse "with --here give --readers-file FILE or \$BEETHOVEN_READERS_CMD as well (the grid's login node bans node); nothing changed"
+  svc=${BEETHOVEN_SERVICE_DIR:-$(dirname "$HERE")/ashley}
+  adm="$svc/tools/intake/admin.mjs"
+  rsrc="node $adm readers"
+  [ -f "$adm" ] || refuse "no $adm (set BEETHOVEN_SERVICE_DIR, BEETHOVEN_READERS_CMD or --readers-file); nothing changed"
+  command -v node >/dev/null 2>&1 || refuse "node is not on PATH, so $adm cannot run; nothing changed"
+  rraw=$(node "$adm" readers < /dev/null); rc=$?
+  [ $rc = 0 ] || refuse "$rsrc ended with exit $rc; nothing changed"
+fi
+numbered=$(printf '%s\n' "$rraw" | awk '{ sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); gsub(/[ \t]+/, " "); if ($0 == "" || substr($0, 1, 1) == "#") next; print NR ":" $0 }')
+pairs=""
+oldifs=$IFS; IFS=$'\n'
+for entry in $numbered; do
+  val=${entry#*:}
+  case "$val" in *" "*" "*|*:*) val="bad";; *" "*) val="${val%% *}:${val#* }";; *) val="bad";; esac
+  { [[ "$val" =~ $READ_RE ]] && [ ${#val} -le 207 ]; } || { IFS=$oldifs; refuse "line ${entry%%:*} of $rsrc is not an AccessID and a folder under the root (like ab1234 shared/data): '${entry#*:}'; nothing changed"; }
+  pairs="$pairs$val"$'\n'
+done
+IFS=$oldifs
+pairs=$(printf '%s' "$pairs" | sed '/^$/d' | sort -u)
+rids=$(printf '%s\n' $pairs | sed 's/:.*//' | sed '/^$/d' | sort -u)
+nreaders=$(printf '%s' "$rids" | grep -c .)
+
 # unchanged since the last apply: no connection at all. An id the grid did not know at the last apply
 # ("# unknown <id> <date>") does not make the list differ; it is due for another try on a later UTC date.
+# The readers' folders are swept (each entry under them read and, where needed, set) when the reader list
+# differs from the one last applied, on the first run of a UTC day while there is a reader (so that what
+# was added to a folder since is given the group's read too), and with --force or --check-tree.
 today=$(date -u +%F)
-prev_target="" prev_ids="" prev_when="" prev_unknown=""
+prev_target="" prev_ids="" prev_when="" prev_unknown="" prev_pairs="" prev_swept=""
 if [ -s "$statef" ]; then
   prev_target=$(sed -n 's/^# target //p' "$statef" | head -1)
   prev_when=$(sed -n 's/^# applied //p' "$statef" | head -1)
   prev_ids=$(grep -v '^#' "$statef" | sed '/^$/d' | sort -u)
   prev_unknown=$(sed -n 's/^# unknown \([a-z][a-z][0-9][0-9][0-9][0-9]\) \([0-9-]*\)$/\1 \2/p' "$statef" | sort -u)
+  prev_pairs=$(sed -n 's/^# read \([a-z][a-z][0-9][0-9][0-9][0-9]\) \([^ ][^ ]*\)$/\1:\2/p' "$statef" | sort -u)
+  prev_swept=$(sed -n 's/^# swept //p' "$statef" | head -1)
 fi
 known="" due="" waiting=""
-for id in $ids; do
+for id in $(printf '%s\n' $ids $rids | sed '/^$/d' | sort -u); do
   d=$(printf '%s\n' "$prev_unknown" | awk -v n="$id" '$1 == n { print $2; exit }')
-  if [ -z "$d" ]; then known="$known$id"$'\n'; continue; fi
+  if [ -z "$d" ]; then in_list "$id" " $(printf '%s' "$ids" | tr '\n' ' ') " && known="$known$id"$'\n'; continue; fi
   waiting="$waiting $id"
   [[ "$d" < "$today" ]] && due="$due $id"
 done
 known=$(printf '%s' "$known" | sed '/^$/d' | sort -u)
 known_inline=$(printf '%s' "$known" | tr '\n' ' ' | sed 's/ $//')
 nwait=$(printf '%s\n' $waiting | grep -c .)
+known_pairs=$(for pair in $pairs; do in_list "${pair%%:*}" "$waiting" || printf '%s\n' "$pair"; done)
+unreads=$(for pair in $prev_pairs; do in_list "$pair" " $(printf '%s' "$pairs" | tr '\n' ' ') " || printf '%s\n' "$pair"; done)
+sweep_r=0
+if [ -n "$pairs$prev_pairs" ] && { [ "$prev_pairs" != "$known_pairs" ] || [ $force = 1 ] || [ $check = 1 ] \
+   || { [ -n "$known_pairs" ] && [[ "$prev_swept" < "$today" ]]; }; }; then sweep_r=1; fi
 if [ $force = 0 ] && [ $open = 0 ] && [ $check = 0 ] && [ -s "$statef" ] && [ "$prev_target" = "$target" ] \
-   && [ "$prev_ids" = "$known" ] && [ -z "$due" ]; then
-  log "unchanged ($count ids, $nwait unknown to the grid); not connected"
+   && [ "$prev_ids" = "$known" ] && [ -z "$due" ] && [ $sweep_r = 0 ]; then
+  log "unchanged ($count ids, $nreaders readers, $nwait unknown to the grid); not connected"
   if [ $quiet = 0 ]; then
-    say "unchanged since ${prev_when:-the last apply}: $count ids for $target; not connecting (--force to apply anyway)"
+    say "unchanged since ${prev_when:-the last apply}: $count ids and $nreaders readers for $target, the readers' folders swept $prev_swept; not connecting (--force to apply anyway)"
     [ -z "$waiting" ] || say "not on the grid yet, no account there when last tried today (tried again tomorrow, or now with --force):$waiting"
+    [ -z "$known_pairs" ] || say "readers on $root: $(printf '%s\n' $known_pairs | tr '\n' ' ' | sed 's/ $//')"
     say "grid access list on $root: ${known_inline:-(none)}"
   fi
   exit 0
@@ -427,8 +685,11 @@ args="--apply"
 [ $dry = 1 ] && args="$args --dry-run"
 [ $open = 1 ] && args="$args --open-tree"
 [ $check = 1 ] && args="$args --check-tree"
+[ $sweep_r = 1 ] && args="$args --sweep-readers"
+for pair in $pairs; do args="$args --read $pair"; done
+[ $sweep_r = 0 ] || for pair in $unreads; do args="$args --unread $pair"; done
 args="$args $root $inline"
-[ $quiet = 1 ] || say "grid access: $count ids from $src -> $target$([ $dry = 1 ] && echo ', dry run')${due:+ (trying again:$due)}"
+[ $quiet = 1 ] || say "grid access: $count ids from $src and $nreaders readers from $rsrc -> $target$([ $dry = 1 ] && echo ', dry run')${due:+ (trying again:$due)}"
 if [ $local_run = 1 ]; then
   # shellcheck disable=SC2086
   out=$(bash "$0" $args 2>&1); rc=$?
@@ -437,13 +698,13 @@ else
   out=$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$host" "bash -s -- $args 2>&1" < "$0"); rc=$?
 fi
 # (grep without -q after these pipes: under pipefail, grep -q leaving early fails the printf with SIGPIPE)
-CHANGE_RE='^  (added|changed|removed|skipped|would|open-tree)|^  FAILED'
+CHANGE_RE='^  (added|changed|removed|skipped|would|open-tree|granted|revoked)|^  FAILED'
 if [ $quiet = 0 ]; then
   [ -z "$out" ] || printf '%s\n' "$out"
 elif [ $rc != 0 ] && [ $rc != 2 ]; then
   [ -z "$out" ] || printf '%s\n' "$out" >&2
 elif printf '%s\n' "$out" | grep -E "$CHANGE_RE" >/dev/null; then
-  printf '%s\n' "$out" | grep -E "$CHANGE_RE|^grid access list on "
+  printf '%s\n' "$out" | grep -E "$CHANGE_RE|^readers on |^grid access list on "
 fi
 
 if [ $rc != 0 ] && [ $rc != 2 ]; then
@@ -461,8 +722,10 @@ nrem=$(printf '%s\n' "$out" | grep -c -E '^  (removed|would remove) ')
 skipped=$(printf '%s\n' "$out" | sed -n 's/^  skipped \([a-z][a-z][0-9][0-9][0-9][0-9]\):.*/\1/p' | sort -u)
 nskip=$(printf '%s' "$skipped" | grep -c .)
 nfail=$(printf '%s\n' "$out" | grep -c '^  FAILED')
+ngrant=$(printf '%s\n' "$out" | grep -c -E '^  (granted|would grant) ')
+nrevoke=$(printf '%s\n' "$out" | grep -c -E '^  (revoked|would revoke) ')
 if [ $dry = 1 ]; then
-  log "dry run ($count ids): would add $nadd, remove $nrem; $nskip unknown; $nfail checks failed"
+  log "dry run ($count ids, $nreaders readers): would add $nadd, remove $nrem, grant $ngrant, revoke $nrevoke; $nskip unknown; $nfail checks failed"
   exit $rc
 fi
 # the state: the list as applied; each id the grid did not know on a dated line of its own instead
@@ -474,7 +737,9 @@ tmpf="$statef.new.$$"
   say "# target $target"
   say "# applied $(date -u +%FT%TZ)"
   for id in $skipped; do say "# unknown $id $today"; done
+  for pair in $pairs; do in_list "${pair%%:*}" "$skipsp" || say "# read ${pair%%:*} ${pair#*:}"; done
+  if [ $sweep_r = 1 ]; then say "# swept $today"; elif [ -n "$prev_swept" ]; then say "# swept $prev_swept"; fi
   printf '%s' "$applied"
 } > "$tmpf" && mv -f "$tmpf" "$statef" || { rm -f "$tmpf"; log "applied, but the state file could not be written"; die "could not write $statef (the grid side did apply the list)"; }
-log "applied $count ids (+$nadd -$nrem, $nskip unknown to the grid$([ "$nskip" != 0 ] && printf ': %s' "$(printf '%s' "$skipped" | tr '\n' ' ' | sed 's/ $//')"))$([ "$nfail" != 0 ] && echo "; $nfail checks FAILED")"
+log "applied $count ids and $nreaders readers (+$nadd -$nrem, readers' folders$([ $sweep_r = 1 ] || echo ' not') swept: $ngrant granted, $nrevoke revoked; $nskip unknown to the grid$([ "$nskip" != 0 ] && printf ': %s' "$(printf '%s' "$skipped" | tr '\n' ' ' | sed 's/ $//')"))$([ "$nfail" != 0 ] && echo "; $nfail checks FAILED")"
 exit $rc

@@ -291,8 +291,9 @@ Code. To let a lab-only student in, grant them the extension too.
 Below the folder, everything students use is readable by any account that got in: `shared/`,
 `shared/beethoven` and everything under it (folders `r-x` for others, files `r--`, or `r-x` where the
 file runs, and every folder under `shared/beethoven` carries a default `o::r-x`, so new files inherit
-it). Others never get write. Two folders stay closed by their own modes and are never opened:
-`shared/access` (`drwx--s---`) and your own `go2432/` (`drwxr-s---`). `tools/deploy_shared.sh`
+it). Others never get write. Two folders stay closed to others by their own modes and are never opened
+to them: `shared/access` (`drwx--s---`) and your own `go2432/` (`drwxr-s---`). A reader you approve
+for one of them (below, "Readers") gets the group's read there by a named entry, and no more. `tools/deploy_shared.sh`
 publishes each new version that way, open to others for reading, never for writing, and never touches
 the root's ACL.
 
@@ -334,6 +335,10 @@ and never from the scheduled task; run `--check-tree` by hand after a publish or
 anything under `shared/beethoven`. It ends with the list itself: `grid access list on
 /rs/rs_grp_oschome: hy9698 ...`.
 
+It also keeps the readers (below): each gets `user:<AccessID>:--x` on the folder, beside the list's
+`rwx` entries (a reader who is also on the list keeps `rwx`), and the group's read on the folders
+approved for them.
+
 Exit 0: done. Exit 1: refused or failed. Exit 2: the list is in place but a check failed; the check's
 line says the fix. For a closed `shared/beethoven`, the fix is `tools/grid_access.sh --open-tree`,
 which does exactly what was done by hand on 2026-10-02 and nothing else: `chmod o+rx` on `shared`,
@@ -360,6 +365,52 @@ until the account exists and it gets its entry. If an id the grid knew stops res
 its entry is left as it is and the read-back allows for it. On the grid it is file work only, with
 bash, coreutils, sed, awk, `getfacl` and `setfacl`: nothing on warrior's banned list, no scheduler
 call, no temp file.
+
+**Readers: the group's read on a folder, one account and one folder at a time.** Some people need to
+read lab data without running Beethoven, and ask to be put in the group `oschome` for it, which is
+C&IT's to change. Instead, they ask on `https://openspineconsortium.com/beethoven/storage.html` (their
+AccessID, name, the folders, what for); the request reaches the admin page's section **Lab storage,
+read only** and your mailbox, with one-use links, as an access request does. You approve it with the
+folders you choose (they may be fewer than asked for), deny it, add a reader directly, change a
+reader's folders, or take a reader off, on the admin page or with `admin.mjs storage-approve <id>
+<folder>...`, `storage-deny`, `storage-add`, `storage-remove` and `storage-list`. `admin.mjs readers`
+prints the approved pairs, one `<AccessID> <folder>` per line; that is what this tool applies. A folder
+is a path under `/rs/rs_grp_oschome`, like `go2432` or `shared/access`: plain characters, no part
+starting with a dot or a dash, so never `..`, never an absolute path and never a hidden folder.
+
+What a reader gets under each folder is what the group gets, entry by entry, and nothing else: on each
+file and folder you own, a named entry equal to the group's read and enter there (the owning group's
+entry when the entry belongs to `oschome`, or a named entry for `oschome`, within the mask), never
+write. Where the group may not read, the reader may not either: a file at `0600` (a job's token, a
+secret) gets nothing, and `shared/access` (`drwx--s---`: the group may enter, not list) gives a reader
+leave to enter it and nothing in it that the group cannot read. Where others may read already, no entry
+is added. The folders on the way get `--x` (enter, not list) where the group may enter and others may
+not, so a reader of `go2432/data` cannot list `go2432/`. The tool never sets a default entry: with one,
+a new file would ignore the umask of whoever writes it, and a job's token written `0600` would come out
+readable. A file added since is given its entry by the next sweep instead. The sweep reads every entry
+under the reader's folders (`getfacl -R`) and changes only what differs; it runs when the reader list
+changes, on the first run of each day while there is a reader, and with `--force` or `--check-tree`.
+It never touches an entry someone else owns (counted in its line), an entry the reader has with write
+(not the tool's; left as it is), a link, or a name holding a backslash. A folder that is missing,
+reached through a link, owned by someone else, behind a folder the group may not enter, or holding more
+than 200,000 entries gets nothing and is a `FAILED` line of its own, for example
+
+```
+  FAILED  reader hy9698: go2432/data holds 312000 entries, more than 200000; not swept
+```
+
+otherwise each reader's folder has a line `ok      reader hy9698: go2432 reads as the group reads it
+(... entries, read back ...)`, and the run prints `readers on /rs/rs_grp_oschome: hy9698 (go2432,
+shared/access)` before the list. Taking a reader off, or one of their folders, removes every entry of
+theirs without write under that folder, and the `--x` on the way unless another folder of theirs needs
+it; a reader with no folder left loses the `--x` on the root.
+
+Before approving a folder, look at what the group can read in it: the approval gives exactly that. A
+folder holding patients' data (`go2432/` may) is your decision under the study's approval, not this
+tool's. A reader also reaches, as every student on the list does, everything below the root that is
+open to others (`shared/beethoven`). Beethoven for VS Code's own lab access (its grid scripts' `access
+admin approve`) gives `--x` entries on `shared/access` of the same shape; taking a reader of
+`shared/access` off takes those away too.
 
 **A folder in another student's place.** The root is sticky, so no one can rename or remove a folder
 that is not theirs; but anyone on the list may make a new one, and a student could make
@@ -402,8 +453,9 @@ WSL every fifteen minutes while you are signed in to Windows, in a hidden window
 task never makes the first change unseen. `-Run` runs it once in front of you (`-Run -ToolArgs
 '--dry-run --force'` to look first), `-Remove` takes the task away, and the script with no option says
 what the task runs, whether the list has been applied once, and when the task last ran. The task never
-sweeps the whole tree. While your PC is off or you are signed out, nothing runs: a student approved
-then waits until it is on again.
+sweeps the whole tree; its first run of each day sweeps the readers' folders, while there is a reader.
+While your PC is off or you are signed out, nothing runs: a student approved then waits until it is on
+again.
 
 **By hand**, on warrior as yourself (the trailing `/` names the folder behind the link):
 
@@ -440,8 +492,12 @@ with `setfacl` and `getfacl` emulated (WSL has no acl package), the owners of th
 stood in for by a `stat` that answers another account for the paths a test names (only root could
 chown to accounts that do not exist), ssh replaced by a stand-in that runs the grid side locally, and
 `tools/deploy_shared.sh`'s cluster side publishing into that folder (`tools/tests/test_grid_access.sh`).
-On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has been seen to work. Run
-`--dry-run --force` first.
+The readers' grid side was also run once on 2026-10-07 with the real `getfacl` and `setfacl` (acl
+2.3.2, ext4, Ubuntu 24.04) on local accounts standing for a lab lead and two readers, and the kernel
+let each read exactly what the group reads (and nothing at `0600`, nothing under a `drwx--s---`
+folder); that was a cloud container, not CephFS and not the grid. On the grid, only the entry for
+hy9698 that you set by hand on 2026-10-02 has been seen to work, and no reader yet. Run `--dry-run
+--force` first.
 
 ## 10. Not proven
 
