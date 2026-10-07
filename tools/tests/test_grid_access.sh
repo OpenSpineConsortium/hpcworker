@@ -615,7 +615,7 @@ srv.serve_forever()
 PY
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/svc.key" -out "$T/svc.crt" -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1 \
   || { fail=$((fail + 1)); echo "FAIL openssl could not make the stand-in's certificate"; }
-TOKEN=standin-admin-token-4f9c2e71b0d8
+TOKEN=standin+admin/token-4f9c2e71b0d8=   # base64's + / = as openssl rand -base64 makes the admin token
 GTOKEN=standin-grid-token-7a1d93c4e5f6
 printf '%s\n' "$TOKEN" > "$T/svc.token"; printf '%s\n' "$GTOKEN" > "$T/svc.gridtoken"; : > "$T/svc.seen"; echo ok > "$T/svc.mode"
 python3 "$T/svc.py" "$T/svc.token" "$T/svc.gridtoken" "$T/svc.seen" "$T/svc.mode" "$T/svc.port" "$T/svc.crt" "$T/svc.key" & SVC_PID=$!
@@ -625,16 +625,22 @@ PORT=$(cat "$T/svc.port"); SVC="https://127.0.0.1:$PORT"
 mkdir -p "$T/tmp"
 export CURL_CA_BUNDLE="$T/svc.crt" BEETHOVEN_SERVICE_URL="$SVC" TMPDIR="$T/tmp"   # TMPDIR: where the tool's run folder goes, so a leftover is seen
 mode() { echo "$1" > "$T/svc.mode"; }
-# curl first on PATH records its arguments (and the mode of the header file it is handed), then runs the real one
+# curl first on PATH records its arguments, one line per request, and beside them ($SHIM_CURL_META) the
+# mode of the configuration file it is handed (-K), the mode and path of $TMPDIR, and which agent markers
+# and token variables reached it; then it runs the real one. curl --version (a chain's first job says
+# which curl its node has) is no request and is not recorded
 REAL_CURL=$(command -v curl)
 printf '%s\n' '#!/usr/bin/env bash' \
-  'for a in "$@"; do case "$a" in @*) printf "header-file-mode %s\n" "$(stat -c %a -- "${a#@}")" >> "$SHIM_CURL_CALLS";; esac; done' \
+  "[ \"\${1:-}\" != --version ] || exec '$REAL_CURL' --version" \
+  'p=""; for a in "$@"; do [ "$p" != -K ] || printf "config-file-mode %s\n" "$(stat -c %a -- "$a")" >> "$SHIM_CURL_META"; p=$a; done' \
+  '[ -z "${TMPDIR:-}" ] || printf "tmpdir %s %s\n" "$(stat -c %a -- "$TMPDIR")" "$TMPDIR" >> "$SHIM_CURL_META"' \
+  'm=""; for v in CLAUDECODE CLAUDE_CODE_ENTRYPOINT AI_AGENT BEETHOVEN_REQUEST_ID BEETHOVEN_WORKER ASHLEY_REQUEST_ID ASHLEY_WORKER ASHLEY_JOB HPCW_AGENT GITHUB_TOKEN GH_TOKEN; do [ -z "${!v:-}" ] || m="$m $v"; done; printf "markers%s\n" "$m" >> "$SHIM_CURL_META"' \
   'printf "%q " "$@" >> "$SHIM_CURL_CALLS"; printf "\n" >> "$SHIM_CURL_CALLS"' \
   "exec '$REAL_CURL' \"\$@\"" > "$T/bin/curl"
-chmod 755 "$T/bin/curl"; export SHIM_CURL_CALLS="$T/curl.calls"; : > "$SHIM_CURL_CALLS"
+chmod 755 "$T/bin/curl"; export SHIM_CURL_CALLS="$T/curl.calls" SHIM_CURL_META="$T/curl.meta"; : > "$SHIM_CURL_CALLS"; : > "$SHIM_CURL_META"
 SVC_OUT="$T/svc.out"; : > "$SVC_OUT"
 gs() { ga "$@"; printf '%s\n' "$OUT" >> "$SVC_OUT"; }   # every run's output (stdout and stderr) kept for the token check
-curls() { grep -c -v '^header-file-mode ' "$SHIM_CURL_CALLS"; }   # the requests made: one argv line each (the mode lines aside)
+curls() { grep -c . "$SHIM_CURL_CALLS"; }   # the requests made: one argv line each
 mkvol; : > "$SHIM_OWNERS"
 mkdir -m 2750 "$V/shared/data" "$V/lab"   # the folders the readers vector names
 roster zq0003
@@ -731,15 +737,21 @@ t "grid token: readable by others (0644): refused naming grid_token and the fix,
 chmod 600 "$T/vendor/grid_token"; printf ' \r\n' > "$T/vendor/grid_token"
 gs --force
 t "grid token: an empty grid_token: refused naming it, nothing sent, admin_token not used instead" eval 'rc_is 1 && has "^grid_access: $T/vendor/grid_token is empty: the access service.s token is one line in it; nothing changed$" && [ "$(curls)" = $c ] && unchanged $n'
+for bad in 'quo"te' 'back\slash' 'two words' 'semi;colon'; do
+  printf '%s\n' "$bad" > "$T/vendor/grid_token"
+  gs --force
+  t "grid token: a first line no bearer token has ($bad): refused naming the characters, nothing sent" eval 'rc_is 1 && has "^grid_access: $T/vendor/grid_token does not hold a token: its first line must be the token alone, letters, digits and - . _ ~ \+ / \(and = at its end\), as the admin page and the service make it; nothing changed$" && [ "$(curls)" = $c ] && unchanged $n'
+done
 ln -s "$T/no-such-token" "$T/vendor/grid_token.link"; rm "$T/vendor/grid_token"; mv "$T/vendor/grid_token.link" "$T/vendor/grid_token"
 gs --force
 t "grid token: a link to nothing is still grid_token: cannot read it, admin_token not used instead" eval 'rc_is 1 && has "^grid_access: cannot read $T/vendor/grid_token; nothing changed$" && [ "$(curls)" = $c ] && unchanged $n'
 rm "$T/vendor/grid_token"; : > "$T/svc.seen"
 gs --dry-run --force
 t "without grid_token, admin_token as before" eval 'has "^grid access: 2 ids from the access service" && [ "$(tr "\n" " " < "$T/svc.seen")" = "admin admin " ]'
-echo "-- the token leaves its file only for the header file"
-t "service: curl is handed the header as a file (-H @...) in the run's own folder, never a token" eval 'grep -q -- " -H @$T/tmp/grid_access\.[A-Za-z0-9]*/header " "$SHIM_CURL_CALLS" && ! grep -F -e "$TOKEN" -e not-the-token -e "$GTOKEN" -e not-the-grid-token "$SHIM_CURL_CALLS" >/dev/null'
-t "service: the header file was 0600 at every request" eval '[ "$(grep -c "^header-file-mode " "$SHIM_CURL_CALLS")" -gt 10 ] && ! grep "^header-file-mode " "$SHIM_CURL_CALLS" | grep -v "^header-file-mode 600$" >/dev/null'
+echo "-- the token leaves its file only for curl's configuration file"
+# -K FILE, which every curl reads (CentOS 7's 7.29 sends nothing for -H @FILE), after -q, so no ~/.curlrc adds to it
+t "service: every request is curl -q -sS --max-time 60 -K <the run's own configuration file>, never a token" eval '! grep -v -- "^-q -sS --max-time 60 -K $T/tmp/grid_access\.[A-Za-z0-9]*/curl\.config -o " "$SHIM_CURL_CALLS" >/dev/null && ! grep -F -e "$TOKEN" -e not-the-token -e "$GTOKEN" -e not-the-grid-token "$SHIM_CURL_CALLS" >/dev/null'
+t "service: the configuration file was 0600 at every request" eval '[ "$(grep -c "^config-file-mode " "$SHIM_CURL_META")" = "$(curls)" ] && ! grep "^config-file-mode " "$SHIM_CURL_META" | grep -v "^config-file-mode 600$" >/dev/null'
 t "service: the run's folder is gone after every run" eval '[ -z "$(ls -A "$T/tmp")" ]'
 t "service: neither token is in any output, nor in the log or the state" eval '! grep -F -e "$TOKEN" -e not-the-token -e "$GTOKEN" -e not-the-grid-token "$SVC_OUT" "$LOG" "$STATE" >/dev/null'
 t "service: the log names the source and the refusals, in words" eval 'grep -q "refused: the access service (127.0.0.1:$PORT) did not accept the token" "$LOG" && grep -q "refused: the access service (127.0.0.1:1) could not be reached" "$LOG"'
@@ -780,10 +792,14 @@ run_tick() { # ID [VAR=VALUE...]: the job as Slurm runs it, its output appended 
   OUT=$({ cd "$(J "$id" dir)" && env "$@" SLURM_JOB_ID="$id" bash "$T/slurm/jobs/$id/script" "${args[@]}" 2>&1 | tee -a /dev/fd/3; } 3>>"$(J "$id" out)"); RC=$?
   if [ "$RC" = 0 ]; then set_state "$id" COMPLETED; else set_state "$id" FAILED; fi
 }
-same_bin() { cmp -s "$WD/bin/grid_access.sh" "$1/grid_access.sh" && cmp -s "$WD/bin/grid_access_watch.sbatch" "$1/grid_access_watch.sbatch"; }
+same_bin() { local f; for f in grid_access.sh grid_access_watch.sbatch grid_ci.sbatch; do cmp -s "$WD/bin/$f" "$1/$f" || return 1; done; }
+unowns() { local tmp="$SHIM_OWNERS.new"; awk -v p="$1" '$1 != p' "$SHIM_OWNERS" > "$tmp" && mv -f "$tmp" "$SHIM_OWNERS"; }   # PATH: the stat shim's answer for it taken back
 nodetmp() { printf '/tmp/%s/hpcw_access_%s' "$(id -un)" "$1"; }
 for f in tools/grid_access.sh tools/grid_access_watch.sbatch; do OUT=$(bash -n "$REPO/$f" 2>&1); t "bash -n $f" [ -z "$OUT" ]; done
-t "the chain's job file names no queue, has a wall time of thirty minutes and the chain's name" eval '! grep -E "^#SBATCH --(partition|qos)" "$REPO/tools/grid_access_watch.sbatch" && grep -qx "#SBATCH --time=00:30:00" "$REPO/tools/grid_access_watch.sbatch" && grep -qx "#SBATCH --job-name=hpcw_access" "$REPO/tools/grid_access_watch.sbatch"'
+JF="$REPO/tools/grid_access_watch.sbatch"
+t "the chain's job file names no queue, has a wall time of thirty minutes and the chain's name" eval '! grep -E "^#SBATCH --(partition|qos)" "$JF" && grep -qx "#SBATCH --time=00:30:00" "$JF" && grep -qx "#SBATCH --job-name=hpcw_access" "$JF"'
+t "the chain's job file: one node, one task, one core, 1 GB, its log appended to (one log for every job) and requeueable" eval '( for l in --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=1G --output=access.log --open-mode=append --requeue; do grep -qx -- "#SBATCH $l" "$JF" || exit 1; done )'
+t "the chain's job file unsets every agent marker and both token variables, and the node's verdict a shell may have set" eval '( u=$(grep "^unset CLAUDECODE " "$JF"); for v in CLAUDECODE CLAUDE_CODE_ENTRYPOINT AI_AGENT BEETHOVEN_REQUEST_ID BEETHOVEN_WORKER ASHLEY_REQUEST_ID ASHLEY_WORKER ASHLEY_JOB HPCW_AGENT GITHUB_TOKEN GH_TOKEN; do case " $u " in *" $v "*) ;; *) exit 1;; esac; done; grep -qx "unset HPCW_ACCESS_NO_TMP" "$JF" )'
 
 echo "-- --watch refuses, and asks the scheduler nothing"
 mv "$T/vendor/admin_token" "$T/admin_token.kept"
@@ -806,11 +822,35 @@ t "--watch with admin_token beside grid_token: refused, gives the exact rm" eval
 rm "$T/vendor/admin_token"; ln -s "$T/admin_token.kept" "$T/vendor/admin_token"
 ga --watch
 t "--watch with admin_token a link: the rm names the file and the link" eval 'rc_is 1 && has "Remove it first: rm $T/admin_token.kept $T/vendor/admin_token; nothing started$" && [ ! -s "$T/slurm/calls" ]'
+rm "$T/vendor/admin_token"; ln -s "$T/no-such-admin-token" "$T/vendor/admin_token"
+ga --watch
+t "--watch with admin_token a link to nothing: still refused, the rm names the link" eval 'rc_is 1 && has "Remove it first: rm $T/vendor/admin_token; nothing started$" && [ ! -s "$T/slurm/calls" ]'
 rm "$T/vendor/admin_token"
+printf '%s\n' 'quo"te' > "$T/vendor/grid_token"
+ga --watch
+t "--watch with a grid_token that holds no bearer token: refused naming the characters" eval 'rc_is 1 && has "grid_token does not hold a token: its first line must be the grid token alone, letters, digits and - . _ ~ \+ / \(and = at its end\)" && [ ! -s "$T/slurm/calls" ]'
+printf '%s\r\n' "$GTOKEN" > "$T/vendor/grid_token"
 for e in 4 1441 x; do
   ga --watch --every "$e"
   t "--watch --every $e: refused (5 to 1440), the scheduler not asked" eval 'rc_is 1 && has "5 to 1440: $e$" && [ ! -s "$T/slurm/calls" ]'
 done
+# 5 and 1440 pass: each run below is refused for its folder instead, which is checked after the minutes
+chmod 777 "$T/vendor"
+ga --watch --every 5
+t "--watch --every 5 with a vendor folder others may write (0777): refused with the chmod, nothing asked" eval 'rc_is 1 && has "^grid_access: group or other may write in $T/vendor \(mode 777; fix: chmod go-w $T/vendor\): another account could put its own script where the chain.s jobs run it, beside the token; nothing started$" && [ ! -s "$T/slurm/calls" ]'
+chmod 755 "$T/vendor"; chmod 775 "$WD"
+ga --watch --every 1440
+t "--watch --every 1440 with access-watch others may write (0775): refused with the chmod" eval 'rc_is 1 && has "group or other may write in $WD \(mode 775; fix: chmod go-w $WD\)" && [ ! -s "$T/slurm/calls" ]'
+chmod 700 "$WD"; mv "$WD" "$T/aw.real"; ln -s "$T/aw.real" "$WD"
+ga --watch
+t "--watch with access-watch a link: refused" eval 'rc_is 1 && has "^grid_access: $WD is a link, where the chain keeps a folder of its own" && [ ! -s "$T/slurm/calls" ]'
+rm "${WD:?}"; mv "$T/aw.real" "$WD"; mkdir -m 700 "$WD/bin"; owns "$WD/bin" ab1234
+ga --watch
+t "--watch with access-watch/bin another account's: refused" eval 'rc_is 1 && has "^grid_access: $WD/bin belongs to ab1234, not to $(id -un): another account could" && [ ! -s "$T/slurm/calls" ]'
+unowns "$WD/bin"; rmdir "${WD:?}/bin"
+OUT=$( ( umask 002; BEETHOVEN_VENDOR_DIR="$T/vendor2" bash "$GA" --site wayne --root "$ROOT" --watch ) 2>&1)
+t "a vendor folder the tool makes is its owner's alone, whatever the umask (0002 here)" eval 'has "no grid_token in the vendor folder" && [ "$(stat -c %a "$T/vendor2")" = 700 ] && [ "$(stat -c %a "$T/vendor2/state")" = 700 ]'
+rm -r "${T:?}/vendor2"
 ga --watch --dry-run
 t "--watch with an option of a run's own (--dry-run): refused" eval 'rc_is 1 && has "^grid_access: --watch takes no --dry-run: " && [ ! -s "$T/slurm/calls" ]'
 ga --watch --partition p1
@@ -820,18 +860,28 @@ t "--every without --watch: refused" eval 'rc_is 1 && has "--every goes with --w
 t "nothing of the chain made by a refusal" eval '[ ! -e "$WD/bin" ]'
 
 echo "-- --watch starts the chain"
+# left by an earlier chain, naming the job the scheduler gives next: --watch clears both, or that job would
+# take its successor for queued already
+echo "$(( $(cat "$T/slurm/counter" 2>/dev/null || echo 1000) + 1 )) 999999" > "$WD/next"; cp "$WD/next" "$WD/next.submitting"
 ga --watch --every 7 --service "$SVC"
 W1=$(newest)
 t "--watch: one squeue and one sbatch, nothing else" eval 'rc_is 0 && [ "$(grep -c . "$T/slurm/calls")" = 2 ] && [ "$(scalls squeue)" = 1 ] && [ "$(scalls sbatch)" = 1 ] && grep -q "^squeue -h -u $(id -un) -n hpcw_access " "$T/slurm/calls"'
 t "--watch: says what it started, in two lines" eval '[ "$(printf "%s\n" "$OUT" | wc -l)" = 2 ] && has "^copying the access lists to $ROOT every 7 minutes: job $W1 looks now$" && has "^its log is $WD/access.log; tools/grid_access.sh --unwatch stops it$"'
-t "--watch: the chain's own copy of its two scripts in access-watch/bin" same_bin "$REPO/tools"
+t "--watch: the chain's own copy of its scripts in access-watch/bin (grid_ci.sbatch for its queue), the folders the owner's alone" eval 'same_bin "$REPO/tools" && [ "$(stat -c %a "$WD")" = 700 ] && [ "$(stat -c %a "$WD/bin")" = 700 ] && [ ! -e "$WD/next" ] && [ ! -e "$WD/next.submitting" ]'
 t "--watch: the job runs that copy, in the chain's folder, singleton, at once" eval '[ "$(J $W1 dir)" = "$WD" ] && cmp -s "$T/slurm/jobs/$W1/script" "$REPO/tools/grid_access_watch.sbatch" && [ "$(J $W1 dependency)" = singleton ] && [ -z "$(J $W1 begin)" ]'
 t "--watch: on grid_ci.sbatch's own partition and QoS, carried in the job's arguments" eval '[ -n "$DEF_PART" ] && [ "$(J $W1 partition)" = "$DEF_PART" ] && [ "$(J $W1 qos)" = "$DEF_QOS" ]'
 t "--watch: the root, the site, the service and the minutes fixed in the job's arguments" eval '[ "$(J $W1 args | tr "\n" " ")" = "--tick --every 7 --site wayne --root $ROOT --service $SVC --partition $DEF_PART --qos $DEF_QOS " ]'
 echo "# changed by hand" >> "$WD/bin/grid_access.sh"
 ga --watch --every 9
 t "--watch again while a job is queued: submits nothing, refreshes the chain's copy, says so" eval 'rc_is 0 && has "^already watching \(job $W1\); its scripts now come from this copy$" && [ "$(scalls sbatch)" = 1 ] && [ "$(scalls squeue)" = 2 ] && same_bin "$REPO/tools"'
-mkdir -p "$T/tools2"; cp "$REPO/tools/grid_access.sh" "$REPO/tools/grid_access_watch.sbatch" "$T/tools2/"; echo 'if' >> "$T/tools2/grid_access_watch.sbatch"
+echo "squeue: warning: a notice of the site's" > "$T/slurm/sqwarn"
+ga --watch
+t "--watch while a job is queued and squeue warns on stderr: the job is found, the warning shown, not taken for a job" eval 'rc_is 0 && has "^already watching \(job $W1\); " && has "^squeue: warning: a notice of the site.s$" && [ "$(scalls sbatch)" = 1 ]'
+rm -f "$T/slurm/sqwarn"; echo "squeue: error: Invalid user" > "$T/slurm/sqout"
+ga --watch
+t "--watch when squeue answers something else than its job list: refused, nothing submitted" eval 'rc_is 1 && has "^grid_access: squeue answered something else than the chain.s jobs: squeue: error: Invalid user" && [ "$(scalls sbatch)" = 1 ]'
+rm -f "$T/slurm/sqout"
+mkdir -p "$T/tools2"; cp "$REPO/tools/grid_access.sh" "$REPO/tools/grid_access_watch.sbatch" "$REPO/tools/grid_ci.sbatch" "$T/tools2/"; echo 'if' >> "$T/tools2/grid_access_watch.sbatch"
 OUT=$(bash "$T/tools2/grid_access.sh" --site wayne --root "$ROOT" --watch 2>&1); RC=$?
 t "a copy whose job file does not parse: refused, the chain keeps its scripts" eval 'rc_is 1 && has "grid_access_watch.sbatch is missing or does not parse" && has "keeps the scripts it had" && same_bin "$REPO/tools" && [ "$(scalls sbatch)" = 1 ]'
 
@@ -844,26 +894,43 @@ t "--tick from a checkout: refused, it runs the chain's own copy" eval 'rc_is 1 
 run_tick "$W1"
 W2=$(newest)
 t "a job: its line, then exactly one successor, in 7 minutes, singleton, the same arguments and queue" eval 'rc_is 0 && has "^== tick $W1 on [A-Za-z0-9.-]+ at [0-9T:-]+Z$" && [ "$(pending)" = "$W2" ] && [ "$(J $W2 begin)" = now+7minutes ] && [ "$(J $W2 dependency)" = singleton ] && [ "$(J $W2 args)" = "$(J $W1 args)" ] && [ "$(J $W2 partition)" = "$DEF_PART" ] && [ "$(J $W2 qos)" = "$DEF_QOS" ] && [ "$(J $W2 dir)" = "$WD" ]'
+t "the chain's first job says which curl its node has" eval 'has "^curl on [A-Za-z0-9.-]+: curl [0-9]"'
 t "a job: its successor queued before the lists are asked for" eval 'printf "%s\n" "$OUT" | awk "/^next tick: job / && !n { n = NR } /^tick done: / && !m { m = NR } END { exit !(n && m && n < m) }"'
 t "a job: the lists applied here, with the grid token, from the service (not the shell's readers command)" eval 'has "^tick done: exit 0 in [0-9]+s$" && [ "$(tr "\n" " " < "$T/svc.seen")" = "grid grid " ] && [ "$(curls)" = $((c + 2)) ] && [ "$(calls)" = $n ] && grep -qx "# target here:$ROOT" "$STATE" && grep -qx "# read cd5678 shared/data" "$STATE" && [ "$(named)" = "ab1234 cd5678" ]'
 t "a job: its log, last-tick, and the token's folder on the node gone" eval 'grep -q "^== tick $W1 on " "$WD/access.log" && grep -Eq "^[0-9T:-]+Z job $W1 on [A-Za-z0-9.-]+: exit 0 in [0-9]+s$" "$WD/last-tick" && [ ! -e "$(nodetmp $W1)" ]'
-t "a job: the header file was made in the job's own folder on the node's disk, 0600" eval 'grep -q -- " -H @$(nodetmp $W1)/grid_access\.[A-Za-z0-9]*/header " "$SHIM_CURL_CALLS" && ! grep "^header-file-mode " "$SHIM_CURL_CALLS" | grep -v "^header-file-mode 600$" >/dev/null'
+t "a job: curl's configuration file made in the job's own folder on the node's disk, 0700, the file 0600" eval 'grep -q -- "^-q -sS --max-time 60 -K $(nodetmp $W1)/grid_access\.[A-Za-z0-9]*/curl\.config " "$SHIM_CURL_CALLS" && [ "$(grep -c "^tmpdir 700 $(nodetmp $W1)$" "$SHIM_CURL_META")" = 2 ] && ! grep "^config-file-mode " "$SHIM_CURL_META" | grep -v "^config-file-mode 600$" >/dev/null'
 n=$(scalls sbatch)
 run_tick "$W1"
 t "the same job run again (a requeue): no second successor" eval 'rc_is 0 && has "^next tick: job $W2, queued by an earlier run of this job$" && [ "$(scalls sbatch)" = $n ] && [ "$(pending)" = "$W2" ]'
+t "a job with nothing new: the child (--quiet) says nothing, and no curl line but the chain's first job's" eval '[ "$(printf "%s\n" "$OUT" | grep -c .)" = 3 ] && lacks "^unchanged since" && lacks "^curl on "'
 echo "$W1" > "$WD/next.submitting"; rm -f "$WD/next"; nq=$(scalls squeue)
-run_tick "$W1"
+echo "squeue: error: a line that is no job number" > "$T/slurm/sqout"   # never taken for the successor's number
+: > "$T/svc.seen"; m0=$(grep -c '^markers' "$SHIM_CURL_META")
+run_tick "$W1" BEETHOVEN_ROSTER_CMD="printf 'zz1111\\n'" CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli AI_AGENT=x BEETHOVEN_REQUEST_ID=r1 BEETHOVEN_WORKER=1 ASHLEY_REQUEST_ID=r1 ASHLEY_WORKER=1 ASHLEY_JOB=1 HPCW_AGENT=1
+t "a job started from a shell with a roster command and an agent's markers: both lists from the service, no marker reaches curl" eval '[ "$(tr "\n" " " < "$T/svc.seen")" = "grid grid " ] && [ "$(grep "^markers" "$SHIM_CURL_META" | sed -n "$((m0 + 1)),\$p" | sort -u)" = markers ]'
+rm -f "$T/slurm/sqout"
 t "stopped between its successor's sbatch and writing it down: one squeue finds it, no second" eval 'rc_is 0 && [ "$(scalls sbatch)" = $n ] && [ "$(scalls squeue)" = $((nq + 1)) ] && [ "$(pending)" = "$W2" ] && [ ! -e "$WD/next.submitting" ] && [ "$(cat "$WD/next")" = "$W1 $W2" ]'
 t "no file of the chain's folder or the vendor folder's state holds the token; no job's arguments either" eval '! grep -rF -e "$GTOKEN" -e "$TOKEN" "$WD" "$T/vendor/state" "$T/slurm" >/dev/null'
 t "no scheduler call saw GITHUB_TOKEN or GH_TOKEN" eval '[ ! -s "$T/slurm/leaks" ]'
 
 echo "-- --unwatch, STOP, --watch again"
-nq=$(scalls squeue); nc=$(scalls scancel)
+nq=$(scalls squeue); nc=$(scalls scancel); set_state "$W1" RUNNING
+echo "squeue: warning: a notice of the site's" > "$T/slurm/sqwarn"
 ga --unwatch
-t "--unwatch: STOP written, the queued job cancelled, one squeue and one scancel" eval 'rc_is 0 && [ -s "$WD/STOP" ] && [ "$(J $W2 state)" = CANCELLED ] && [ "$(scalls squeue)" = $((nq + 1)) ] && [ "$(scalls scancel)" = $((nc + 1)) ] && grep -q "^scancel $W2$" "$T/slurm/calls" && has "^cancelled the queued job \(job $W2\)$" && has "^STOP written"'
+rm -f "$T/slurm/sqwarn"
+t "--unwatch: a job running then is left to end (STOP ends the chain there), the warning not taken for a job" eval '[ "$(J $W1 state)" = RUNNING ] && ! grep -q "^scancel .*$W1" "$T/slurm/calls" && has "^squeue: warning: "'
+set_state "$W1" COMPLETED
+t "--unwatch: STOP written, the queued job cancelled, one squeue and one scancel" eval 'rc_is 0 && [ -s "$WD/STOP" ] && [ "$(J $W2 state)" = CANCELLED ] && [ "$(scalls squeue)" = $((nq + 1)) ] && [ "$(scalls scancel)" = $((nc + 1)) ] && grep -q "^scancel $W2$" "$T/slurm/calls" && has "^cancelled the queued job \(job $W2\)$" && has "^STOP written: a job running now queues at most one more, which ends on STOP when it runs \(--unwatch again cancels it at once\)"'
+echo "squeue: error: Invalid user" > "$T/slurm/sqout"; nc=$(scalls scancel)
+ga --unwatch
+t "--unwatch when squeue answers something else than job numbers: refused, nothing cancelled, STOP kept" eval 'rc_is 1 && has "squeue answered something else than job numbers: squeue: error: Invalid user; STOP is written" && [ "$(scalls scancel)" = $nc ] && [ -e "$WD/STOP" ]'
+rm -f "$T/slurm/sqout"
+set_state "$W2" PENDING; n=$(scalls sbatch); echo "# changed by hand" >> "$WD/bin/grid_access.sh"
+ga --watch --service "$SVC"
+t "--watch while STOP is set and a job is only queued: refused, names --unwatch to cancel it now; the copy refreshed all the same" eval 'rc_is 1 && has "job $W2 of the chain is queued, but STOP is set, so it only ends the chain when it runs \(its scripts now come from this copy\); tools/grid_access.sh --unwatch cancels it now, then --watch starts the chain again" && [ "$(scalls sbatch)" = $n ] && same_bin "$REPO/tools"'
 set_state "$W2" RUNNING; n=$(scalls sbatch)
 ga --watch --service "$SVC"
-t "--watch while a job still runs and STOP is set: refused, says the chain ends with it" eval 'rc_is 1 && has "job $W2 of the chain is still queued or running, but STOP is set, so the chain ends with it" && [ "$(scalls sbatch)" = $n ] && [ -e "$WD/STOP" ]'
+t "--watch while a job still runs and STOP is set: refused, says the chain ends with it" eval 'rc_is 1 && has "job $W2 of the chain is running, but STOP is set, so the chain ends with it" && [ "$(scalls sbatch)" = $n ] && [ -e "$WD/STOP" ]'
 : > "$T/svc.seen"
 run_tick "$W2"
 t "a job that finds STOP: the chain ends, no successor, nothing applied" eval 'rc_is 0 && has "^STOP is set \($WD/STOP\): the chain ends here" && [ "$(scalls sbatch)" = $n ] && lacks "^tick done" && [ ! -s "$T/svc.seen" ] && [ -z "$(pending)" ]'
@@ -889,8 +956,69 @@ run_tick "$W5"
 t "a job with no grid_token: applies nothing, never falls back to admin_token, and says it is there" eval 'rc_is 1 && has "^no grid_token in the vendor folder \($T/vendor\): the chain reads the lists with the grid token alone" && has "^note: $T/vendor/admin_token is here too; .*: rm $T/vendor/admin_token$" && [ ! -s "$T/svc.seen" ] && [ -n "$(pending)" ]'
 rm "$T/vendor/admin_token"; mv "$T/grid_token.kept" "$T/vendor/grid_token"
 for j in $(pending); do set_state "$j" CANCELLED; done
+
+echo "-- the job's own folder on the node's disk"
+# The job file makes /tmp/<account>/hpcw_access_<job> on the real /tmp of this machine, as on a compute node.
+# A node where that fails still lets the job queue its successor; what another account put there is never
+# followed, changed or removed
+TU=$(dirname "$(nodetmp 1)"); TU_MODE=$(stat -c %a "$TU" 2>/dev/null)
+noapply() { [ ! -s "$T/svc.seen" ] && has "; this job applies nothing, and the next one tries again$" && grep -q ": exit 1 in " "$WD/last-tick"; }
+ga --watch --service "$SVC"; K=$(newest)
+mkdir -p "$TU"; : > "$(nodetmp "$K")"; : > "$T/svc.seen"
+run_tick "$K"
+t "a node where the job's folder cannot be made (a file there): its successor still queued, nothing applied, the reason said" eval 'rc_is 1 && [ -n "$(pending)" ] && [ "$(pending)" != "$K" ] && has "could not give this job a folder of its own on its disk for the token.s configuration file: $(nodetmp $K) cannot be made a folder" && noapply && [ -f "$(nodetmp $K)" ] && lacks "^the chain ends here"'
+rm -f "$(nodetmp "$K")"; K=$(pending)
+mkdir -p "$T/notmine-root"; chmod 3770 "$T/notmine-root"; ln -s "$T/notmine-root" "$(nodetmp "$K")"; : > "$T/svc.seen"
+run_tick "$K"
+t "a link another account put in place of the job's folder: never followed (its target's mode unchanged), left as it is, the successor queued" eval 'rc_is 1 && has "$(nodetmp $K) is there already, as a link" && [ "$(stat -c %a "$T/notmine-root")" = 3770 ] && [ -L "$(nodetmp $K)" ] && [ -z "$(ls -A "$T/notmine-root")" ] && noapply && [ -n "$(pending)" ]'
+rm -f "$(nodetmp "$K")"; K=$(pending)
+owns "$TU" ab1234; : > "$T/svc.seen"
+run_tick "$K"
+unowns "$TU"
+t "/tmp/<account> another account's: nothing made in it, the successor queued" eval 'rc_is 1 && has "$TU belongs to ab1234, not to $(id -un)" && [ ! -e "$(nodetmp $K)" ] && noapply && [ -n "$(pending)" ]'
+K=$(pending); mkdir -m 755 "$(nodetmp "$K")"; chmod 777 "$TU"; : > "$T/svc.seen"; m0=$(grep -c '^tmpdir ' "$SHIM_CURL_META")
+run_tick "$K"
+t "the job's folder left by an earlier run of the same job (a requeue): taken, made 0700, /tmp/<account> closed to writing by others, gone after" eval 'rc_is 0 && [ "$(tr "\n" " " < "$T/svc.seen")" = "grid grid " ] && [ "$(grep "^tmpdir " "$SHIM_CURL_META" | sed -n "$((m0 + 1)),\$p" | sort -u)" = "tmpdir 700 $(nodetmp $K)" ] && [ ! -e "$(nodetmp $K)" ] && case "$(stat -c %a "$TU")" in *[2367]?|*[2367]) false;; esac'
+[ -z "$TU_MODE" ] || chmod "$TU_MODE" "$TU"
+
+echo "-- the folders the job runs from"
+K=$(pending); n=$(scalls sbatch); chmod 777 "$T/vendor"; : > "$T/svc.seen"
+run_tick "$K"
+chmod 755 "$T/vendor"
+t "a vendor folder others may write: the job runs nothing of bin/, queues no successor, and says the chain ends" eval 'rc_is 1 && has "^group or other may write in $T/vendor \(mode 777; fix: chmod go-w $T/vendor\): another account could change what this job runs. Nothing applied, and the chain ends here" && [ "$(scalls sbatch)" = $n ] && [ -z "$(pending)" ] && [ ! -s "$T/svc.seen" ] && lacks "^== tick"'
+ga --watch --service "$SVC"; K=$(newest); n=$(scalls sbatch); owns "$WD" ab1234
+run_tick "$K"
+unowns "$WD"
+t "the chain's folder another account's: the same" eval 'rc_is 1 && has "^$WD belongs to ab1234, not to $(id -un): another account could change what this job runs" && [ "$(scalls sbatch)" = $n ] && [ -z "$(pending)" ]'
+ga --watch --service "$SVC"; K=$(newest); n=$(scalls sbatch); chmod 775 "$WD/bin/grid_access.sh"
+run_tick "$K"
+t "bin/grid_access.sh others may write: the same" eval 'rc_is 1 && has "^group or other may write in $WD/bin/grid_access.sh \(mode 775; fix: chmod go-w $WD/bin/grid_access.sh\)" && [ "$(scalls sbatch)" = $n ] && [ -z "$(pending)" ]'
+chmod 755 "$WD/bin/grid_access.sh"
+OUT=$(cd "$WD" && env -u SLURM_JOB_ID bash bin/grid_access_watch.sbatch --tick 2>&1); RC=$?
+t "the job file outside a job: refused before anything" eval 'rc_is 1 && has "this file is a job of the chain; tools/grid_access.sh --watch submits it"'
+
+echo "-- --watch from the chain's own copy, and --unwatch while a job queues its next"
+OUT=$(bash "$WD/bin/grid_access.sh" --site wayne --root "$ROOT" --watch --every 7 --service "$SVC" 2>&1); RC=$?; K=$(newest)
+t "--watch typed from the chain's own copy (the clone gone): the same queue, from the copy's grid_ci.sbatch" eval 'rc_is 0 && has "job $K looks now" && [ "$(J $K partition)" = "$DEF_PART" ] && [ "$(J $K qos)" = "$DEF_QOS" ]'
+# sbatch first on the job's PATH runs --unwatch once, just before the job's successor is submitted: past
+# the job's own look at STOP
+mkdir -p "$T/hk/real"; ln -sf "$T/bin/slurm.shim" "$T/hk/real/sbatch"
+printf '%s\n' '#!/usr/bin/env bash' \
+  "if [ -e '$T/hk/once' ]; then rm -f '$T/hk/once'; env -u SLURM_JOB_ID bash '$GA' --site wayne --root '$ROOT' --unwatch > '$T/hk/unwatch.out' 2>&1; fi" \
+  "exec '$T/hk/real/sbatch' \"\$@\"" > "$T/hk/sbatch"
+chmod 755 "$T/hk/sbatch"; touch "$T/hk/once"
+run_tick "$K" PATH="$T/hk:$PATH"
+K2=$(pending)
+t "--unwatch typed while a job queues its next: one more job queued, as --unwatch said it may be" eval 'grep -q "^no job of the chain was queued$" "$T/hk/unwatch.out" && grep -q "^STOP written: a job running now queues at most one more" "$T/hk/unwatch.out" && [ -n "$K2" ] && [ -e "$WD/STOP" ]'
+ga --watch --service "$SVC"
+t "--watch then: refused, names --unwatch to cancel that one now" eval 'rc_is 1 && has "job $K2 of the chain is queued, but STOP is set, so it only ends the chain when it runs .*tools/grid_access.sh --unwatch cancels it now"'
+ga --unwatch
+t "--unwatch again: that job cancelled" eval 'rc_is 0 && [ "$(J $K2 state)" = CANCELLED ] && [ -z "$(pending)" ]'
+echo "squeue: warning: a notice of the site's" > "$T/slurm/sqwarn"
 ga --watch
 W6=$(newest)
+rm -f "$T/slurm/sqwarn"
+t "--watch with nothing queued while squeue warns on stderr: the chain starts, the warning shown" eval 'rc_is 0 && has "^squeue: warning: " && has "^copying the access lists to $ROOT every 15 minutes: job $W6 looks now$"'
 t "--watch with no --service but \$BEETHOVEN_SERVICE_URL set: that address goes with every job" eval 'rc_is 0 && grep -qx -- "--service" "$T/slurm/jobs/$W6/args" && grep -qx "https://127.0.0.1:1" "$T/slurm/jobs/$W6/args"'
 set_state "$W6" CANCELLED
 env -u BEETHOVEN_SERVICE_URL bash "$GA" --site wayne --root "$ROOT" --watch >/dev/null 2>&1

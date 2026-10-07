@@ -310,8 +310,11 @@ else, so it is the one the grid keeps. The **admin token** is the maintainer's a
 accounts, so it stays on your own PC and never goes to the grid (the grid's way below refuses to
 start while one sits in the grid's vendor folder). Either file is one line and must be yours alone
 (`chmod 600`; the tool refuses a file that group or other can read and says so, naming the file). The
-token never appears on a command line, in the log or in a message: curl reads it from a header file
-of the run's own, mode `0600`, in a temporary folder the run removes. The tool looks for nothing
+token never appears on a command line, in the log or in a message: curl reads it from a configuration
+file of the run's own (`curl -q -K FILE`, one header line), mode `0600`, in a temporary folder the run
+removes; not from a header file (`-H @FILE`), which curl before 7.55, CentOS 7's 7.29 among them, sends
+as nothing. The file's first line is the token alone, as the admin page makes it: letters, digits and
+`- . _ ~ + /`, with `=` only at its end; the tool refuses anything else. The tool looks for nothing
 beside its own checkout and runs no other repository's code; your own list stands in for the
 service's when you name one (`--roster-file FILE` and `--readers-file FILE`, or a command in
 `BEETHOVEN_ROSTER_CMD` and `BEETHOVEN_READERS_CMD`).
@@ -339,11 +342,14 @@ WSL). Once, three steps:
    bash tools/grid_access.sh --watch
    ```
 
-`--watch` refuses, and starts nothing, while `~/.beethoven-vendor/grid_token` is missing, empty or
-readable by others, and while `~/.beethoven-vendor/admin_token` is there too (it prints the `rm` that
-removes it). On the login node it is file work, one `squeue` and one `sbatch`: it copies its two
-scripts to `~/.beethoven-vendor/access-watch/bin/` (the clone may go afterwards) and queues the first
-job, which looks at once. It says
+`--watch` refuses, and starts nothing, while `~/.beethoven-vendor/grid_token` is missing, empty,
+holds no token or is readable by others, while `~/.beethoven-vendor/admin_token` is there too (it
+prints the `rm` that removes it), and while the vendor folder or the chain's folder in it
+(`access-watch`) is not yours or others may write it (it prints the `chmod go-w`): the chain's jobs run
+the scripts kept there, beside the token. On the login node it is file work, one `squeue` and one
+`sbatch`: it copies its scripts to `~/.beethoven-vendor/access-watch/bin/` (with `grid_ci.sbatch`,
+whose queue the chain uses; the clone may go afterwards), making each folder yours alone, and queues
+the first job, which looks at once. It says
 
 ```
 copying the access lists to /rs/rs_grp_oschome every 15 minutes: job 40561234 looks now
@@ -356,10 +362,19 @@ grid's CI lane uses, `reqp` with QoS `requeue`; `HPCW_ACCESS_PARTITION` and `HPC
 another interval), then runs the tool once on its compute node as `--here --quiet` with the service as
 the source of both lists, and ends. Its lines go to `access.log` in that folder (one older log kept as
 `access.log.1`), and `last-tick` says when the last one ran, where, with which exit and how long it
-took. A job writes the token's header file on its node's own disk, never on the volume. `--watch` again
-while the chain runs starts nothing and gives the chain the scripts of the clone it was typed in;
-`bash tools/grid_access.sh --unwatch` stops it (the job running then finishes and none follows).
-Started once, it needs nobody: the list follows the service whether your PC is on or not.
+took; the first job also names its node's curl (`curl on <node>: curl <version> ...`). A job writes
+curl's configuration file on its node's own disk, never on the volume, in a folder of its own under
+`/tmp/<you>`, which must be your own folder and not a link (the job closes it to writing by others).
+A node where that fails applies nothing, says why in the log, and still queues the next job, which may
+land elsewhere. Before anything, each job checks that the vendor folder, `access-watch`, its `bin/` and
+the script there are yours and that no one else may write them; when one is not, the job applies
+nothing, queues no successor, and says the chain ends there (`--watch` starts it again once the
+`chmod` it prints is done). `--watch` again while the chain runs starts nothing and gives the chain
+the scripts of the clone it was typed in; `bash tools/grid_access.sh --unwatch` stops it: it writes
+`STOP` and cancels the queued job. A job running at that moment may still queue one more, which ends
+on `STOP` when it runs; `--unwatch` again cancels it at once, and `--watch` while it waits says so and
+names `--unwatch`. Started once, it needs nobody: the list follows the service whether your PC is on
+or not.
 
 **The other way, where WSL is at hand,** is the scheduled task on the PC (below, "Every fifteen
 minutes, by itself"), which uses `admin_token` on the PC (or `grid_token`, if you keep one there);
@@ -383,7 +398,7 @@ reads the service there with `curl` and, for a reader of `.`, walks the whole vo
 
 ```
 srun -p secp --qos=secondary -t 00:30:00 --pty bash        # a shell on a compute node
-export TMPDIR=/tmp/$USER/grid_access_by_hand; mkdir -p -m 700 "$TMPDIR"   # the node's own disk, not the volume
+export TMPDIR=$(mktemp -d /tmp/grid_access_by_hand.XXXXXX)  # a new folder, yours alone, on the node's own disk, not the volume
 cd ~/hpcworker-access && bash tools/grid_access.sh --here --dry-run --force
 rm -rf "$TMPDIR"; exit
 ```
@@ -402,6 +417,14 @@ grid `~/.beethoven-vendor/state/grid_access.log`, and the chain's job also write
 - `no grid_token or admin_token in the vendor folder (...)`: put a token in one of them, one line
   (`grid_token` on the grid, made on the admin page; on the PC either). `--watch` names only
   `grid_token` (`no grid_token in the vendor folder (...)`), since the chain uses nothing else.
+- `.../grid_token does not hold a token: its first line must be the token alone, letters, digits and
+  - . _ ~ + / (and = at its end) ...`: the file holds something else (a quote, a second word, a page
+  saved in its place); copy it again (step 2 above).
+- `group or other may write in ... (mode 777; fix: chmod go-w ...)`, `... belongs to ..., not to ...`
+  or `... is a link, where the chain keeps a folder of its own` (`--watch`, and a job of the chain,
+  whose log then says the chain ends there): the vendor folder and the chain's folder must be yours
+  alone to write, since the chain's jobs run the scripts kept there; run the `chmod` it prints (or
+  move the link away), then `--watch` again.
 - `.../grid_token is readable by group or other (mode 644); make it yours alone first: chmod 600 ...`
   (or `admin_token`, whichever the run took): `chmod 600` the file it names (a link is judged by the
   file it names). On the grid that is all. On the PC your vendor folder is on a Windows drive
@@ -486,7 +509,8 @@ until the account exists and it gets its entry. If an id the grid knew stops res
 its entry is left as it is and the read-back allows for it. On the grid it is file work only, with
 bash, coreutils, sed, awk, `getfacl` and `setfacl`: nothing on warrior's banned list, no scheduler
 call, no temp file. The chain's job does the same work on its compute node, after asking the service
-with `curl`; its one temporary folder, for the token's header file, is on that node's own disk.
+with `curl`; its one temporary folder, for curl's configuration file with the token, is on that
+node's own disk.
 
 **Readers: the group's read on a folder, one account and one folder at a time.** Some people need to
 read lab data without running Beethoven, and ask to be put in the group `oschome` for it, which is
@@ -581,7 +605,7 @@ group reads it (N entries; ...)`, or the `FAILED` line above) and changes nothin
 
 ```
 srun -p secp --qos=secondary -t 00:30:00 --pty bash        # a shell on a compute node
-export TMPDIR=/tmp/$USER/grid_access_by_hand; mkdir -p -m 700 "$TMPDIR"   # the node's own disk
+export TMPDIR=$(mktemp -d /tmp/grid_access_by_hand.XXXXXX)  # a new folder, yours alone, on the node's own disk
 cat > "$TMPDIR/readers.txt"                                 # paste today's lines and `<AccessID> .`, then Ctrl-D
 cd ~/hpcworker-access && time bash tools/grid_access.sh --here --dry-run --force --readers-file "$TMPDIR/readers.txt"
 rm -rf "$TMPDIR"; exit
@@ -719,9 +743,10 @@ and whether your vendor folder under `/mnt/c` has real file modes is not yet mea
 the tool refuses"; the tool runs either way). The chain (`--watch`, its jobs and `--unwatch`) was run only against a
 stand-in scheduler that records each call and whose jobs the test runs in place
 (`tools/tests/test_grid_access.sh`); it has not run on the grid, and whether a compute node reaches
-the service, whether `getfacl` and `setfacl` are there outside a container, and how Wayne State's
-Slurm treats the `--begin`/`--dependency=singleton` chain are not yet measured
-(`docs/OPEN_QUESTIONS.md`). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
+the service, which curl it has (the token goes to curl as `-K FILE`, which a curl built from 7.29's
+source sent correctly in a test; the first job's log names the node's own), whether `getfacl` and `setfacl` are there
+outside a container, and how Wayne State's Slurm treats the `--begin`/`--dependency=singleton` chain
+are not yet measured (`docs/OPEN_QUESTIONS.md`). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
 been seen to work, and no reader yet. Run `--dry-run --force` first.
 
 ## 10. Not proven

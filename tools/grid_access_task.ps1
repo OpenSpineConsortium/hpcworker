@@ -35,7 +35,7 @@
   /admin/readers.txt), with the token it finds in the vendor folder (the file grid_token when it is
   there, made on the admin page, which reads the two lists and nothing else; else admin_token, the
   maintainer's; either must be readable by its owner alone: chmod 600 in WSL); the token travels in a
-  header file curl reads, never on a command line. When the list has not changed since the last run,
+  configuration file curl reads (-K), never on a command line. When the list has not changed since the last run,
   grid_access.sh does not connect to the grid at all (an approved AccessID the grid does not know yet
   is tried again once a day), and the task's runs never sweep the whole tree (that is --check-tree, by
   hand). Each run adds one line to <vendor>\state\grid_access.log; a run the service refuses (no

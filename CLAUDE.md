@@ -120,7 +120,7 @@ name and identifier carry no university name.
   with a token from the vendor folder: `grid_token` on the cluster (the service's second token, made
   on the admin page, which reads the two lists and nothing else), `admin_token` only on a PC (it can
   approve accounts and never sits on a shared machine; `--watch` refuses while it is there) (0600;
-  the token travels in a header file curl reads, never in argv, a log or a message; only 200 plain
+  the token travels in a configuration file curl reads with `-q -K`, never in argv, a log or a message; only 200 plain
   text counts); `deploy_shared` never closes the tree to
   other below the gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed
   to other; a reader the service approved for a folder (`GET /admin/readers.txt`) gets the group's

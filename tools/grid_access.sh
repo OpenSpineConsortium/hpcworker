@@ -34,10 +34,14 @@
 # and can also approve accounts, so it stays on the maintainer's own machine. The file used must be the
 # owner's alone (mode 0600, of the file a link names; a run that finds it readable by group or other
 # refuses and says to chmod it; on a WSL Windows drive mounted without file modes, where every file reads
-# 0777, the Windows folder's permissions stand in for the mode and the run says so). The token leaves it
-# only for a header file of this run's
-# own, mode 0600 in a temporary folder the run removes, which curl reads (-H @FILE): never an argument,
-# never a line of the log, never a word of a message. Only an answer of 200 and text/plain is a list;
+# 0777, the Windows folder's permissions stand in for the mode and the run says so). Its first line is
+# one bearer token (letters, digits and - . _ ~ + /, then = at the end if any, as RFC 6750 has it; the
+# service's tokens are hex and base64); anything else there refuses. The token leaves it only for a
+# curl configuration file of this run's own, one header line, mode 0600 in a temporary folder the run
+# removes, which curl reads (-q -K FILE): never an argument, never a line of the log, never a word of a
+# message. (-K, because curl before 7.55, CentOS 7's 7.29 among them, sends nothing for -H @FILE; -q
+# first, so that no ~/.curlrc of the account's adds a trace or anything else to the run.) Only an
+# answer of 200 and text/plain is a list;
 # anything else refuses with nothing changed and says what it was: the token not accepted (401, 403:
 # check grid_token, or admin_token, whichever the run used), the service not yet deployed with the lists
 # (404), another answer, a page or
@@ -65,23 +69,30 @@
 # jobs, so that neither a token able to approve accounts nor a machine of the lab lead's is needed for
 # it. A person starts it once in a shell on the login node, from a checkout: --watch there is file work,
 # one squeue and one sbatch, and refuses unless the vendor folder holds grid_token (readable, the owner's
-# alone, one line) and holds no admin_token (it prints the rm that removes it). One chain per account: a
-# job named hpcw_access already queued or running gets no second; --watch then refreshes the chain's own
-# copy of its scripts and says so. Otherwise it copies grid_access.sh and grid_access_watch.sbatch into
-# <vendor>/access-watch/bin (each by a rename, and only when both parse) and submits the first job
-# (tools/grid_access_watch.sbatch, -D <vendor>/access-watch, --dependency=singleton) at once, with the
-# root (given, or the profile's, resolved now), the site, the service when one was given, the minutes
-# (--every, 5 to 1440, 15 by default) and the queue on its command line, so a job needs neither the
-# profile nor the framework. The queue: $HPCW_ACCESS_PARTITION and $HPCW_ACCESS_QOS, else
-# $HPCW_CI_PARTITION and $HPCW_CI_QOS, else the #SBATCH --partition and --qos lines of grid_ci.sbatch
-# beside this script. Each job (--tick, inside the job only) reads <vendor>/access-watch/STOP first and
-# ends the chain there when it is set; then queues its one successor (--begin=now+<minutes>minutes,
-# --dependency=singleton; written down as next.submitting before the sbatch and as next after it, so a
-# requeued job never queues a second), then runs this script once more as a child, --here --quiet with
-# the service as the source of both lists, into access.log (one older log kept as access.log.1 past 1 MB),
-# and writes last-tick (date, job, node, exit, seconds). Its exit is the child's, or 1 when its successor
-# could not be queued (the log says the chain ends there). --unwatch writes STOP, asks squeue once for
-# the queued jobs and cancels them with one scancel. Nothing the chain prints or keeps holds the token.
+# alone, one line) and holds no admin_token (it prints the rm that removes it), and unless the vendor
+# folder, access-watch and its bin are this account's own and closed to writing by group and other (it
+# prints the chmod): in a folder another account may write, that account could put its own script where
+# the chain's next job runs it, beside the token. One chain per account: a job named hpcw_access already
+# queued or running gets no second; --watch then refreshes the chain's own copy of its scripts and says
+# so. Otherwise it copies grid_access.sh, grid_access_watch.sbatch and grid_ci.sbatch (read only for its
+# queue, so that a --watch typed from that copy finds the same one) into <vendor>/access-watch/bin (each
+# by a rename, and only when all parse) and submits the first job (tools/grid_access_watch.sbatch, -D
+# <vendor>/access-watch, --dependency=singleton) at once, with the root (given, or the profile's,
+# resolved now), the site, the service when one was given, the minutes (--every, 5 to 1440, 15 by
+# default) and the queue on its command line, so a job needs neither the profile nor the framework. The
+# queue: $HPCW_ACCESS_PARTITION and $HPCW_ACCESS_QOS, else $HPCW_CI_PARTITION and $HPCW_CI_QOS, else the
+# #SBATCH --partition and --qos lines of grid_ci.sbatch beside this script. Each job (--tick, inside the
+# job only) reads <vendor>/access-watch/STOP first and ends the chain there when it is set; then queues
+# its one successor (--begin=now+<minutes>minutes, --dependency=singleton; written down as
+# next.submitting before the sbatch and as next after it, so a requeued job never queues a second), then
+# runs this script once more as a child, --here --quiet with the service as the source of both lists,
+# into access.log (one older log kept as access.log.1 past 1 MB), and writes last-tick (date, job, node,
+# exit, seconds). A job whose node could not give it a folder of its own on the node's disk (the job file
+# says so in $HPCW_ACCESS_NO_TMP) still queues its successor and applies nothing. Its exit is the
+# child's, 1 when it applied nothing, or 1 when its successor could not be queued (the log says the
+# chain ends there). The first job of a chain says which curl its node has. --unwatch writes STOP, asks
+# squeue once for the queued jobs and cancels them with one scancel; a job running just then may still
+# queue one more, which ends on STOP when it runs. Nothing the chain prints or keeps holds the token.
 #
 # What it keeps, on the machine that runs it, under $BEETHOVEN_VENDOR_DIR (else $ASHLEY_VENDOR_DIR, else
 # ~/.beethoven-vendor; the same folder the token is read from; a job of the chain takes the folder it
@@ -94,7 +105,7 @@
 #                                 folder taken off whose taking back did not finish (over the cap, or a
 #                                 setfacl that failed) on a line "# unread <id> <folder>", until it does.
 #   state/grid_access.log         one line per run
-#   access-watch/                 the chain's folder: bin/ (its own copy of the two scripts), STOP, next,
+#   access-watch/                 the chain's folder: bin/ (its own copy of its scripts), STOP, next,
 #                                 next.submitting, last-tick, access.log and access.log.1
 # When the target is the one last applied and the list, less the ids recorded as unknown, is the list
 # last applied, it does not connect to the grid at all; an id recorded as unknown is tried again at most
@@ -671,7 +682,9 @@ if [ "$mode" = tick ]; then
 fi
 watchdir="$vendor/access-watch"
 statedir="$vendor/state"
-mkdir -p "$statedir" || die "cannot make $statedir"
+# the vendor folder, when this makes it, and its state are the owner's alone: the token and the chain's
+# scripts are kept there too
+( umask 077; mkdir -p "$statedir" ) || die "cannot make $statedir"
 statef="$statedir/grid_access.$site.ids"
 logf="$statedir/grid_access.log"
 target="-"
@@ -685,19 +698,22 @@ me_user=$(id -un)
 SB() { env -u TMPDIR -u GITHUB_TOKEN -u GH_TOKEN sbatch "$@"; }
 SQ() { env -u GITHUB_TOKEN -u GH_TOKEN squeue "$@"; }
 SC() { env -u GITHUB_TOKEN -u GH_TOKEN scancel "$@"; }
-watch_stop() { # --unwatch: STOP for a job that runs now or starts later, and the queued one cancelled
+# squeue's answer is read from its output alone: a warning it prints on stderr (a site's notice, a
+# setting it complains of) goes to the terminal, and is never taken for a job of the chain
+watch_stop() { # --unwatch: STOP for a job that runs now or starts later, and the queued ones cancelled
   local ids
   { command -v squeue && command -v scancel; } >/dev/null 2>&1 \
     || die "--unwatch runs on the cluster, in a shell on its login node: squeue and scancel are not here"
   { ( umask 077; mkdir -p "$watchdir" ) && date -u +%FT%TZ > "$watchdir/STOP"; } || die "cannot write $watchdir/STOP"
-  ids=$(SQ -h -u "$me_user" -n hpcw_access -t PENDING -o '%i' 2>&1) || die "squeue did not answer ($ids); STOP is written, so the chain's next job ends it"
+  ids=$(SQ -h -u "$me_user" -n hpcw_access -t PENDING -o '%i') || die "squeue did not answer (its own words, if any, are above); STOP is written, so the chain's next job ends it"
   [[ "$ids" =~ ^[0-9[:space:]]*$ ]] || die "squeue answered something else than job numbers: $ids; STOP is written, so the chain's next job ends it"
   if [ -n "$ids" ]; then
     # shellcheck disable=SC2086
     SC $ids || die "scancel failed; STOP is written, so the chain's next job ends it"
     say "cancelled the queued job (job $(printf '%s' "$ids" | tr '\n' ' ' | sed 's/ *$//'))"
   else say "no job of the chain was queued"; fi
-  say "STOP written: a job running now finishes and none follows it; tools/grid_access.sh --watch starts the chain again"
+  # a job past its own look at STOP, about to queue its successor, still does: that one ends on STOP
+  say "STOP written: a job running now queues at most one more, which ends on STOP when it runs (--unwatch again cancels it at once); tools/grid_access.sh --watch starts the chain again"
 }
 if [ "$mode" = unwatch ]; then watch_stop; exit 0; fi
 
@@ -729,9 +745,9 @@ if [ $from_profile = 1 ]; then
 fi
 
 # the access service, the source of both lists unless a file or a command stands in for it (LAB_LEAD.md,
-# section 9). The token stays in the vendor folder's grid_token (or admin_token) and in a header file of this run's own
-# that curl reads, so that no argument, log line or message ever carries it (a process's arguments are
-# visible to every account on the machine). An answer that is not 200 plain text is never a list: a list
+# section 9). The token stays in the vendor folder's grid_token (or admin_token) and in a configuration
+# file of this run's own that curl reads, so that no argument, log line or message ever carries it (a
+# process's arguments are visible to every account on the machine). An answer that is not 200 plain text is never a list: a list
 # taken from a 404 (the service not deployed yet), a 401 or 403 (another token) or a page in front would
 # take students' entries away, so each refuses in its own words and nothing changes.
 service=${service:-${BEETHOVEN_SERVICE_URL:-https://beethoven-access.openspineconsortium.workers.dev}}
@@ -739,7 +755,7 @@ service=${service:-${BEETHOVEN_SERVICE_URL:-https://beethoven-access.openspineco
   || refuse "the access service's address must be https:// and a host name of plain characters, with nothing after it: '$service'; nothing changed"
 service=${service%/}
 svc_name="the access service (${service#https://})"
-tmpd="" svc_hdr="" svc_body=""
+tmpd="" svc_cfg="" svc_body=""
 trap '[ -z "$tmpd" ] || rm -rf "$tmpd"' EXIT
 # On WSL a Windows drive (drvfs, or 9p with aname=drvfs) mounted without the metadata option shows every
 # file as 0777 and ignores chmod, so a mode there says nothing about who can read the token; the Windows
@@ -773,14 +789,19 @@ tok_mode() { # FILE -> 0 when only its owner may read it; a linked token is judg
   case "$mode" in *00) return 0;; esac
   return 1
 }
-# the first line, CR and surrounding blanks dropped, is the token; awk prints it only into the header file
-TOK_LINE='NR == 1 { sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == "") exit 1; if (hdr) print "Authorization: Bearer " $0; ok = 1; exit } END { exit !ok }'
-tok_line() { awk -v hdr=0 "$TOK_LINE" "$1" >/dev/null 2>&1; }   # FILE -> 0 when its first line holds a token
+# the first line, CR and surrounding blanks dropped, is the token, and awk prints it only into curl's
+# configuration file, as one header line. Exit 1: no token (an empty file or line); 2: characters a bearer
+# token never has (RFC 6750's b64token), among them the quote and backslash that would end or change the
+# quoted value in that file
+TOK_LINE='NR == 1 { sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == "") exit; if ($0 !~ "^[-A-Za-z0-9._~+/]+=*$") { bad = 1; exit }
+  if (cfg) print "header = \"Authorization: Bearer " $0 "\""; ok = 1; exit } END { if (!ok) exit (bad ? 2 : 1) }'
+tok_line() { awk -v cfg=0 "$TOK_LINE" "$1" >/dev/null 2>&1; }   # FILE -> 0 when its first line holds a token; 1 none; 2 not a token's characters
+TOK_CHARS="letters, digits and - . _ ~ + / (and = at its end), as the admin page and the service make it"
 tok_name=""
-svc_token() { # the header file, made once from the token's first line, 0600 in a folder of this run's: grid_token
-  # when the vendor folder has one (it reads the two lists and nothing else), else admin_token
-  [ -z "$svc_hdr" ] || return 0
-  local tokf="$vendor/grid_token"
+svc_token() { # curl's configuration file, made once from the token's first line, 0600 in a folder of this
+  # run's: grid_token when the vendor folder has one (it reads the two lists and nothing else), else admin_token
+  local st tokf="$vendor/grid_token"
+  [ -z "$svc_cfg" ] || return 0
   { [ -e "$tokf" ] || [ -L "$tokf" ]; } || tokf="$vendor/admin_token"
   tok_name=${tokf##*/}
   [ -e "$tokf" ] || [ -L "$tokf" ] \
@@ -788,9 +809,12 @@ svc_token() { # the header file, made once from the token's first line, 0600 in 
   [ -r "$tokf" ] || refuse "cannot read $tokf; nothing changed"
   tok_mode "$tokf" || refuse "$tokf is readable by group or other (mode $tok_mode_was); make it yours alone first: chmod 600 $tokf; nothing changed"
   tmpd=$(mktemp -d "${TMPDIR:-/tmp}/grid_access.XXXXXX") || refuse "cannot make a temporary folder under ${TMPDIR:-/tmp}; nothing changed"
-  svc_hdr="$tmpd/header"
-  ( umask 077; awk -v hdr=1 "$TOK_LINE" "$tokf" > "$svc_hdr" ) \
-    || { svc_hdr=""; refuse "$tokf is empty: the access service's token is one line in it; nothing changed"; }
+  ( umask 077; awk -v cfg=1 "$TOK_LINE" "$tokf" > "$tmpd/curl.config" ); st=$?
+  case "$st" in
+    0) svc_cfg="$tmpd/curl.config";;
+    2) refuse "$tokf does not hold a token: its first line must be the token alone, $TOK_CHARS; nothing changed";;
+    *) refuse "$tokf is empty: the access service's token is one line in it; nothing changed";;
+  esac
 }
 svc_fetch() { # WHAT ROUTE: the answer's body into the file $svc_body, or a refusal; nothing but 200 plain text passes
   local what=$1 route=$2 meta n try status ctype err
@@ -800,7 +824,7 @@ svc_fetch() { # WHAT ROUTE: the answer's body into the file $svc_body, or a refu
   # most and a second apart, only when nothing answered: no such host (6), no connection (7), no answer in
   # time (28). An answer, whatever it says, is final
   for try in 1 2 3; do
-    meta=$(curl -sS --max-time 60 -H "@$svc_hdr" -o "$svc_body" -w '%{http_code} %{content_type}' "$service$route" 2>"$tmpd/err"); n=$?
+    meta=$(curl -q -sS --max-time 60 -K "$svc_cfg" -o "$svc_body" -w '%{http_code} %{content_type}' "$service$route" 2>"$tmpd/err"); n=$?
     case "$n" in 6|7|28) [ $try = 3 ] || { sleep 1; continue; };; esac
     break
   done
@@ -821,7 +845,9 @@ svc_fetch() { # WHAT ROUTE: the answer's body into the file $svc_body, or a refu
 # ---- the chain on the cluster: --watch, and each of its jobs (--tick) ---------------------------------
 # The chain's whole configuration rides on a job's command line, from --watch to the first job and from
 # each job to its successor, so a job reads neither the profile nor the framework, nor the environment
-CHAIN_FILES="grid_access.sh grid_access_watch.sbatch"
+# grid_ci.sbatch goes with them only for its #SBATCH --partition and --qos lines, the chain's own default
+# queue, so that a --watch typed from the chain's copy (the clone may be gone) finds the same queue
+CHAIN_FILES="grid_access.sh grid_access_watch.sbatch grid_ci.sbatch"
 tools_dir=$(cd "$(dirname "$0")" && pwd) || die "cannot find the folder of $0"
 sb_default() { # KEY FILE -> the value of that file's own #SBATCH --KEY= line
   sed -n "s/^#SBATCH --$1=\([A-Za-z0-9._,-]*\)\$/\1/p" "$2" 2>/dev/null | head -1
@@ -847,8 +873,8 @@ job_id() { # OUT: the job number in sbatch --parsable's answer ("12345" or "1234
   local l; l=$(printf '%s\n' "$1" | grep -E '^[0-9]+(;|$)' | head -1)
   [ -n "$l" ] && printf '%s' "${l%%;*}"
 }
-install_chain() { # DIR: the chain's own copy of its two scripts from DIR, each replaced by a rename (a job
-  # reading the old file keeps reading it), and only when both parse
+install_chain() { # DIR: the chain's own copy of its scripts from DIR, each replaced by a rename (a job
+  # reading the old file keeps reading it), and only when all of them parse
   local f
   for f in $CHAIN_FILES; do bash -n "$1/$f" 2>/dev/null || { say "$1/$f is missing or does not parse" >&2; return 1; }; done
   ( umask 077; mkdir -p "$watchdir/bin" ) || return 1
@@ -858,15 +884,28 @@ install_chain() { # DIR: the chain's own copy of its two scripts from DIR, each 
   done
 }
 
+own_closed() { # PATH [-L]: nothing when PATH is this account's own and group and other may not write it
+  # (with -L, a link is judged by the folder it names); else what is wrong, with the fix
+  local u m
+  if [ "${2:-}" != -L ] && [ -L "$1" ]; then say "$1 is a link, where the chain keeps a folder of its own (move it away)"; return 0; fi
+  u=$(stat -L -c %U -- "$1" 2>/dev/null) m=$(stat -L -c %a -- "$1" 2>/dev/null)
+  if [ "$u" != "$me_user" ]; then say "$1 belongs to ${u:-an account stat cannot name}, not to $me_user"; return 0; fi
+  case "${m: -2}" in *[2367]*) say "group or other may write in $1 (mode $m; fix: chmod go-w $1)";; esac
+}
+JOBS_RE='^([0-9]+ [A-Z_]+[[:space:]]*)*$'   # squeue -o '%i %T': one "<job> <state>" per line, or nothing
+
 watch_start() {
-  local q out id jobs proot owner t rmcmd tokf="$vendor/grid_token" adm="$vendor/admin_token"
+  local q out id jobs proot owner t p why rmcmd tokf="$vendor/grid_token" adm="$vendor/admin_token"
   { command -v sbatch && command -v squeue; } >/dev/null 2>&1 \
     || die "--watch runs on the cluster, in a shell on its login node: sbatch and squeue are not here; nothing started"
   { [ -e "$tokf" ] || [ -L "$tokf" ]; } \
     || die "no grid_token in the vendor folder ($vendor): make the grid token on the admin page and put it in that file, one line, readable by you alone (LAB_LEAD.md, section 9); nothing started"
   [ -r "$tokf" ] || die "cannot read $tokf; nothing started"
   tok_mode "$tokf" || die "$tokf is readable by group or other (mode $tok_mode_was); make it yours alone first: chmod 600 $tokf; nothing started"
-  tok_line "$tokf" || die "$tokf is empty: the grid token is one line in it; nothing started"
+  tok_line "$tokf"; case $? in
+    0) ;; 2) die "$tokf does not hold a token: its first line must be the grid token alone, $TOK_CHARS; nothing started";;
+    *) die "$tokf is empty: the grid token is one line in it; nothing started";;
+  esac
   # the admin token approves accounts: on a machine others log in to, it would be one mistake from theirs
   if [ -e "$adm" ] || [ -L "$adm" ]; then
     rmcmd="rm $(printf '%q' "$adm")"
@@ -882,12 +921,24 @@ watch_start() {
   owner=$(stat -c %U -- "$proot" 2>/dev/null)
   [ "$owner" = "$me_user" ] || die "$root ($proot) belongs to ${owner:-an account stat cannot name}, not to $me_user: only its owner keeps the list, so the chain runs under that account; nothing started"
   ( umask 077; mkdir -p "$watchdir" ) || die "cannot make $watchdir; nothing started"
-  q=$(SQ -h -u "$me_user" -n hpcw_access -o '%i %T' 2>&1) || die "squeue did not answer ($q); nothing started"
+  # every job runs bin/grid_access.sh from there with the token beside it: in a folder another account may
+  # write, that account could rename the chain's away and put its own in its place
+  for p in "$vendor" "$watchdir" "$watchdir/bin"; do
+    [ "$p" != "$watchdir/bin" ] || [ -e "$p" ] || [ -L "$p" ] || continue
+    if [ "$p" = "$vendor" ]; then why=$(own_closed "$p" -L); else why=$(own_closed "$p"); fi
+    [ -z "$why" ] || die "$why: another account could put its own script where the chain's jobs run it, beside the token; nothing started"
+  done
+  q=$(SQ -h -u "$me_user" -n hpcw_access -o '%i %T') || die "squeue did not answer (its own words, if any, are above); nothing started"
+  [[ "$q" =~ $JOBS_RE ]] || die "squeue answered something else than the chain's jobs: $q; nothing started"
   if [ -n "$q" ]; then
     jobs=$(printf '%s\n' "$q" | awk 'NF { print $1 }' | tr '\n' ' ' | sed 's/ *$//')
     install_chain "$tools_dir" || die "the chain (job $jobs) keeps the scripts it had"
-    [ ! -e "$watchdir/STOP" ] \
-      || die "job $jobs of the chain is still queued or running, but STOP is set, so the chain ends with it (its scripts now come from this copy); run tools/grid_access.sh --watch again once it has ended"
+    if [ -e "$watchdir/STOP" ]; then
+      # a job queued while STOP is set only ends the chain; one running may still queue such a job
+      printf '%s\n' "$q" | awk 'NF && $2 != "PENDING" { f = 1 } END { exit !f }' \
+        || die "job $jobs of the chain is queued, but STOP is set, so it only ends the chain when it runs (its scripts now come from this copy); tools/grid_access.sh --unwatch cancels it now, then --watch starts the chain again"
+      die "job $jobs of the chain is running, but STOP is set, so the chain ends with it (its scripts now come from this copy); once it has ended, tools/grid_access.sh --unwatch (for a job it may have queued) and then --watch start the chain again"
+    fi
     say "already watching (job $jobs); its scripts now come from this copy"
     say "its settings are the ones it was started with; tools/grid_access.sh --unwatch, then --watch again, changes them"
     return 0
@@ -908,7 +959,7 @@ successor() { # this job's one successor, queued once even when this job is run 
   fi
   if [ "$(cat "$watchdir/next.submitting" 2>/dev/null)" = "$SLURM_JOB_ID" ]; then
     # an earlier run of this same job stopped while it submitted: one squeue says whether that got through
-    id=$(SQ -h -u "$me_user" -n hpcw_access -t PENDING -o '%i' 2>/dev/null | grep -vx "$SLURM_JOB_ID" | head -1)
+    id=$(SQ -h -u "$me_user" -n hpcw_access -t PENDING -o '%i' 2>/dev/null | grep -E '^[0-9]+$' | grep -vx "$SLURM_JOB_ID" | head -1)
     if [ -n "$id" ]; then
       printf '%s %s\n' "$SLURM_JOB_ID" "$id" > "$watchdir/next" && rm -f "$watchdir/next.submitting"
       say "next tick: job $id, queued by an earlier run of this job"; return 0
@@ -924,21 +975,29 @@ successor() { # this job's one successor, queued once even when this job is run 
 }
 
 tick() { # one job of the chain: STOP, its successor, then the lists applied once by a child of this script
-  local node t0 rc secs chained=1 child adm="$vendor/admin_token"
+  local node t0 t rc secs chained=1 first=0 child adm="$vendor/admin_token"
   node=$(hostname -s 2>/dev/null || hostname)
   say "== tick $SLURM_JOB_ID on $node at $(date -u +%FT%TZ)"
   if [ -e "$watchdir/STOP" ]; then say "STOP is set ($watchdir/STOP): the chain ends here; tools/grid_access.sh --watch starts it again"; return 0; fi
   # one log for every job (--open-mode=append), one older one kept
   if [ -f "$watchdir/access.log" ] && [ "$(wc -c < "$watchdir/access.log")" -gt 1048576 ]; then mv -f "$watchdir/access.log" "$watchdir/access.log.1"; fi
+  # --watch cleared both before it queued the first job: that one says which curl the compute nodes have,
+  # which is not yet measured (docs/OPEN_QUESTIONS.md)
+  [ -e "$watchdir/next" ] || [ -e "$watchdir/next.submitting" ] || first=1
   successor || chained=0
+  if [ $first = 1 ]; then t=$(curl --version 2>/dev/null | sed -n 1p); say "curl on $node: ${t:-none found}"; fi
   if [ -e "$adm" ] || [ -L "$adm" ]; then
     say "note: $adm is here too; the admin token can approve accounts and must not sit on a shared machine: rm $(printf '%q' "$adm")"
   fi
   child=(--here --quiet --site "$site" --root "$root")
   [ $svc_flag = 0 ] || child+=(--service "$service")
   t0=$(date +%s)
-  # the child would fall back to admin_token without grid_token; the chain never reads that one
-  if [ -e "$vendor/grid_token" ] || [ -L "$vendor/grid_token" ]; then
+  # the job file found no folder of this job's own on the node's disk, where the token's configuration file
+  # must go, and says why: the successor is queued all the same, so that one bad node never ends the chain.
+  # The child would fall back to admin_token without grid_token; the chain never reads that one
+  if [ -n "${HPCW_ACCESS_NO_TMP:-}" ]; then
+    say "$HPCW_ACCESS_NO_TMP; this job applies nothing, and the next one tries again"; rc=1
+  elif [ -e "$vendor/grid_token" ] || [ -L "$vendor/grid_token" ]; then
     bash "$self" "${child[@]}" < /dev/null 2>&1; rc=$?
   else
     say "no grid_token in the vendor folder ($vendor): the chain reads the lists with the grid token alone, so this job applies nothing (LAB_LEAD.md, section 9)"; rc=1

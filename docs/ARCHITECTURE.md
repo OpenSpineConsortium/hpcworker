@@ -288,7 +288,7 @@ there), which `tools/grid_access.sh` keeps equal to the accounts the access serv
 extension grant (the service's `GET /admin/roster.txt`, which the tool reads itself with a token from
 the vendor folder: `grid_token`, made on the service's admin page, which reads the two lists and
 nothing else, else `admin_token`, the maintainer's, which can also approve accounts and is kept on a
-PC only; carried in a header file curl reads and never on a command line; the service is in `OpenSpineConsortium/beethoven-access`, and its published contract,
+PC only; carried in a configuration file curl reads (`-q -K`) and never on a command line; the service is in `OpenSpineConsortium/beethoven-access`, and its published contract,
 `interface/contract/`, is what the tool codes to: not the store reviewers' mock account, and not an
 approval for the lab only, which by design never opens the grid's folders; only an answer of 200
 plain text counts, and a 401, 403, 404, a page in front or no answer refuses with nothing changed),

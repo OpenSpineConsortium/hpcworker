@@ -163,9 +163,12 @@ Release pipeline and keys:
   admin page), which reads the service's two lists and nothing else, and `tools/grid_access.sh
   --watch` refuses to start while an `admin_token` sits beside it. Neither is ever on a command line:
   `tools/grid_access.sh`, which reads the two lists with whichever the folder holds (`grid_token`
-  first), hands curl a header file of the run's own (`-H @FILE`, 0600, removed when the run ends; in
-  the chain's jobs on the compute node's own disk) and refuses a token file that group or other can
-  read. The chain's jobs are submitted with `GITHUB_TOKEN` and `GH_TOKEN` removed from their
+  first), hands curl a configuration file of the run's own (`curl -q -K FILE`, one header line,
+  0600, removed when the run ends; in the chain's jobs in a folder of the job's own on the compute
+  node's disk, never through a link another account put there), refuses a token file that group or
+  other can read or whose first line is not a token's characters alone, and refuses to start or run
+  the chain while another account owns, or may write, the vendor folder, the chain's folder or the
+  scripts its jobs run. The chain's jobs are submitted with `GITHUB_TOKEN` and `GH_TOKEN` removed from their
   environment, and nothing they log holds the token.
 
 ## Incident record
