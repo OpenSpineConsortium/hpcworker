@@ -72,9 +72,9 @@ Have these in hand, and check each once:
    `curl -s -X POST -H 'content-type: text/plain;charset=UTF-8' --data '{"v":1,"access_id":"st1234","portal":"localhost","product":"bridge","version":"12.0.0","install_id":"00000000000000000000000000000001"}' https://beethoven-access.openspineconsortium.workers.dev/access_check`
    and the same with `...0002`. Both must answer `{"approved":true,"access_id":"st1234",...}` with
    `access-control-allow-origin: *`. If the second answers `"reason":"other_installation"`, the
-   exemption is missing: `node tools/intake/admin.mjs seat-rule st1234 any` in the repository of
-   Beethoven for VS Code (Desktop folder `ashley`; token from the vendor folder, never on the
-   command line). Never run this check with a real student's AccessID: the first identifier that
+   exemption is missing: `node admin.mjs seat-rule st1234 any` in the access service's repository,
+   `OpenSpineConsortium/beethoven-access` (token from the vendor folder, never on the command
+   line). Never run this check with a real student's AccessID: the first identifier that
    asks binds that account. The access service of 2026-10-01 (st1234 only at `localhost`, a public
    `GET /allowlist` that names nobody) must be deployed under both names first, in the order the
    10.0.0 text of this file gave (git history of this file, section 0, item 5). 12.0.0 changes
@@ -182,8 +182,8 @@ once students have keys: every key would then meet a copy with no gate.
   follow `docs/guides/INSTALL.md` (send it, or the support page).
 - **"... asked from a second installation; it was refused."** As before: *Move the approval to the
   new installation* when the student changed computers, Chrome profiles or reinstalled; withdraw and
-  ask if they do not know of one. `node tools/intake/admin.mjs seat <AccessID>` shows the binding;
-  `reset-seat <AccessID>` clears it. A student who moves computers also signs in directly once on the
+  ask if they do not know of one. `node admin.mjs seat <AccessID>` (in
+  `OpenSpineConsortium/beethoven-access`) shows the binding; `reset-seat <AccessID>` clears it. A student who moves computers also signs in directly once on the
   new one, which replaces the old computer's key line on the grid.
 - **"This installation of Beethoven is already set up for another account."** One installation serves
   one account; two approved students who share a computer each need a Chrome profile of their own.

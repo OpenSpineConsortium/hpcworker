@@ -300,10 +300,12 @@ not yet shown is in `docs/OPEN_QUESTIONS.md`.
 `python -X utf8 tools/build_site.py` in `../openspineconsortium.github.io` after changing
 `LICENSE.txt`, `PRIVACY.md` or a release, then publish the site (`docs/PUBLISHING_SITE.md`).
 
-**Access service.** The approval check the extension makes is served by the Cloudflare Worker in the
-repository of Beethoven for VS Code (`OpenSpineConsortium/beethoven-vscode`, the Desktop folder
-`ashley`; `tools/intake/worker.js`, contract in `tools/intake/ACCESS_CHECK.md`); it is deployed from
-there, not from here, under two names with the same code, stores and secrets:
+**Access service.** The approval check the extension makes is served by the Cloudflare Worker in
+its own repository, `OpenSpineConsortium/beethoven-access` (since 2026-10-07; until then it lived in
+the repository of Beethoven for VS Code under `tools/intake/`): `worker.js`, the contract
+`ACCESS_CHECK.md` and its published form `interface/contract/`, and `admin.mjs`, the maintainer's
+command for the approved list. It is deployed from there, not from here, under two names with the
+same code, stores and secrets:
 `beethoven-access.openspineconsortium.workers.dev` for 7.0.0 and later, and the old
 `ashley-service.openspineconsortium.workers.dev` for Ashley for VS Code 3.0.0 (the VS Code edition
 before its rename; Beethoven for VS Code 4.0.0 uses the new name) and builds 4.0.0 to 6.0.0. It

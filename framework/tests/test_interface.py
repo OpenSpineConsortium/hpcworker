@@ -74,7 +74,10 @@ class Manifest(unittest.TestCase):
                 with self.subTest(export=e["id"], path=p):
                     self.assertTrue([f for f in everything if covered(f, [p])], "%s names no file" % p)
         paths = [p for e in m["exports"] for p in e["paths"]]
-        loose = [f for f in files_under(IFACE) if f not in ("interface/INTERFACE.json", "interface/README.md") and not covered(f, paths)]
+        # a pinned copy under interface/ is its import's (test_boundary.py checks it against its ORIGIN), not an export's
+        imported = [i["into"].rstrip("/") + "/" for i in m["imports"]]
+        loose = [f for f in files_under(IFACE) if f not in ("interface/INTERFACE.json", "interface/README.md")
+                 and not covered(f, paths) and not covered(f, imported)]
         self.assertEqual(loose, [], "files under interface/ that no export lists")
 
 

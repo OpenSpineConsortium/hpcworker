@@ -64,9 +64,10 @@ site profile sets the flag.
 ## From request to installation
 
 Five stages, each stamped with its time on the student's record in the access service (the Worker in
-the repository of Beethoven for VS Code, `tools/intake/`; `ACCESS_CHECK.md` there is the contract).
-The admin page (`https://openspineconsortium.com/beethoven/admin.html`, behind the admin token) and
-`admin.mjs list` show each account's stage.
+its own repository, `OpenSpineConsortium/beethoven-access`; `ACCESS_CHECK.md` and
+`interface/contract/` there are the contract). The admin page
+(`https://openspineconsortium.com/beethoven/admin.html`, behind the admin token) and `node admin.mjs
+list` in that repository show each account's stage.
 
 | Stage | What happens | Who acts | Recorded |
 |---|---|---|---|

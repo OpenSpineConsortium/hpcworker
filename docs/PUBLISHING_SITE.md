@@ -17,7 +17,7 @@ Rewritten 2026-09-29 for 7.0.0, when the public name became Beethoven (the repos
 | license terms | `https://openspineconsortium.com/beethoven/terms.html` | `LICENSE.txt`, rendered |
 | support and notice address | `https://openspineconsortium.com/beethoven/support.html` | generated (the site repository's `tools/build_site.py`) |
 | request page (the panel's *Ask for access* button opens it with `?access_id=<account>`) | `https://openspineconsortium.com/beethoven/request.html` | generated (the site repository's `tools/build_site.py`); it posts to the `request` address in the services file beside it, with `"product":"bridge"` |
-| services file (the extension reads `access_check` and `request_page` from it once a day) | `https://openspineconsortium.com/beethoven/services.json` | written in the site by the VS Code edition's `tools/intake/deploy.sh` when a service address changes; `docs/site/beethoven/services.json` here is the reference copy of what is published; every route on `https://beethoven-access.openspineconsortium.workers.dev` |
+| services file (the extension reads `access_check` and `request_page` from it once a day) | `https://openspineconsortium.com/beethoven/services.json` | written in the site by the access service's `deploy.sh` (`OpenSpineConsortium/beethoven-access`) when a service address changes; `docs/site/beethoven/services.json` here is the reference copy of what is published; every route on `https://beethoven-access.openspineconsortium.workers.dev` |
 | kill-list (`KILLLIST_URL` in `extension/src/licensing/killlist.ts`); withdraws versions only | `https://openspineconsortium.com/beethoven/killlist.json` | signed by the license tool, see below; never written by the page build |
 | the old landing address | `https://openspineconsortium.com/ashley/bridge/` | a two-line page that sends the reader to the new landing page (kept as is) |
 
@@ -25,8 +25,8 @@ The access service answers under two names: `beethoven-access.openspineconsortiu
 7.0.0 and later, and the old `ashley-service.openspineconsortium.workers.dev` for Ashley for VS Code
 3.0.0 (the VS Code edition before it became Beethoven for VS Code 4.0.0, which uses the new name)
 and for builds 4.0.0 to 6.0.0. They are the same Worker code with the same stores and secrets (the
-VS Code edition's repository, `tools/intake/README.md` and `ACCESS_CHECK.md`), so one approval list
-serves every build.
+service's repository, `OpenSpineConsortium/beethoven-access`: `README.md` and `ACCESS_CHECK.md`), so
+one approval list serves every build.
 
 ### What stays at the old addresses, and why
 
@@ -61,8 +61,9 @@ are in git history.
 What this repository still owns on the site:
 - the two texts (`LICENSE.txt`, `PRIVACY.md`): change them here, bump their `Version N` lines and
   `TERMS_VERSION`, then run the site generator and publish the site;
-- `docs/site/beethoven/services.json`, the reference copy of `/beethoven/services.json` (the VS Code
-  edition's `tools/intake/deploy.sh` writes the published file when a service address changes, and
+- `docs/site/beethoven/services.json`, the reference copy of `/beethoven/services.json` (the access
+  service's `deploy.sh`, in `OpenSpineConsortium/beethoven-access`, writes the published file when a
+  service address changes, and
   the generator checks it but never writes it; copy the published file here when it changes, as on
   2026-09-30 when it gained `report`);
 - the signed kill-list (below);
@@ -157,8 +158,9 @@ enough; the kill-list tool does not write the ledger).
 
 Not with the kill-list. Remove the account from the approved list in the admin console (the
 maintainer's page in the site repository, `beethoven/admin.html`; the old `ashley/admin.html`
-forwards there) or, in the sibling repository under WSL Node, `node tools/intake/admin.mjs remove
-<accessId>` (the admin token is read from the vendor folder, never given on the command line). Both
+forwards there) or, in the access service's repository (`OpenSpineConsortium/beethoven-access`) under
+WSL Node, `node admin.mjs remove <accessId>` (the admin token is read from the vendor folder, never
+given on the command line). Both
 service names read the same list, so the next approval check for that account answers no under
 either: on the person's next icon click, or within 24 hours otherwise; a cached yes lasts up to 7
 days only when the service cannot be reached at all. The extension then starts no worker and its one

@@ -32,7 +32,6 @@ tools/deploy_shared.sh	# never with python3, which warrior's login banner bans.
 tools/deploy_shared.sh	# shared_install; at Wayne State /rs/rs_grp_oschome/shared/beethoven/hpcworker, which was .../shared/ashley
 tools/deploy_shared.sh	# the group: given, or (empty) the group of the directory above ROOT on the cluster, oschome at Wayne State
 tools/deploy_shared.sh	site=wayne host=wsu-grid root="" group="" dry=0 replace=0 local_run=0
-tools/grid_access.sh	#   tools/grid_access.sh [--site wayne] [--host wsu-grid] [--root DIR] [--roster-file FILE]
 tools/grid_access.sh	# The list IS the set of named-user ACL entries `user:<id>:rwx` on the volume root (/rs/rs_grp_oschome
 tools/grid_access.sh	# stay closed by their own modes. The Unix group (oschome) is C&IT's to change and is not the list.
 tools/grid_access.sh	site=wayne host=wsu-grid root="" roster_file="" dry=0 force=0 quiet=0 open=0 check=0 local_run=0

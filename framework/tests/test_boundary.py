@@ -16,8 +16,8 @@ SELF = "hpcworker"
 # every repository of the ecosystem and the names their checkouts had (the Desktop folders ashley and
 # ashley-bridge), and the website's
 OTHERS = ("beethoven", "beethoven-extension", "beethoven-desktop", "beethoven-qa", "beethoven-agents", "beethoven-research",
-          "beethoven-sites", "beethoven-base", "beethoven-vscode", "ashley", "ashley-bridge", "openspineconsortium.github.io",
-          "spinesurg-ct-nnunet", "u251-xenograft-rat-rnaseq-study")
+          "beethoven-sites", "beethoven-base", "beethoven-vscode", "beethoven-access", "ashley", "ashley-bridge",
+          "openspineconsortium.github.io", "spinesurg-ct-nnunet", "u251-xenograft-rat-rnaseq-study")
 _names = "|".join(re.escape(n) for n in sorted(OTHERS, key=len, reverse=True))
 # a path made from this checkout's parent: "../<repo>", or "$(dirname ...)/<repo>" and the like
 SIBLING_PATH = re.compile(r"(?:\.\./|\)/|\}/)(%s)(?![A-Za-z0-9_.-])" % _names)
@@ -92,6 +92,9 @@ class PinnedImports(unittest.TestCase):
         for imp in imports:
             with self.subTest(into=imp["into"]):
                 folder = os.path.join(REPO, imp["into"])
+                if not os.path.exists(os.path.join(REPO, imp["origin"])):
+                    # a copy not pulled yet (its pull.sh needs gh signed in): said here, never passed over
+                    self.skipTest("%s is not there yet: bash %s/pull.sh" % (imp["origin"], imp["into"]))
                 with open(os.path.join(REPO, imp["origin"]), encoding="utf-8") as fh:
                     lines = [l for l in fh.read().split("\n") if l]
                 self.assertEqual(lines[0], "repository " + imp["repository"])

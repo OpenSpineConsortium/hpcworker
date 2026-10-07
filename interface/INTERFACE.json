@@ -61,6 +61,13 @@
    "version": 1,
    "into": "framework/sites",
    "origin": "framework/sites/ORIGIN"
+  },
+  {
+   "repository": "OpenSpineConsortium/beethoven-access",
+   "export": "http-api",
+   "version": 1,
+   "into": "interface/access",
+   "origin": "interface/access/ORIGIN"
   }
  ]
 }

@@ -158,7 +158,10 @@ Release pipeline and keys:
   reproducible-build instructions published for all stores.
 - No long-lived store API key in CI. The publisher accounts and the kill-list signing key sit behind a
   hardware security key with no third-party OAuth grants; private keys never enter the repository.
-  The access service's admin token lives in the vendor folder and is never on a command line.
+  The access service's admin token lives in the vendor folder (`admin_token`, mode 0600) and is never
+  on a command line: `tools/grid_access.sh`, which reads the service's two lists with it, hands curl a
+  header file of the run's own (`-H @FILE`, 0600, removed when the run ends) and refuses a token file
+  that group or other can read.
 
 ## Incident record
 

@@ -18,33 +18,43 @@
 # everything inside them, stay theirs (counted, never changed). A "." is that reader's only folder in the
 # access service's list; another folder beside it is covered by it and has no sweep of its own.
 #
-#   tools/grid_access.sh [--site wayne] [--host wsu-grid] [--root DIR] [--roster-file FILE]
-#                        [--readers-file FILE]
+#   tools/grid_access.sh [--site ID] [--host HOST] [--root DIR] [--service URL]
+#                        [--roster-file FILE] [--readers-file FILE]
 #                        [--dry-run] [--force] [--quiet] [--open-tree] [--check-tree]
 #   tools/grid_access.sh --here --roster-file FILE --readers-file FILE [the same options]   on the cluster
 #
-# Both lists come from outside this repository, through two plain-text contracts and nothing else: this
-# tool runs no other repository's code of its own accord and assumes no checkout beside it. The person
-# names each source, a file or a command (the scheduled task names the access service's admin.mjs:
-# grid_access_task.ps1 -AdminTool), and with neither the run refuses.
+# Both lists come from the access service, through its two plain-text answers and nothing else: GET
+# /admin/roster.txt and GET /admin/readers.txt at --service URL (else $BEETHOVEN_SERVICE_URL, else the
+# service's own name, https://beethoven-access.openspineconsortium.workers.dev; https and a host name of
+# plain characters, nothing after it), with the maintainer's admin token, the one line of the vendor
+# folder's admin_token. That file must be the owner's alone (mode 0600; a run that finds it readable by
+# group or other refuses and says to chmod it). The token leaves it only for a header file of this run's
+# own, mode 0600 in a temporary folder the run removes, which curl reads (-H @FILE): never an argument,
+# never a line of the log, never a word of a message. Only an answer of 200 and text/plain is a list;
+# anything else refuses with nothing changed and says what it was: the token not accepted (401, 403:
+# check admin_token), the service not yet deployed with the lists (404), another answer, a page or
+# another service in front (not text), or no answer at all (the message names the host). This tool runs
+# no other repository's code and assumes no checkout beside it; a person's own list stands in for the
+# service's: --roster-file FILE, else the command in $BEETHOVEN_ROSTER_CMD (run with bash -c, stdin
+# closed), for the approved list, and --readers-file FILE, else $BEETHOVEN_READERS_CMD (`true` for no
+# reader), for the readers. Each list is taken from the first of its three sources that is given.
 #
-# The approved AccessIDs: --roster-file FILE, else the command in $BEETHOVEN_ROSTER_CMD (run with bash
-# -c, stdin closed), one AccessID per line (blank lines and lines starting with # are skipped). The
-# access service's `admin.mjs roster` prints the accounts approved with the extension grant, and only
-# those: not the store reviewers' mock account, and not an account approved for the lab only
-# (approve-lab, grant lab), which therefore never reaches the grid's folders. Each must look like
-# ab1234 (^[a-z]{2}[0-9]{4}$) or the run refuses, naming the line, and nothing changes. An empty list is
-# refused unless --force: it would shut every student out. A command that fails refuses.
+# The approved AccessIDs: one AccessID per line (blank lines and lines starting with # are skipped). The
+# service prints the accounts approved with the extension grant, and only those: not the store
+# reviewers' mock account, and not an account approved for the lab only, which therefore never reaches
+# the grid's folders. Each must look like ab1234 (^[a-z]{2}[0-9]{4}$) or the run refuses, naming the
+# line, and nothing changes. An empty list is refused unless --force: it would shut every student out.
+# A command that fails refuses.
 #
-# The readers: --readers-file FILE, else the command in $BEETHOVEN_READERS_CMD (`admin.mjs readers`):
-# one "<id> <folder>" per line (blank and # lines skipped), the folder relative to the root, plain
-# characters (letters, digits, . _ -) with no part starting with a dot or a dash, so no "..", no
-# absolute path and nothing hidden; or exactly "." for the root itself (never "./x", "x/." or "/"). A
-# bad line refuses, naming it. An empty reader list is fine (a command that prints nothing, such as
-# `true`, says there is no reader); a source that fails refuses (applying the list without the readers
-# would take their traverse away).
+# The readers: one "<id> <folder>" per line (blank and # lines skipped), the folder relative to the
+# root, plain characters (letters, digits, . _ -) with no part starting with a dot or a dash, so no "..",
+# no absolute path and nothing hidden; or exactly "." for the root itself (never "./x", "x/." or "/"). A
+# bad line refuses, naming it. An empty reader list is fine (an empty answer, or a command that prints
+# nothing, such as `true`, says there is no reader); a source that fails refuses (applying the list
+# without the readers would take their traverse away).
 #
-# What it keeps, on the machine that runs it, under $BEETHOVEN_VENDOR_DIR (default ~/.beethoven-vendor):
+# What it keeps, on the machine that runs it, under $BEETHOVEN_VENDOR_DIR (else $ASHLEY_VENDOR_DIR, else
+# ~/.beethoven-vendor; the same folder admin_token is read from):
 #   state/grid_access.<site>.ids  the list last applied and where; written only after the grid side
 #                                 applied it. An approved id the grid does not know yet (no account) is
 #                                 skipped there and recorded on a line "# unknown <id> <date>" instead
@@ -579,11 +589,12 @@ if [ "${1:-}" = --apply ]; then shift; apply "$@" < /dev/null; exit $?; fi
 HERE=$(cd "$(dirname "$0")/.." && pwd) || die "cannot find the repository"
 FW="$HERE/framework"
 site=wayne host=wsu-grid root="" roster_file="" dry=0 force=0 quiet=0 open=0 check=0 local_run=0
-readers_file=""
+readers_file="" service=""
 while [ $# -gt 0 ]; do case "$1" in
   --site) site="${2:-}"; shift 2 || die "--site needs a value";;
   --host) host="${2:-}"; shift 2 || die "--host needs a value";;
   --root) root="${2:-}"; shift 2 || die "--root needs a value";;
+  --service) service="${2:-}"; shift 2 || die "--service needs a value";;
   --roster-file) roster_file="${2:-}"; shift 2 || die "--roster-file needs a value";;
   --readers-file) readers_file="${2:-}"; shift 2 || die "--readers-file needs a value";;
   --dry-run) dry=1; shift;; --force) force=1; shift;; --quiet) quiet=1; shift;;
@@ -593,7 +604,7 @@ while [ $# -gt 0 ]; do case "$1" in
 [[ "$site" =~ ^[a-z0-9_-]+$ ]] || die "bad site name '$site'"
 [[ "$host" =~ ^[A-Za-z0-9._@-]+$ ]] || die "bad host name '$host'"
 
-vendor=${BEETHOVEN_VENDOR_DIR:-$HOME/.beethoven-vendor}
+vendor=${BEETHOVEN_VENDOR_DIR:-${ASHLEY_VENDOR_DIR:-$HOME/.beethoven-vendor}}
 statedir="$vendor/state"
 mkdir -p "$statedir" || die "cannot make $statedir"
 statef="$statedir/grid_access.$site.ids"
@@ -630,6 +641,57 @@ if [ $from_profile = 1 ]; then
   done
 fi
 
+# the access service, the source of both lists unless a file or a command stands in for it (LAB_LEAD.md,
+# section 9). The token stays in the vendor folder's admin_token and in a header file of this run's own
+# that curl reads, so that no argument, log line or message ever carries it (a process's arguments are
+# visible to every account on the machine). An answer that is not 200 plain text is never a list: a list
+# taken from a 404 (the service not deployed yet), a 401 or 403 (another token) or a page in front would
+# take students' entries away, so each refuses in its own words and nothing changes.
+service=${service:-${BEETHOVEN_SERVICE_URL:-https://beethoven-access.openspineconsortium.workers.dev}}
+[[ "$service" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]] \
+  || refuse "the access service's address must be https:// and a host name of plain characters, with nothing after it: '$service'; nothing changed"
+service=${service%/}
+svc_name="the access service (${service#https://})"
+tmpd="" svc_hdr="" svc_body=""
+trap '[ -z "$tmpd" ] || rm -rf "$tmpd"' EXIT
+svc_token() { # the header file, made once from admin_token's first line (CR and blanks dropped), 0600 in a folder of this run's
+  [ -z "$svc_hdr" ] || return 0
+  local tokf="$vendor/admin_token" mode
+  [ -e "$tokf" ] || refuse "no admin_token in the vendor folder ($vendor): the access service's token is the maintainer's, one line in that file; nothing changed"
+  [ -r "$tokf" ] || refuse "cannot read $tokf; nothing changed"
+  mode=$(stat -c %a -- "$tokf" 2>/dev/null)
+  case "$mode" in *00) ;; *) refuse "$tokf is readable by group or other (mode ${mode:-unknown}); make it yours alone first: chmod 600 $tokf; nothing changed";; esac
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/grid_access.XXXXXX") || refuse "cannot make a temporary folder under ${TMPDIR:-/tmp}; nothing changed"
+  svc_hdr="$tmpd/header"
+  ( umask 077; awk 'NR == 1 { sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == "") exit 1; print "Authorization: Bearer " $0; ok = 1; exit } END { exit !ok }' "$tokf" > "$svc_hdr" ) \
+    || { svc_hdr=""; refuse "$tokf is empty: the access service's token is one line in it; nothing changed"; }
+}
+svc_fetch() { # WHAT ROUTE: the answer's body into the file $svc_body, or a refusal; nothing but 200 plain text passes
+  local what=$1 route=$2 meta n try status ctype err
+  svc_token
+  svc_body="$tmpd/${route##*/}"
+  # curl's own --retry would try again on a 408, 429 or 5xx answer too; this loop tries again, twice at
+  # most and a second apart, only when nothing answered: no such host (6), no connection (7), no answer in
+  # time (28). An answer, whatever it says, is final
+  for try in 1 2 3; do
+    meta=$(curl -sS --max-time 60 -H "@$svc_hdr" -o "$svc_body" -w '%{http_code} %{content_type}' "$service$route" 2>"$tmpd/err"); n=$?
+    case "$n" in 6|7|28) [ $try = 3 ] || { sleep 1; continue; };; esac
+    break
+  done
+  if [ $n != 0 ]; then
+    err=$(tr -d '\r' < "$tmpd/err" | grep . | tail -1)   # curl's own words: the host and the port, never the header
+    refuse "$svc_name could not be reached for $what (${err:-curl ended with exit $n}); nothing changed"
+  fi
+  status=${meta%% *} ctype=${meta#* }
+  case "$status" in
+    200) case "$ctype" in text/plain*) return 0;; esac
+         refuse "$svc_name answered $what as ${ctype:-no content type}, not as text: a sign-in page or another service stands in front of it; nothing changed";;
+    401|403) refuse "$svc_name did not accept the token for $what (HTTP $status): check admin_token in the vendor folder ($vendor); nothing changed";;
+    404) refuse "$svc_name does not give $what yet (HTTP 404): deploy the service; nothing changed";;
+    *) refuse "$svc_name answered HTTP $status for $what; nothing changed";;
+  esac
+}
+
 # the approved list
 if [ -n "$roster_file" ]; then
   src="the file $roster_file"
@@ -640,7 +702,9 @@ elif [ -n "${BEETHOVEN_ROSTER_CMD:-}" ]; then
   raw=$(bash -c "$BEETHOVEN_ROSTER_CMD" < /dev/null); rc=$?
   [ $rc = 0 ] || refuse "the roster command (\$BEETHOVEN_ROSTER_CMD) ended with exit $rc; nothing changed"
 else
-  refuse "no approved list named: give --roster-file FILE, or set \$BEETHOVEN_ROSTER_CMD to a command that prints one AccessID a line (the access service's admin.mjs roster); nothing changed"
+  src=$svc_name
+  svc_fetch "the approved list" /admin/roster.txt
+  raw=$(cat -- "$svc_body") || refuse "cannot read the approved list saved from $svc_name; nothing changed"
 fi
 # one id per line; CR, surrounding blanks, blank lines and # lines dropped; the first bad line refuses
 numbered=$(printf '%s\n' "$raw" | awk '{ sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == "" || substr($0, 1, 1) == "#") next; print NR ":" $0 }')
@@ -670,7 +734,9 @@ elif [ -n "${BEETHOVEN_READERS_CMD:-}" ]; then
   rraw=$(bash -c "$BEETHOVEN_READERS_CMD" < /dev/null); rc=$?
   [ $rc = 0 ] || refuse "the readers command (\$BEETHOVEN_READERS_CMD) ended with exit $rc; nothing changed"
 else
-  refuse "no reader list named: give --readers-file FILE, or set \$BEETHOVEN_READERS_CMD to a command that prints one \"<AccessID> <folder>\" a line (the access service's admin.mjs readers; \`true\` for no reader); nothing changed"
+  rsrc=$svc_name
+  svc_fetch "the reader list" /admin/readers.txt
+  rraw=$(cat -- "$svc_body") || refuse "cannot read the reader list saved from $svc_name; nothing changed"
 fi
 numbered=$(printf '%s\n' "$rraw" | awk '{ sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); gsub(/[ \t]+/, " "); if ($0 == "" || substr($0, 1, 1) == "#") next; print NR ":" $0 }')
 pairs=""

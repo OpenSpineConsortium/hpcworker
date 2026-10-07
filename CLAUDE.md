@@ -115,11 +115,16 @@ name and identifier carry no university name.
   from the strictest published rules in the sample and the licence of the VS Code edition (then
   Ashley's), and C&IT never stated them.
 - **The grid's approved list is the named-user ACL on the volume root, kept by
-  `tools/grid_access.sh` equal to `admin.mjs roster` (extension grant only; lab-only approvals and the
-  reviewers' mock are not on it, by design); `deploy_shared` never closes the tree to other below the
-  gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed to other; a
-  reader the service approved for a folder (`admin.mjs readers`) gets the group's read there by named
-  entries, never w, never a default entry, and no more.** The scheduled
+  `tools/grid_access.sh` equal to the access service's `GET /admin/roster.txt` (extension grant only;
+  lab-only approvals and the reviewers' mock are not on it, by design), which the tool fetches itself
+  with the vendor folder's `admin_token` (0600; the token travels in a header file curl reads, never
+  in argv, a log or a message; only 200 plain text counts); `deploy_shared` never closes the tree to
+  other below the gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed
+  to other; a reader the service approved for a folder (`GET /admin/readers.txt`) gets the group's
+  read there by named entries, never w, never a default entry, and no more.** The service's
+  `admin.mjs` lives in its own repository, `OpenSpineConsortium/beethoven-access`, and nothing here
+  names a checkout of it; its published contract is pinned under `interface/access/` by
+  `interface/access/pull.sh`. The scheduled
   run makes only cheap checks (the full sweep is `--check-tree`) and reports any root entry in another
   student's place.
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
