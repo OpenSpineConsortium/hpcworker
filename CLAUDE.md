@@ -115,11 +115,16 @@ name and identifier carry no university name.
   from the strictest published rules in the sample and the licence of the VS Code edition (then
   Ashley's), and C&IT never stated them.
 - **The grid's approved list is the named-user ACL on the volume root, kept by
-  `tools/grid_access.sh` equal to `admin.mjs roster` (extension grant only; lab-only approvals and the
-  reviewers' mock are not on it, by design); `deploy_shared` never closes the tree to other below the
-  gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed to other; a
-  reader the service approved for a folder (`admin.mjs readers`) gets the group's read there by named
-  entries, never w, never a default entry, and no more.** The scheduled
+  `tools/grid_access.sh` equal to the access service's `GET /admin/roster.txt` (extension grant only;
+  lab-only approvals and the reviewers' mock are not on it, by design), which the tool fetches itself
+  with the vendor folder's `admin_token` (0600; the token travels in a header file curl reads, never
+  in argv, a log or a message; only 200 plain text counts); `deploy_shared` never closes the tree to
+  other below the gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed
+  to other; a reader the service approved for a folder (`GET /admin/readers.txt`) gets the group's
+  read there by named entries, never w, never a default entry, and no more.** The service's
+  `admin.mjs` lives in its own repository, `OpenSpineConsortium/beethoven-access`, and nothing here
+  names a checkout of it; its published contract is pinned under `interface/access/` by
+  `interface/access/pull.sh`. The scheduled
   run makes only cheap checks (the full sweep is `--check-tree`) and reports any root entry in another
   student's place.
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
@@ -317,11 +322,35 @@ raises the export's version when a client must act; `test_interface.py` fails un
 `test_boundary.py` fails on any tracked line that reaches another repository's checkout. The
 standard every repository follows is `INTERFACES.md` in `OpenSpineConsortium/beethoven`.
 
-CI runs in three lanes, none holding a secret:
-- `.github/workflows/ci.yml`: the suite on ubuntu, and in a `centos:7` container — python 3.6.8,
-  bash 4.2.46, util-linux 2.23, the login node's own stack (`.github/centos7-suite.sh`).
+CI runs in four lanes, none holding a secret:
+- `.github/workflows/ci.yml`: the suite on ubuntu (with `tools/tests/test_grid_access.sh` and
+  `tools/tests/test_grid_ci.sh`), and in a `centos:7` container — python 3.6.8, bash 4.2.46,
+  util-linux 2.23, the login node's own stack (`.github/centos7-suite.sh`); and the job
+  `framework version` (`tools/version_check.sh`), which fails a change to a file `deploy_shared.sh`
+  publishes (its own list, read from it: `framework/bin lib jobs profiles` and `VERSION`; not
+  `README.md`) that does not raise `framework/VERSION` and `bin/hpcworker`'s `VERSION=` together.
 - `tools/grid_ci.sh`, run on the cluster by a person or their worker: the suite and (with
   `--container`) the Slurm-in-container check as real jobs on compute nodes, the verdict posted to
-  the commit as the statuses `grid/framework-suite-py36` and `grid/slurm-in-container`. GitHub's
-  runners never reach the grid (VPN, one-time code) and no token enters this repository, a job file
-  or an argv; the script uses the account's own `gh` sign-in and GitHub sees pass or fail only.
+  the commit as the statuses `grid/framework-suite-py36` and `grid/slurm-in-container`; with
+  `--deploy` (main's head only) it then installs the commit as the watcher does. GitHub's runners
+  never reach the grid (VPN, one-time code) and no token enters this repository, a job file or an
+  argv; the script uses the account's own `gh` sign-in, submits every job with `GITHUB_TOKEN` and
+  `GH_TOKEN` removed from its environment, and GitHub sees pass or fail only.
+- The watcher, the fourth lane (greg, 2026-10-07: installing changes to the grid's copy is part of
+  CI): the grid installs main's head as the lab's shared copy after GitHub's checks and the grid
+  suite pass. A person starts it once, `tools/grid_ci.sh --watch [--every 10] [--container] [--site
+  S]` in the portal's shell (on the login node: file work, one `squeue`, one `sbatch`). Each tick
+  (`tools/grid_ci_watch.sbatch`, ten minutes of wall time at most) queues its one successor
+  (`--begin`, `--dependency=singleton`) and then moves main's head on by at most one job, never
+  waiting on one: GitHub's check runs all passed, the suite (and the container check) as jobs, then
+  `tools/grid_deploy.sbatch` (`deploy_shared.sh --here` on a compute node, never `--replace`, refused
+  without `getfacl`/`setfacl`), and `grid/deploy` posted in one sentence. A commit main has moved
+  past gets its verdicts and is never installed (a queued install checks again when it starts,
+  against `<clone>/main-head` and the version `current` names, so neither lane ever moves `current`
+  back); a tick run twice never submits a second job for a commit (written down before and after
+  each `sbatch`, checked with one `sacct` by the job's name).
+  It runs from its own copy in `<ci dir>/watch/bin`, refreshed only from a commit it has just
+  installed; `--unwatch` writes `watch/STOP` and cancels the queued tick. Only the account that owns
+  the shared copy's folder can install (deploy_shared refuses any other). Not yet measured on the
+  grid: compute nodes reaching github.com, `getfacl`/`setfacl` on compute nodes outside a container,
+  and the `--begin`/`--dependency=singleton` chain on Wayne State's Slurm (`docs/OPEN_QUESTIONS.md`).

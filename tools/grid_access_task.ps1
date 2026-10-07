@@ -17,30 +17,35 @@
             (the grid's entries as they are now, changing nothing). Under -File, PowerShell hands this
             script one string however the options are written, so the script splits it itself.
   (none)    prints the command the task runs, whether the list has been applied once, and whether the
-            task is registered.
+            task is registered. Nothing more is needed for that.
   -WhatIf   with -Install, -Remove or -Run: says what would be done and does nothing.
 
-  -AdminTool  the access service's admin.mjs, a Windows path (or $env:BEETHOVEN_ADMIN_TOOL). Every
-            option but the bare one needs it: grid_access.sh reads its two lists only from a command the
-            person names, and assumes no checkout beside this one (the two repositories meet only at
-            those two plain-text lists). The path may hold letters, digits and . _ - / \ : only.
+  -ServiceUrl  the access service's address, when it is not the deployed service's own name
+            (https://beethoven-access.openspineconsortium.workers.dev, which grid_access.sh uses when
+            none is given); or $env:BEETHOVEN_SERVICE_URL. Most people never set it. https:// and a
+            host name of plain characters, nothing after it.
 
   The command is
-    conhost.exe --headless wsl.exe -e bash -lc "BEETHOVEN_VENDOR_DIR='<vendor>' BEETHOVEN_ROSTER_CMD='node <admin> roster' BEETHOVEN_READERS_CMD='node <admin> readers' exec bash '<tool>' --quiet"
-  where <vendor> is %USERPROFILE%\.beethoven-vendor, <admin> the -AdminTool path and <tool> grid_access.sh
-  in this folder, all as WSL paths (wslpath). The network goes through WSL, where ssh to wsu-grid works;
-  admin.mjs (node, in WSL) finds its own admin token in the vendor folder, and prints the approved list
-  (roster) and the readers' folders (readers). When the list has not changed since the last run, grid_access.sh does not connect to the
-  grid at all (an approved AccessID the grid does not know yet is tried again once a day), and the task's
-  runs never sweep the whole tree (that is --check-tree, by hand). Each run adds one line to
-  <vendor>\state\grid_access.log.
+    conhost.exe --headless wsl.exe -e bash -lc "BEETHOVEN_VENDOR_DIR='<vendor>' exec bash '<tool>' --quiet"
+  (with BEETHOVEN_SERVICE_URL='<url>' before the exec when -ServiceUrl is given), where <vendor> is
+  %USERPROFILE%\.beethoven-vendor and <tool> grid_access.sh in this folder, both as WSL paths
+  (wslpath). The network goes through WSL, where ssh to wsu-grid works. grid_access.sh reads the
+  approved list and the readers' folders from the access service itself (GET /admin/roster.txt and
+  /admin/readers.txt), with the admin token it finds in the vendor folder (the file admin_token, the
+  maintainer's, which must be readable by its owner alone: chmod 600 in WSL); the token travels in a
+  header file curl reads, never on a command line. When the list has not changed since the last run,
+  grid_access.sh does not connect to the grid at all (an approved AccessID the grid does not know yet
+  is tried again once a day), and the task's runs never sweep the whole tree (that is --check-tree, by
+  hand). Each run adds one line to <vendor>\state\grid_access.log; a run the service refuses (no
+  token, a token it does not accept, a service not deployed with the lists, a page in front) changes
+  nothing and says why there.
 
 .EXAMPLE
-  powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Run -ToolArgs '--dry-run --force'
+  powershell -NoProfile -File tools\grid_access_task.ps1 -Run -ToolArgs '--dry-run --force'
 .EXAMPLE
-  powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Run
+  powershell -NoProfile -File tools\grid_access_task.ps1 -Run
 .EXAMPLE
-  powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Install
+  powershell -NoProfile -File tools\grid_access_task.ps1 -Install
 #>
 [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Show')]
 param(
@@ -48,7 +53,7 @@ param(
   [Parameter(ParameterSetName = 'Remove', Mandatory = $true)][switch]$Remove,
   [Parameter(ParameterSetName = 'Run', Mandatory = $true)][switch]$Run,
   [Parameter(ParameterSetName = 'Run')][string[]]$ToolArgs = @(),
-  [string]$AdminTool = $env:BEETHOVEN_ADMIN_TOOL
+  [string]$ServiceUrl = $env:BEETHOVEN_SERVICE_URL
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -70,27 +75,24 @@ function ConvertTo-WslPath([string]$WindowsPath) {
 
 function Get-BashCommand {
   # what bash -lc runs; the tool's and the vendor folder's paths in single quotes, so a space in a folder
-  # name is fine. The admin tool's path sits inside a command grid_access.sh runs with bash -c, so it is
-  # held to plain characters instead of being quoted twice.
-  if (-not $AdminTool) {
-    throw ("Name the access service's admin.mjs: -AdminTool <path>, or `$env:BEETHOVEN_ADMIN_TOOL. grid_access.sh " +
-      "takes the approved list and the readers only from a command you name, and looks for nothing beside this checkout.")
-  }
-  if ($AdminTool -notmatch '^[A-Za-z0-9_.:\\/-]+$') {
-    throw "the path $AdminTool holds characters the task's command line does not carry (letters, digits and . _ - / \ : only)"
-  }
-  if (-not (Test-Path -LiteralPath $AdminTool -PathType Leaf)) { throw "there is no file $AdminTool" }
+  # name is fine. The service's address, when given, is held to the characters grid_access.sh accepts, so
+  # it needs no quoting of its own inside the task's command line.
   $tool = Join-Path $PSScriptRoot 'grid_access.sh'
   if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "grid_access.sh is not beside this script ($tool)" }
   $wslTool = ConvertTo-WslPath $tool
   $wslVendor = ConvertTo-WslPath $Vendor
-  $wslAdmin = ConvertTo-WslPath (Resolve-Path -LiteralPath $AdminTool).Path
   foreach ($p in @($wslTool, $wslVendor)) {
     if ($p -match "['`"]") { throw "the path $p holds a quote; the task's command line cannot carry it" }
   }
-  if ($wslAdmin -notmatch '^[A-Za-z0-9_./-]+$') { throw "the WSL path $wslAdmin holds characters the task's command line does not carry" }
-  return ("BEETHOVEN_VENDOR_DIR='$wslVendor' BEETHOVEN_ROSTER_CMD='node $wslAdmin roster' " +
-    "BEETHOVEN_READERS_CMD='node $wslAdmin readers' exec bash '$wslTool'")
+  $service = ''
+  if ($ServiceUrl) {
+    if ($ServiceUrl -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?\z') {   # -cnotmatch and \z: as bash's [[ =~ ]] reads it, case and all
+      throw ("the access service's address must be https:// and a host name of plain characters, with nothing after it: $ServiceUrl " +
+        "(leave -ServiceUrl and `$env:BEETHOVEN_SERVICE_URL unset for the deployed service)")
+    }
+    $service = "BEETHOVEN_SERVICE_URL='$ServiceUrl' "
+  }
+  return "BEETHOVEN_VENDOR_DIR='$wslVendor' $service" + "exec bash '$wslTool'"
 }
 
 function Get-Task {
@@ -132,7 +134,7 @@ switch ($PSCmdlet.ParameterSetName) {
       $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
       $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
         -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-      $description = 'Beethoven: keeps the grid''s approved list (the named-user ACL on the lab volume''s root) and its readers (the group''s read on approved folders) in step with the access service. tools/grid_access.sh --quiet in WSL; log in .beethoven-vendor\state\grid_access.log.'
+      $description = 'Beethoven: keeps the grid''s approved list (the named-user ACL on the lab volume''s root) and its readers (the group''s read on approved folders) in step with the access service, which it asks itself. tools/grid_access.sh --quiet in WSL; log in .beethoven-vendor\state\grid_access.log.'
       Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Action $action -Trigger $trigger `
         -Principal $principal -Settings $settings -Description $description -Force | Out-Null
       $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
@@ -161,12 +163,8 @@ switch ($PSCmdlet.ParameterSetName) {
   }
   default {
     Write-Output "Task:     $TaskPath$TaskName"
-    if ($AdminTool) {
-      $bash = Get-BashCommand
-      Write-Output "Runs:     $conhost --headless wsl.exe -e bash -lc `"$bash --quiet`""
-    } else {
-      Write-Output 'Runs:     (name the access service''s admin.mjs with -AdminTool <path> to see the command)'
-    }
+    $bash = Get-BashCommand
+    Write-Output "Runs:     $conhost --headless wsl.exe -e bash -lc `"$bash --quiet`""
     if (Test-Path -LiteralPath $StateFile -PathType Leaf) {
       Write-Output "Applied:  yes, once at least ($StateFile exists)"
     } else {

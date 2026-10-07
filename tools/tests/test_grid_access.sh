@@ -5,8 +5,10 @@
 # physical root and rs_grp_oschome a link to it, as on the grid. Nothing reaches the grid, the access
 # service or the real vendor folder: ssh is tests/shim/ssh (it records each call and runs the grid side
 # here, with the script on stdin as sshd would), and HOME and BEETHOVEN_VENDOR_DIR point into the
-# temporary folder; BEETHOVEN_ROSTER_CMD is unset. The access service's admin.mjs is a stand-in shell
-# script ($T/admin-stub) named through the two commands, as the scheduled task names the real one.
+# temporary folder; BEETHOVEN_ROSTER_CMD is unset. The access service is a stand-in HTTPS server on
+# 127.0.0.1 (python3, in its own section below), and until that section BEETHOVEN_SERVICE_URL names a
+# closed loopback port, so no run ever asks the real service; where a command is the source, it is a
+# stand-in shell script ($T/admin-stub) with two subcommands.
 # setfacl and getfacl are always tests/shim/acl, an emulation of the POSIX ACL behaviour the tool relies
 # on (WSL has no acl package, and the grid's AccessIDs exist on no test machine, so even a real setfacl
 # could not name them); `id` answers for the test's accounts (tests/shim/id); `stat` answers another
@@ -20,7 +22,7 @@ DS="$REPO/tools/deploy_shared.sh"
 SHIMS="$REPO/tools/tests/shim"
 T=$(mktemp -d /tmp/grid_access_test.XXXXXX) || exit 1
 T=$(cd "$T" && pwd -P)
-cleanup() { chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"; }
+cleanup() { [ -z "${SVC_PID:-}" ] || kill "$SVC_PID" 2>/dev/null; chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 
 SHIM_REAL_ID=$(command -v id); SHIM_REAL_STAT=$(command -v stat); export SHIM_REAL_ID SHIM_REAL_STAT
@@ -30,6 +32,7 @@ ln -s acl.shim "$T/bin/setfacl"; ln -s acl.shim "$T/bin/getfacl"; ln -s id.shim 
 export PATH="$T/bin:$PATH" SHIM_ACL_STORE="$T/acl" SHIM_LOG="$T/shim.log" SHIM_SSH_CALLS="$T/ssh.calls" SHIM_OWNERS="$T/owners"
 export SHIM_USERS="hy9698 ab1234 cd5678 ef9012"
 export HOME="$T/home" BEETHOVEN_VENDOR_DIR="$T/vendor"
+export BEETHOVEN_SERVICE_URL=https://127.0.0.1:1   # nothing listens there: a run that asks the service cannot reach the real one
 unset BEETHOVEN_ROSTER_CMD SHIM_SSH_MODE SHIM_ACL_FAIL SHIM_GROUP_OWNERS GA_READ_CAP
 export BEETHOVEN_READERS_CMD=true   # no reader until the readers' section
 ME=$(id -un); GRP=$(id -gn)
@@ -190,8 +193,11 @@ t "open-tree on a linked shared/beethoven: refused, nothing changed" eval 'rc_is
 rm "$L"; mv "$V/shared/beethoven.real" "$L"
 OUT=$(bash "$GA" --apply "$ROOT" hy9698 'x;y' 2>&1); RC=$?
 t "grid side: a bad id refused, nothing changed" eval 'rc_is 1 && has "not an AccessID" && unchanged $((n + 3))'
-OUT=$(bash "$GA" --apply / hy9698 2>&1); RC=$?
-t "grid side: a root this account does not own is refused" eval 'rc_is 1 && has "belongs to root, not to $ME"'
+# / is root's; run as root (a container), stand in a folder the stat shim says another account owns
+NOTMINE=/ NOTMINE_OWNER=root
+if [ "$ME" = root ]; then NOTMINE="$T/notmine" NOTMINE_OWNER=ab1234; mkdir "$NOTMINE"; owns "$NOTMINE" ab1234; fi
+OUT=$(bash "$GA" --apply "$NOTMINE" hy9698 2>&1); RC=$?
+t "grid side: a root this account does not own is refused" eval 'rc_is 1 && has "belongs to $NOTMINE_OWNER, not to $ME"'
 OUT=$(bash "$GA" --apply relative/root hy9698 2>&1); RC=$?
 t "grid side: a relative root is refused" eval 'rc_is 1 && has "must be absolute"'
 roster hy9698 cd5678
@@ -283,8 +289,8 @@ n=$(calls); ga
 t "a failing roster command: refused, no connection" eval 'rc_is 1 && has "ended with exit 3" && [ "$(calls)" = $n ]'
 unset BEETHOVEN_ROSTER_CMD
 ga
-t "no roster file or command: refused, no connection (nothing beside this checkout is looked for)" eval 'rc_is 1 && has "no approved list named: give --roster-file FILE, or set .BEETHOVEN_ROSTER_CMD" && [ "$(calls)" = $n ]'
-# the stand-in for the access service's admin.mjs: roster, readers, or a failure with its exit code
+t "no roster file or command: the access service is asked, and with no admin_token here that refuses before anything is sent; no connection" eval 'rc_is 1 && has "no admin_token in the vendor folder \($T/vendor\)" && [ "$(calls)" = $n ]'
+# a command as the source: a stand-in with two subcommands, roster and readers, or a failure with its exit code
 printf '%s\n' 'case "$1" in' '  roster) printf "%s\n" ${STUB_ROSTER:-hy9698 cd5678};;' '  readers) [ -z "${STUB_READERS_EXIT:-}" ] || exit "$STUB_READERS_EXIT"; printf "%s\n" "${STUB_READERS:-}";;' '  *) echo usage >&2; exit 2;;' 'esac' > "$T/admin-stub"
 export BEETHOVEN_ROSTER_CMD="bash $T/admin-stub roster"
 ga
@@ -307,7 +313,7 @@ n=$(calls)
 ga --here --roster-file "$T/roster"
 t "--here: applied without ssh" eval 'rc_is 0 && has "^  removed (cd5678|ef9012)" && [ "$(named)" = hy9698 ] && [ "$(calls)" = $n ] && grep -q "^# target here:$ROOT$" "$STATE"'
 ga --here
-t "--here with no roster file or command: refused" eval 'rc_is 1 && has "no approved list named"'
+t "--here with no roster file or command: the service is asked, no token here, refused" eval 'rc_is 1 && has "no admin_token in the vendor folder"'
 roster '# nobody'
 ga --roster-file "$T/roster" --force
 t "an empty list with --force: every named entry removed, (none)" eval 'rc_is 0 && [ -z "$(named)" ] && has "^grid access list on $ROOT: \(none\)$" && [ -z "$(state_ids)" ]'
@@ -409,15 +415,15 @@ ga
 t "a failing readers command: refused, no connection" eval 'rc_is 1 && has "the readers command .* ended with exit 5" && unchanged $n'
 unset BEETHOVEN_READERS_CMD
 ga --here --roster-file "$T/roster"
-t "--here with no readers file or command: refused" eval 'rc_is 1 && has "no reader list named: give --readers-file FILE, or set .BEETHOVEN_READERS_CMD" && unchanged $n'
+t "--here with no readers file or command: the service is asked for them, no token here, refused" eval 'rc_is 1 && has "no admin_token in the vendor folder" && unchanged $n'
 ga --roster-file "$T/roster"
-t "no readers file or command: refused, no connection (nothing beside this checkout is looked for)" eval 'rc_is 1 && has "no reader list named" && unchanged $n'
+t "no readers file or command: the service is asked for them, no token here, refused, no connection" eval 'rc_is 1 && has "no admin_token in the vendor folder" && unchanged $n'
 readers "ab1234 shared/access"
 OUT=$(SHIM_SSH_MODE=record bash "$GA" --site wayne --roster-file "$T/roster" --readers-file "$T/readers" 2>&1); RC=$?; runs=$((runs + 1))
 t "the pairs travel to the grid side, with the sweep" eval 'tail -1 "$SHIM_SSH_CALLS" | grep -E "bash -s -- --apply --sweep-readers --read ab1234:shared/access /rs/rs_grp_oschome cd5678 hy9698 2>&1$" >/dev/null'
 OUT=$(bash "$GA" --apply --read 'ab1234:../x' "$ROOT" hy9698 2>&1); RC=$?
 t "grid side: a bad --read refused, nothing changed" eval 'rc_is 1 && has "is not an AccessID and a folder" && unchanged $((n + 1))'
-# one stand-in command, two subcommands, as the scheduled task names the access service's admin.mjs
+# one stand-in command, two subcommands, as a person naming their own command for both lists would
 export BEETHOVEN_ROSTER_CMD="bash $T/admin-stub roster" BEETHOVEN_READERS_CMD="bash $T/admin-stub readers"
 STUB_READERS="ab1234 shared/access" ga
 t "the readers command's pairs: applied" eval 'rc_is 0 && has "^  added   ab1234 \(--x, a reader\)" && grep -qx "# read ab1234 shared/access" "$STATE"'
@@ -428,6 +434,285 @@ roster hy9698 cd5678
 ga
 t "back to no reader: ab1234's --x goes" eval 'rc_is 0 && [ -z "$(ue "$V" ab1234)" ]'
 unset SHIM_GROUP_OWNERS BEETHOVEN_ROSTER_CMD
+
+echo "== readers: the whole volume (\".\")"
+# a fresh small volume, its tree under shared/beethoven opened as on the grid, shared/access at 2710 as on
+# the grid, a 0600 file of the owner's, and a student's own folder (zq0002) holding a file the owner owns
+mkvol; : > "$SHIM_OWNERS"
+export SHIM_USERS="$SHIM_USERS zq0001 zq0002 zq0003" BEETHOVEN_ROSTER_CMD="cat $T/roster" BEETHOVEN_READERS_CMD="cat $T/readers"
+roster zq0003 cd5678; readers '# none'
+ga --open-tree
+t "whole volume, fixture: the tree opened, every check ok" eval 'rc_is 0 && lacks FAILED && [ "$(named)" = "cd5678 zq0003" ]'
+chmod 2710 "$V/shared/access"
+chmod 2750 "$V/$ME/data"; chmod 640 "$V/$ME/data/results.csv"
+echo secret > "$V/$ME/secret.txt"; chmod 600 "$V/$ME/secret.txt"
+mkdir -m 2750 "$V/zq0002" "$V/zq0002/sub"; echo theirs > "$V/zq0002/notes.csv"; echo ours > "$V/zq0002/sub/ours.csv"
+chmod 640 "$V/zq0002/notes.csv" "$V/zq0002/sub/ours.csv"
+owns "$V/zq0002" zq0002; owns "$V/zq0002/notes.csv" zq0002; owns "$V/zq0002/sub" zq0002   # ours.csv stays the owner's
+zq() { getfacl -R -p "$V" | awk -v u="user:$1:" '/^# file: / { f = substr($0, 9) } index($0, u) == 1 { print f, $0 }'; }   # ID -> each entry of its, with its path
+MODES1=$(find "$V" -printf '%m %p\n' | sort)
+readers "zq0001 ." "zq0003 ."
+n=$(calls)
+ga --dry-run
+t "whole volume, dry run: the root's r-x and the grant, as would, with the count" eval 'has "^  would add zq0001 \(r-x, a reader\)" && has "^  would grant zq0001 all of $ROOT: 4 entries set to the group.s read, 0 removed where the group may not read, 0 folders on the way made enterable" && has "^  ok      reader zq0001: all of $ROOT would read as the group reads it after this run \([0-9]+ entries; "'
+t "whole volume, dry run: nothing changed" eval '[ -z "$(zq zq0001)" ] && [ "$(calls)" = $((n + 1)) ] && ! grep -q "^# read" "$STATE"'
+ga
+t "whole volume: zq0001 gets the group's read on the root (r-x), zq0003 on the list keeps rwx" eval 'has "^  added   zq0001 \(r-x, a reader\)" && [ "$(ue "$V" zq0001)" = r-x ] && [ "$(ue "$V" zq0003)" = rwx ] && [ "$(ue "$V" cd5678)" = rwx ]'
+t "whole volume: granted, read back, exit 0" eval 'rc_is 0 && lacks FAILED && has "^  granted zq0001 all of $ROOT: 4 entries set to the group.s read, 0 removed" && has "^  ok      reader zq0001: all of $ROOT reads as the group reads it \([0-9]+ entries, read back; [0-9]+ open to other already; 4 not $ME.s, left as they are\)$"'
+t "whole volume: what the group reads gets its read (the owner's folder r-x, data r-x, a 0640 file r--)" eval '[ "$(ue "$V/$ME" zq0001)" = r-x ] && [ "$(ue "$V/$ME/data" zq0001)" = r-x ] && [ "$(ue "$V/$ME/data/results.csv" zq0001)" = r-- ] && ! uem "$V/$ME" zq0001'
+t "whole volume: shared/access included, as the group has it: enter only, nothing on its 0600 token" eval '[ "$(ue "$V/shared/access" zq0001)" = --x ] && [ -z "$(ue "$V/shared/access/admin_token" zq0001)" ]'
+t "whole volume: a 0600 file gets nothing" eval '[ -z "$(ue "$V/$ME/secret.txt" zq0001)" ]'
+t "whole volume: a student's own folder is counted and left, the owner's file inside it too" eval '[ -z "$(ue "$V/zq0002" zq0001)" ] && [ -z "$(ue "$V/zq0002/notes.csv" zq0001)" ] && [ -z "$(ue "$V/zq0002/sub/ours.csv" zq0001)" ]'
+t "whole volume: nothing where other reads already (shared/beethoven), no default entry, no mode changed" eval '! getfacl -R -p "$V/shared/beethoven" | grep -E "^(default:)?user:zq0001:" >/dev/null && ! getfacl -R -p "$V" | grep -E "^default:user:(zq0001|zq0003):" >/dev/null && [ "$(find "$V" -printf "%m %p\n" | sort)" = "$MODES1" ]'
+t "whole volume: zq0003's grant is the same below the root" eval '[ "$(zq zq0003 | grep -v "^$V user:")" = "$(zq zq0001 | grep -v "^$V user:" | sed s/zq0001/zq0003/)" ] && [ "$(zq zq0003 | wc -l)" = 5 ]'
+t "whole volume: the list read back expects the root's r-x, the root's entries ok" eval 'has "^  ok      the list read back from $ROOT is the list applied$" && has "^  ok      the root.s entries: each of the 3 "'
+t "whole volume: the readers' line says it in words, then the list" eval 'has "^readers on $ROOT: zq0001 \(all of $ROOT\); zq0003 \(all of $ROOT\)$" && last_line_is_list && has "^grid access list on $ROOT: cd5678 zq0003$"'
+t "whole volume: the state records \".\"" eval 'grep -qx "# read zq0001 ." "$STATE" && grep -qx "# read zq0003 ." "$STATE"'
+ACLS1=$(getfacl -R -p "$V")
+ga --force
+t "whole volume, a second run: nothing changes, the root's entry stays r-x" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && has "^  ok      reader zq0001: all of $ROOT reads as the group reads it \([0-9]+ entries; " && [ "$(getfacl -R -p "$V")" = "$ACLS1" ]'
+n=$(calls); ga
+t "whole volume, unchanged the same day: no connection, the readers in words" eval 'rc_is 0 && [ "$(calls)" = $n ] && has "^readers on $ROOT: zq0001 \(all of $ROOT\) zq0003 \(all of $ROOT\)$"'
+echo new > "$V/$ME/data/new.csv"; chmod 640 "$V/$ME/data/new.csv"
+GA_READ_CAP=5 ga --force
+t "whole volume over the cap: FAILED with the count, nothing swept, exit 2" eval 'rc_is 2 && has "^  FAILED  reader zq0001: all of $ROOT holds [0-9]+ entries, more than 5; not swept" && lacks "^  granted " && [ -z "$(ue "$V/$ME/data/new.csv" zq0001)" ] && [ "$(ue "$V" zq0001)" = r-x ]'
+# a setfacl that skips one path and still exits 0: the read-back, not setfacl's word, decides (the shim
+# stays as it is; the stand-in sits before it on PATH and hands it every other path)
+mkdir -p "$T/real"; ln -s "$T/bin/acl.shim" "$T/real/setfacl"; rm "$T/bin/setfacl"
+printf '%s\n' '#!/usr/bin/env bash' 'a=() n=0' \
+  'while [ $# -gt 0 ]; do case "$1" in -m|-x) a+=("$1" "$2"); shift 2;; -*) a+=("$1"); shift;; *) [ "$1" = "$SHIM_DROP" ] || { a+=("$1"); n=$((n + 1)); }; shift;; esac; done' \
+  "[ \$n -gt 0 ] || exit 0; exec '$T/real/setfacl' \"\${a[@]}\"" > "$T/bin/setfacl"
+chmod 755 "$T/bin/setfacl"
+SHIM_DROP="$V/$ME/data/new.csv" ga --force
+t "a setfacl that skips an entry and says nothing: the read-back finds it, FAILED, exit 2" eval 'rc_is 2 && has "^  FAILED  reader zq0001: 1 entries under all of $ROOT still differ from the group.s read after setfacl$" && lacks "^  ok      reader zq0001:" && [ -z "$(ue "$V/$ME/data/new.csv" zq0001)" ]'
+rm "$T/bin/setfacl"; ln -s acl.shim "$T/bin/setfacl"
+ga --force
+t "within the cap again: the new file gets its entry" eval 'rc_is 0 && has "^  granted zq0001 all of $ROOT: 1 entries" && [ "$(ue "$V/$ME/data/new.csv" zq0001)" = r-- ]'
+ZQ1=$(zq zq0001); ACLS1=$(getfacl -R -p "$V")
+readers "zq0001 ." "zq0001 $ME/data" "zq0003 ."
+ga
+t "\".\" and a named folder: the folder is covered, no sweep of its own, nothing changes" eval 'rc_is 0 && lacks FAILED && has "^  note    reader zq0001: $ME/data is part of all of $ROOT, so it has no sweep of its own" && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS1" ]'
+t "\".\" and a named folder: both on the readers' line" eval 'has "^readers on $ROOT: zq0001 \(all of $ROOT, $ME/data\); zq0003 \(all of $ROOT\)$"'
+readers "zq0001 $ME/data"
+ga
+t "\".\" taken off, a named folder kept: the root's entry back to --x" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: r-x -> --x" && [ "$(ue "$V" zq0001)" = --x ] && has "^  ok      the list read back from $ROOT is the list applied$"'
+t "\".\" taken off: everything else of zq0001's goes, then the named folder is granted" eval 'has "^  revoked zq0001 all of $ROOT: 5 entries removed" && has "^  granted zq0001 $ME/data: " && [ "$(ue "$V/$ME" zq0001)" = --x ] && [ "$(ue "$V/$ME/data" zq0001)" = r-x ] && [ "$(ue "$V/$ME/data/results.csv" zq0001)" = r-- ] && [ -z "$(ue "$V/shared/access" zq0001)" ] && [ "$(zq zq0001 | wc -l)" = 5 ]'
+t "\".\" taken off zq0003, on the list: its entries go, its rwx on the root stays" eval 'has "^  revoked zq0003 all of $ROOT: 5 entries removed" && [ "$(zq zq0003)" = "$V user:zq0003:rwx" ]'
+ACLS2=$(getfacl -R -p "$V")
+ga --force
+t "and a second run changes nothing (no flip on the root)" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS2" ]'
+readers "zq0001 ."
+ga
+t "back to \".\": the named folder's entries are not taken back first, the root r-x again" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: --x -> r-x" && has "^  note    zq0001 $ME/data: still read with all of $ROOT, nothing taken back" && lacks "^  revoked " && has "^  granted zq0001 all of $ROOT: 2 entries"'
+t "back to \".\": the same entries as the first time" eval '[ "$(zq zq0001)" = "$ZQ1" ]'
+# a folder the group may enter and not list (2710), on the way to a named folder: its --x is what "." gives too
+mkdir -m 2710 "$V/lab"; mkdir -m 2750 "$V/lab/pub"; echo pub > "$V/lab/pub/a.csv"; chmod 640 "$V/lab/pub/a.csv"
+readers "zq0001 lab/pub"
+ga
+t "from \".\" to a folder behind a 2710 one: --x on the way, the folder's read" eval 'rc_is 0 && lacks FAILED && [ "$(ue "$V/lab" zq0001)" = --x ] && [ "$(ue "$V/lab/pub/a.csv" zq0001)" = r-- ] && [ "$(ue "$V" zq0001)" = --x ] && [ -z "$(ue "$V/$ME" zq0001)" ]'
+readers "zq0001 ."
+ga
+t "and back to \".\": the --x on the way stays (\".\" needs it), nothing taken back" eval 'rc_is 0 && lacks FAILED && lacks "^  revoked " && [ "$(ue "$V/lab" zq0001)" = --x ] && [ "$(ue "$V/lab/pub/a.csv" zq0001)" = r-- ] && [ "$(ue "$V/$ME" zq0001)" = r-x ] && [ "$(ue "$V" zq0001)" = r-x ]'
+readers '# none'
+ga
+t "\".\" taken off, no folder left: every entry of zq0001's goes, the root's too" eval 'rc_is 0 && lacks FAILED && has "^  removed zq0001 \(was r-x\)" && has "^  revoked zq0001 all of $ROOT: 8 entries removed" && [ -z "$(zq zq0001)" ] && lacks "^readers on " && ! grep -q "^# read" "$STATE"'
+# the root's entry for "." is the group's read there, not a fixed r-x: a root whose group may enter and
+# not list (g::-wx, the mask still rwx) gives a reader of "." enter only
+setfacl -n -m g::-wx "$V"
+readers "zq0001 ."
+ga
+t "a root whose group entry lacks r: a reader of \".\" gets --x there, as the group has it" eval 'rc_is 0 && lacks FAILED && has "^  added   zq0001 \(--x, a reader\)" && [ "$(ue "$V" zq0001)" = --x ] && has "^  ok      the list read back from $ROOT is the list applied$"'
+ga --force
+t "and a second run leaves the root at --x" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(ue "$V" zq0001)" = --x ]'
+setfacl -n -m g::rwx "$V"
+# Beethoven for VS Code's grid scripts give each applicant r-- on their own status file
+# (shared/access/status/<id>.json, 0600) and the --x on the way; a sweep of "." leaves that r-- alone
+mkdir -m 2710 "$V/shared/access/status"
+( umask 077; echo '{"user":"zq0001","state":"approved"}' > "$V/shared/access/status/zq0001.json" )
+setfacl -m u:zq0001:r-- "$V/shared/access/status/zq0001.json"
+setfacl -n -m u:zq0001:--x "$V/shared/access" "$V/shared/access/status"
+ga --force
+t "a reader's own status file of Beethoven for VS Code: its r-- left as it is, and said" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: --x -> r-x" && [ "$(ue "$V/shared/access/status/zq0001.json" zq0001)" = r-- ] && [ "$(ue "$V/shared/access/status" zq0001)" = --x ] && has "^  ok      reader zq0001: all of $ROOT reads as the group reads it \(.*; zq0001.s own status file of Beethoven for VS Code left as it is\)$"'
+ACLS3=$(getfacl -R -p "$V")
+ga --force
+t "and the next sweep does not take it either" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS3" ]'
+# taking back that does not finish (over the cap, a setfacl that fails) is kept in the state and passed
+# again at the next sweep until it does; a dropped pair would leave the reader its entries for good
+readers '# none'
+GA_READ_CAP=5 ga
+t "\".\" taken off over the cap: FAILED, the way by hand given, nothing taken back, kept as # unread" eval 'rc_is 2 && has "^  removed zq0001 \(was r-x\)" && has "^  FAILED  reader zq0001: all of $ROOT not taken back: it holds [0-9]+ entries, more than 5 \(tried again on the first run of a later day, or now with --force; by hand, on the login node: find $V -mindepth 1 -user $ME ! -type l -exec setfacl -n -x u:zq0001 \{\} \+\)$" && [ "$(ue "$V/$ME" zq0001)" = r-x ] && grep -qx "# unread zq0001 ." "$STATE" && ! grep -q "^# read" "$STATE"'
+n=$(calls); ga
+t "the same day: not tried again, no connection, and it says what waits" eval 'rc_is 0 && [ "$(calls)" = $n ] && has "^not taken back yet, tried again on the first run of a later day \(or now with --force\): zq0001 \(all of $ROOT\)$" && grep -q "1 folders not taken back yet); not connected$" "$LOG"'
+sed -i "s/^# swept .*/# swept 2000-01-01/" "$STATE"
+ga
+t "a later day, within the cap: taken back, the status file's r-- with it, and no longer kept" eval 'rc_is 0 && [ "$(calls)" = $((n + 1)) ] && has "^  revoked zq0001 all of $ROOT: [0-9]+ entries removed" && [ -z "$(zq zq0001)" ] && ! grep -q "^# unread" "$STATE"'
+readers "zq0003 ."
+ga
+readers '# none'
+SHIM_ACL_FAIL=x ga
+t "\".\" taken off a list member, setfacl failing: FAILED, kept as # unread, its rwx on the root kept" eval 'rc_is 2 && has "^  FAILED  reader zq0003: all of $ROOT not taken back: setfacl failed on part of it \(tried again on the first run of a later day, or now with --force\)$" && grep -qx "# unread zq0003 ." "$STATE" && [ "$(ue "$V/$ME" zq0003)" = r-x ] && [ "$(ue "$V" zq0003)" = rwx ]'
+ga --force
+t "--force tries it at once: taken back, only the list's rwx left" eval 'rc_is 0 && has "^  revoked zq0003 all of $ROOT: " && [ "$(zq zq0003)" = "$V user:zq0003:rwx" ] && ! grep -q "^# unread" "$STATE"'
+cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
+for bad in "zq0001 ./x" "zq0001 .." "zq0001 /" "zq0001 ./" "zq0001 x/." "zq0001 . x"; do
+  readers "zq0001 ." "$bad"
+  ga
+  t "a bad spelling of the root ($bad): refused, names line 2, no connection" eval 'rc_is 1 && has "line 2 of .* is not an AccessID and a folder" && unchanged $n'
+done
+for bad in "zq0001:./x" "zq0001:.." "zq0001:/" "zq0001:" "zq0001:./"; do
+  OUT=$(bash "$GA" --apply --sweep-readers --read "$bad" "$ROOT" zq0003 cd5678 2>&1); RC=$?
+  t "grid side: --read $bad refused, nothing changed" eval 'rc_is 1 && has "is not an AccessID and a folder" && unchanged $n'
+done
+export BEETHOVEN_READERS_CMD=true; unset BEETHOVEN_ROSTER_CMD
+
+echo "== the access service"
+# The stand-in: a python3 HTTPS server on 127.0.0.1 (an ephemeral port, a certificate of its own that
+# CURL_CA_BUNDLE names to curl) that compares the Authorization header byte for byte with the token the
+# test wrote, needs no Origin (a program sends none), and answers the two routes with EXACTLY the bodies
+# of the access service's published vectors admin-roster-txt and admin-readers-txt (in mode empty,
+# admin-roster-txt-empty), copied here as data; test_access_contract.py pins the export itself once
+# interface/access/ is pulled. The mode is read from a file at each request: ok, empty, 401, 403, 404 (a
+# service deployed before the routes), html (a sign-in page in front). An unreachable service is a closed
+# loopback port. No proxy variable may stand between curl and the loopback.
+unset BEETHOVEN_ROSTER_CMD BEETHOVEN_READERS_CMD http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+cat > "$T/svc.py" <<'PY'
+import http.server, os, ssl, sys
+token_file, mode_file, port_file, cert, key = sys.argv[1:6]
+ROSTER = "ab1234\nzz9999\n"                                                   # vectors/admin-roster-txt.json
+READERS = "cd5678 shared/data\nrd5678 lab\nrd5678 shared/access\nzq0006 .\n"  # vectors/admin-readers-txt.json
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def answer(self, status, ctype, body):
+        data = body.encode("utf-8")
+        self.send_response(status); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(data)))
+        self.end_headers(); self.wfile.write(data)
+    def do_GET(self):
+        with open(mode_file) as fh: mode = fh.read().strip()
+        with open(token_file) as fh: token = fh.read().strip()
+        if mode == "404": return self.answer(404, "application/json", '{"error":"no such route"}')
+        if mode == "html": return self.answer(200, "text/html; charset=utf-8", "<html><body>Sign in</body></html>")
+        if mode == "403": return self.answer(403, "application/json", '{"error":"origin not allowed"}')
+        if mode == "500": return self.answer(500, "text/plain; charset=utf-8", "zq0001\nzq0002\n")   # a list-shaped body that must not count
+        if mode == "upper" and self.path == "/admin/roster.txt": return self.answer(200, "Text/Plain; Charset=UTF-8", ROSTER)
+        if mode == "401" or self.headers.get("Authorization") != "Bearer " + token:
+            return self.answer(401, "application/json", '{"error":"admin token missing or wrong"}')
+        if self.path == "/admin/roster.txt": return self.answer(200, "text/plain; charset=utf-8", "" if mode == "empty" else ROSTER)   # empty: vectors/admin-roster-txt-empty.json
+        if self.path == "/admin/readers.txt": return self.answer(200, "text/plain; charset=utf-8", READERS)
+        self.answer(404, "application/json", '{"error":"no such route"}')
+srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(cert, key)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+with open(port_file + ".part", "w") as fh: fh.write(str(srv.server_address[1]))
+os.rename(port_file + ".part", port_file)
+srv.serve_forever()
+PY
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/svc.key" -out "$T/svc.crt" -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1 \
+  || { fail=$((fail + 1)); echo "FAIL openssl could not make the stand-in's certificate"; }
+TOKEN=standin-admin-token-4f9c2e71b0d8
+printf '%s\n' "$TOKEN" > "$T/svc.token"; echo ok > "$T/svc.mode"
+python3 "$T/svc.py" "$T/svc.token" "$T/svc.mode" "$T/svc.port" "$T/svc.crt" "$T/svc.key" & SVC_PID=$!
+for _ in $(seq 1 100); do [ -s "$T/svc.port" ] && break; sleep 0.1; done
+[ -s "$T/svc.port" ] || { fail=$((fail + 1)); echo "FAIL the stand-in service did not start"; }
+PORT=$(cat "$T/svc.port"); SVC="https://127.0.0.1:$PORT"
+mkdir -p "$T/tmp"
+export CURL_CA_BUNDLE="$T/svc.crt" BEETHOVEN_SERVICE_URL="$SVC" TMPDIR="$T/tmp"   # TMPDIR: where the tool's run folder goes, so a leftover is seen
+mode() { echo "$1" > "$T/svc.mode"; }
+# curl first on PATH records its arguments (and the mode of the header file it is handed), then runs the real one
+REAL_CURL=$(command -v curl)
+printf '%s\n' '#!/usr/bin/env bash' \
+  'for a in "$@"; do case "$a" in @*) printf "header-file-mode %s\n" "$(stat -c %a -- "${a#@}")" >> "$SHIM_CURL_CALLS";; esac; done' \
+  'printf "%q " "$@" >> "$SHIM_CURL_CALLS"; printf "\n" >> "$SHIM_CURL_CALLS"' \
+  "exec '$REAL_CURL' \"\$@\"" > "$T/bin/curl"
+chmod 755 "$T/bin/curl"; export SHIM_CURL_CALLS="$T/curl.calls"; : > "$SHIM_CURL_CALLS"
+SVC_OUT="$T/svc.out"; : > "$SVC_OUT"
+gs() { ga "$@"; printf '%s\n' "$OUT" >> "$SVC_OUT"; }   # every run's output (stdout and stderr) kept for the token check
+curls() { grep -c -v '^header-file-mode ' "$SHIM_CURL_CALLS"; }   # the requests made: one argv line each (the mode lines aside)
+mkvol; : > "$SHIM_OWNERS"
+mkdir -m 2750 "$V/shared/data" "$V/lab"   # the folders the readers vector names
+roster zq0003
+ga --roster-file "$T/roster" --readers-file /dev/null --open-tree
+t "service, fixture: the tree opened with a file as the source, every check ok" eval 'rc_is 0 && lacks FAILED && [ "$(named)" = zq0003 ]'
+OUT=$(bash "$GA" --help 2>&1); RC=$?
+t "--help names the service and its address as the source, and no tool of another repository" eval 'rc_is 0 && has "https://beethoven-access.openspineconsortium.workers.dev" && has "admin_token" && lacks "admin.mjs"'
+cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
+gs --dry-run --force
+t "service: no admin_token in the vendor folder: refused in words, nothing sent, nothing changed" eval 'rc_is 1 && has "^grid_access: no admin_token in the vendor folder \($T/vendor\): the access service.s token is the maintainer.s, one line in that file; nothing changed$" && [ "$(curls)" = 0 ] && unchanged $n'
+printf '%s\r\n' "$TOKEN" > "$T/vendor/admin_token"; chmod 644 "$T/vendor/admin_token"
+gs --dry-run --force
+t "service: admin_token readable by others (0644): refused naming the fix, nothing sent" eval 'rc_is 1 && has "^grid_access: $T/vendor/admin_token is readable by group or other \(mode 644\); make it yours alone first: chmod 600 $T/vendor/admin_token; nothing changed$" && [ "$(curls)" = 0 ] && unchanged $n'
+chmod 600 "$T/vendor/admin_token"; printf '  \r\n' > "$T/vendor/admin_token"
+gs --dry-run --force
+t "service: an empty admin_token: refused, nothing sent" eval 'rc_is 1 && has "admin_token is empty: the access service.s token is one line in it; nothing changed" && [ "$(curls)" = 0 ] && unchanged $n'
+printf '%s\r\n' "$TOKEN" > "$T/vendor/admin_token"   # with a CR, which must not reach the header
+gs --dry-run --force
+t "service, dry run: both lists from the stand-in (the token's CR dropped), the vectors' ids and pairs parsed, the grid side asked" eval 'has "^grid access: 2 ids from the access service \(127.0.0.1:$PORT\) and 3 readers from the access service \(127.0.0.1:$PORT\) -> wsu-grid:$ROOT, dry run$" && has "would add ab1234$" && has "^  skipped zz9999" && has "would add cd5678 \(--x, a reader\)" && has "^  skipped rd5678" && has "^  skipped zq0006" && has "^  would grant cd5678 shared/data" && [ "$(calls)" = $((n + 1)) ]'
+t "service, dry run: two requests, nothing changed, no state" eval '[ "$(curls)" = 2 ] && grep -q -- "$SVC/admin/roster.txt " "$SHIM_CURL_CALLS" && grep -q -- "$SVC/admin/readers.txt " "$SHIM_CURL_CALLS" && [ "$(named)" = "$before" ] && cmp -s "$STATE" "$T/state.before"'
+# the token's mode where WSL shows a Windows drive without file modes (every file 0777 there, chmod ignored):
+# the scheduled task's vendor folder is on C:. GA_PROC stands in for /proc
+chmod 644 "$T/vendor/admin_token"; mkdir -p "$T/proc"; VREAL=$(readlink -f "$T/vendor")
+echo "Linux version 5.15.153.1-microsoft-standard-WSL2 (root@buildhost) (gcc)" > "$T/proc/version"
+wslmounts() { printf '%s\n' "rootfs / ext4 rw 0 0" "C:\\134 $VREAL 9p rw,noatime,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000;${1}symlinkroot=/mnt/,mmap,access=client,trans=fd 0 0" > "$T/proc/mounts"; }
+wslmounts ""; c=$(curls); GA_PROC="$T/proc" gs --dry-run --force
+t "service: admin_token 0644 on a WSL Windows drive without file modes: its mode not checked, said so, both lists fetched" eval 'lacks "readable by group or other" && has "^note: $T/vendor/admin_token is on a Windows drive WSL shows without file modes, so its mode is not checked" && has "^grid access: 2 ids from the access service" && [ "$(curls)" = $((c + 2)) ]'
+wslmounts "metadata;"; c=$(curls); GA_PROC="$T/proc" gs --dry-run --force
+t "service: the same drive mounted with metadata (real modes): 0644 refused, nothing sent" eval 'rc_is 1 && has "admin_token is readable by group or other \(mode 644\)" && lacks "^note: .*Windows drive" && [ "$(curls)" = $c ]'
+wslmounts ""; echo "Linux version 6.8.0-1021-generic (buildd@host) (gcc)" > "$T/proc/version"; c=$(curls); GA_PROC="$T/proc" gs --dry-run --force
+t "service: not WSL, whatever the mounts say: 0644 refused, nothing sent" eval 'rc_is 1 && has "admin_token is readable by group or other \(mode 644\)" && [ "$(curls)" = $c ]'
+# a linked admin_token is judged by the file it names, which is what the refusal's chmod changes
+mv "$T/vendor/admin_token" "$T/token.real"; ln -s "$T/token.real" "$T/vendor/admin_token"; c=$(curls); gs --dry-run --force
+t "service: admin_token a link to a 0644 file: refused with the file's mode" eval 'rc_is 1 && has "admin_token is readable by group or other \(mode 644\)" && [ "$(curls)" = $c ]'
+chmod 600 "$T/token.real"; c=$(curls); gs --dry-run --force
+t "service: admin_token a link to a 0600 file: accepted, both lists fetched" eval 'lacks "readable by group or other" && has "^grid access: 2 ids from the access service" && [ "$(curls)" = $((c + 2)) ]'
+rm -f "$T/vendor/admin_token"; mv "$T/token.real" "$T/vendor/admin_token"; chmod 600 "$T/vendor/admin_token"
+gs
+t "service: applied as from any source; the unknown ids recorded, the pair of the known reader only" eval 'rc_is 0 && lacks FAILED && has "^  added   ab1234$" && has "^  removed zq0003 " && has "^  added   cd5678 \(--x, a reader\)" && [ "$(named)" = "ab1234 cd5678" ] && [ "$(state_ids)" = ab1234 ] && grep -qx "# unknown zz9999 $TODAY" "$STATE" && grep -qx "# read cd5678 shared/data" "$STATE" && ! grep -q "^# read \(rd5678\|zq0006\)" "$STATE"'
+t "service: the readers' line and the list, as from any source" eval 'has "^readers on $ROOT: cd5678 \(shared/data\)$" && last_line_is_list && has "^grid access list on $ROOT: ab1234$"'
+n=$(calls); gs
+t "service: unchanged since: fetched again, not connected" eval 'rc_is 0 && has "not connecting" && [ "$(calls)" = $n ]'
+gs --quiet
+t "service: --quiet says nothing when unchanged" eval 'rc_is 0 && [ -z "$OUT" ] && [ "$(calls)" = $n ]'
+BEETHOVEN_SERVICE_URL=https://127.0.0.1:1 gs --service "$SVC/" --dry-run --force
+t "service: --service (a trailing slash allowed) comes before \$BEETHOVEN_SERVICE_URL" eval 'rc_is 0 && has "from the access service \(127.0.0.1:$PORT\)" && [ "$(calls)" = $((n + 1)) ]'
+gs --roster-file "$T/roster" --dry-run --force
+t "service: a file for one list, the service for the other" eval 'has "^grid access: 1 ids from the file $T/roster and 3 readers from the access service \(127.0.0.1:$PORT\) ->"'
+echo "-- the service's refusals: nothing changes"
+cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
+printf '%s\n' not-the-token > "$T/vendor/admin_token"
+c=$(curls); gs --force
+t "service: a token the service does not know (401): refused naming the fix, one request, no connection, nothing changed" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) did not accept the token for the approved list \(HTTP 401\): check admin_token in the vendor folder \($T/vendor\); nothing changed$" && [ "$(curls)" = $((c + 1)) ] && unchanged $n'
+printf '%s\r\n' "$TOKEN" > "$T/vendor/admin_token"
+mode 403; gs --force
+t "service: 403: refused as the token not accepted" eval 'rc_is 1 && has "did not accept the token for the approved list \(HTTP 403\)" && unchanged $n'
+mode 404; c=$(curls); gs --force
+t "service: a service deployed before the routes (404): refused, says to deploy, no second try" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) does not give the approved list yet \(HTTP 404\): deploy the service; nothing changed$" && [ "$(curls)" = $((c + 1)) ] && unchanged $n'
+mode html; gs --force
+t "service: a page in front (200 text/html): refused as not text" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) answered the approved list as text/html; charset=utf-8, not as text: a sign-in page or another service stands in front of it; nothing changed$" && unchanged $n'
+mode 500; c=$(curls); gs --force
+t "service: an error (HTTP 500) with a list-shaped body: refused, the body not taken, no second try" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) answered HTTP 500 for the approved list; nothing changed$" && [ "$(curls)" = $((c + 1)) ] && unchanged $n'
+mode upper; gs --dry-run --force
+t "service: 200 Text/Plain in capitals is plain text (a media type has no case)" eval 'lacks "not as text" && has "^grid access: 2 ids from the access service"'
+n=$(calls)   # that dry run asked the grid side
+mode ok
+c=$(curls); gs --force --service https://127.0.0.1:1
+t "service: a closed port: refused naming the host, after two more tries" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:1\) could not be reached for the approved list \(curl: \(7\) .*127.0.0.1.*\); nothing changed$" && [ "$(curls)" = $((c + 3)) ] && unchanged $n'
+mode empty; gs
+t "service: an empty approved list (the empty-roster vector): refused without --force, naming the source" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) gave no AccessID; applying that would shut every student out of $ROOT" && unchanged $n'
+gs --force
+t "service: an empty approved list with --force: applied, (none); the reader stays" eval 'rc_is 0 && [ "$(named)" = cd5678 ] && has "^grid access list on $ROOT: \(none\)$" && [ -z "$(state_ids)" ]'
+mode ok; gs
+t "service: back to the vector's list" eval 'rc_is 0 && has "^  added   ab1234$" && [ "$(state_ids)" = ab1234 ]'
+n=$(calls); c=$(curls)
+for bad in "http://127.0.0.1:$PORT" "$SVC/admin" "$SVC/admin/roster.txt" "https://127.0.0.1:$PORT?x" "https://a b" "beethoven-access.openspineconsortium.workers.dev"; do
+  gs --service "$bad" --force
+  t "service: a bad address ($bad): refused, nothing sent" eval 'rc_is 1 && has "must be https:// and a host name of plain characters, with nothing after it" && [ "$(curls)" = $c ] && [ "$(calls)" = $n ]'
+done
+echo "-- the token leaves its file only for the header file"
+t "service: curl is handed the header as a file (-H @...) in the run's own folder, never the token" eval 'grep -q -- " -H @$T/tmp/grid_access\.[A-Za-z0-9]*/header " "$SHIM_CURL_CALLS" && ! grep -F -- "$TOKEN" "$SHIM_CURL_CALLS" >/dev/null && ! grep -F -- not-the-token "$SHIM_CURL_CALLS" >/dev/null'
+t "service: the header file was 0600 at every request" eval '[ "$(grep -c "^header-file-mode " "$SHIM_CURL_CALLS")" -gt 10 ] && ! grep "^header-file-mode " "$SHIM_CURL_CALLS" | grep -v "^header-file-mode 600$" >/dev/null'
+t "service: the run's folder is gone after every run" eval '[ -z "$(ls -A "$T/tmp")" ]'
+t "service: the token is in no output, nor in the log or the state" eval '! grep -F -- "$TOKEN" "$SVC_OUT" "$LOG" "$STATE" >/dev/null && ! grep -F -- not-the-token "$SVC_OUT" "$LOG" "$STATE" >/dev/null'
+t "service: the log names the source and the refusals, in words" eval 'grep -q "refused: the access service (127.0.0.1:$PORT) did not accept the token" "$LOG" && grep -q "refused: the access service (127.0.0.1:1) could not be reached" "$LOG"'
+export BEETHOVEN_SERVICE_URL=https://127.0.0.1:1 BEETHOVEN_READERS_CMD=true; unset CURL_CA_BUNDLE TMPDIR
 
 echo "== the log"
 t "one log line per run ($runs runs)" eval '[ "$(wc -l < "$LOG" | tr -d " ")" = "$runs" ]'

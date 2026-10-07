@@ -15,8 +15,13 @@ private and may change in any pull request.
 | `testbed` | program | 1 | `testbed/fakebin/`, the fake scheduler this repository's own tests use, for a client's test that runs the real framework behind it | beethoven-desktop, beethoven-extension |
 | `framework` | program | 1 | the lab's shared copy as `tools/deploy_shared.sh` publishes it, run as a black box in a client's opt-in test; its interface is `contract` | beethoven-desktop, beethoven-extension |
 
-It takes one thing: beethoven-sites' `modules` version 1, pinned in `framework/sites/` by
-`framework/sites/pull.sh` with `framework/sites/ORIGIN`.
+It takes two things: beethoven-sites' `modules` version 1, pinned in `framework/sites/` by
+`framework/sites/pull.sh` with `framework/sites/ORIGIN`; and beethoven-access's `http-api` version 1
+(the access service's routes, the grammar of its two plain-text lists and the answers the real Worker
+gave), pinned in `interface/access/` by `interface/access/pull.sh` with `interface/access/ORIGIN`.
+`tools/grid_access.sh` reads the service's `GET /admin/roster.txt` and `GET /admin/readers.txt` and
+codes to that contract; `framework/tests/test_access_contract.py` checks the tool against the copy,
+and is skipped, naming the pull, until the copy is there.
 
 ## How a client takes an export
 
@@ -49,6 +54,9 @@ the `testbed`.
   the sign-in verdict the code applies; the module schema is what `profile.py` prints.
 - `framework/tests/test_boundary.py`: no tracked file reaches another repository's checkout (with a
   short list of known exceptions, each with its reason, that fails when an entry goes stale), and each
-  import equals its `ORIGIN`.
+  import equals its `ORIGIN` (an import whose copy is not pulled yet is skipped with its pull command,
+  never passed).
+- `framework/tests/test_access_contract.py`: every line of the access service's roster and readers
+  vectors passes `tools/grid_access.sh`'s own checks, and the service's line patterns are the tool's.
 
 Both run in `framework/tests/run.sh`, so in CI on ubuntu and in the CentOS 7 container, and on the grid.

@@ -16,11 +16,11 @@ this pass's riskiest parts, cut small.
 
 ## Before you start (once)
 
-- Your AccessID is approved for Beethoven (`node tools/intake/admin.mjs list` in the repository of
-  Beethoven for VS Code, Desktop folder `ashley`, shows it).
+- Your AccessID is approved for Beethoven (the admin page, or `node admin.mjs list` in the access
+  service's repository, `OpenSpineConsortium/beethoven-access`, shows it).
 - One approved account, one installation. The unpacked build is an installation: clear your seat
-  first (`node tools/intake/admin.mjs reset-seat <your AccessID>`), and again after the test, before
-  you install from the private listing.
+  first (`node admin.mjs reset-seat <your AccessID>` there), and again after the test, before you
+  install from the private listing.
 - Every folder above the lab's shared copy is owner-only or sticky, framework 11 is deployed to the
   copy, and `hpcworker browser-key check` there answers `HPCW-KEY check ok` (`docs/guides/LAB_LEAD.md`,
   section 2). C&IT has answered the note in `LAB_LEAD.md`, section 3.

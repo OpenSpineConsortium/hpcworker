@@ -15,6 +15,22 @@ file and the workspace guide are filled, by awk and bash (`lib/profile.awk`, `li
 command on the extension's path starts python3 at all, the first connect included (see "The login
 node"). Everything Beethoven 11.0.0 and 10.0.0 use still works: see "Version 11 and what it keeps".
 
+**Framework 18: what the shared copy gained since 17, and installs that are part of CI.** No line a
+client reads changed; the number moves because the published tree did (`tools/version_check.sh`, a
+check on every pull request, fails a change to `bin`, `lib`, `jobs` or `profiles` that leaves
+`VERSION` alone, so the grid's `hpcworker version` always tells one tree from another). In it:
+`hpcworker queue report [--days N] [--limits]`, a maintainer's verb that reads how long this
+account's jobs waited per partition and QoS from one `sacct` (and one `sinfo` with `--limits`),
+through the adapters' new `adapter_history` and `adapter_partitions` calls, in POSIX awk; the site
+profiles composed from two modules each, the university's cluster and the lab's deployment on it
+(`lib/profile.py compose-all`, from the pinned copy `framework/sites/` of beethoven-sites; the
+composed `profiles/wayne.json` did not change a byte), with `module-schema` publishing what a module
+may carry and the credential pattern refusing a module's strings as it refuses a profile's; and the
+vectors fixed to hold on any node. From this version the lab's shared copy is installed by the grid
+itself after a change lands on `main` and GitHub's checks and the grid suite pass (`tools/grid_ci.sh
+--watch`, started once by a person; `docs/ARCHITECTURE.md`), with `deploy_shared.sh` still the way by
+hand. `VERSION` is 18.
+
 **Framework 17: a Claude subscription, and no other way to sign in.** greg's rule of 2026-10-04: no
 API key anywhere. Claude Code's sign-in offers the Claude subscription, the Anthropic Console (billed by
 use) and third-party platforms (Bedrock, Foundry, Vertex); framework 16's sitting pressed Enter on

@@ -42,7 +42,7 @@ extension 5.0.0: the lab's shared copy of the framework (2.1).
 | Framework (`framework/`, `hpcworker`) | Shell plus Python kept once per site in the lab's shared directory, or copied into the student's home where there is none (2.1): site profile, scheduler/runtime/egress adapters, job template, worker entrypoint, probe job, the sign-in sitting | `grid/worker.sbatch.tpl` and `grid/bootstrap.sbatch` (the sbatch wrapper, the Apptainer sandbox recipe on a Node 22 base, node-local temp and cache with a cleanup trap, `/dev/shm` IPC, the Slurm executable wrappers inside the container, `.part`-then-rename file writes) | Site profile schema; adapter modules (Slurm first, PBS Pro and LSF next); egress probe; Remote Control launcher in `tmux`; per-job token; `status.json` and `connection.json` writers; the `XDG_RUNTIME_DIR` fix; the plain sign-in sitting and its line contract (4.1) |
 | Worker image | A SIF built once from a Debian 12 or Ubuntu 22.04 base with the native installer pinned to a version; `DISABLE_AUTOUPDATER=1`; Claude Code's config directory (the profile's `claude_config_dir`; `~/.claude` by default, `$HOME/.beethoven/claude` on Wayne State, `$HOME/.ashley/claude` until 2026-09-30 and a link to it since) bind-mounted from persistent storage, never baked in | The sandbox recipe | SIF form for parallel-filesystem sites; `--fakeroot` rung detection |
 | Extension (`extension/`, `ood-worker`) | WXT plus TypeScript, `browser.*` with Promises, `minimum_chrome_version` 148; one codebase for Chrome, Edge, Firefox and Safari | The Ed25519 token verifier (`grid/license.js` `open()`, `ASHLEYREV1` tokens and, from 8.0.0, `BEETHOVENREV1` ones, public keys `k1` and `trial`), used for the signed kill-list only since 4.0.0 (Bridge has no licence keys); the clickwrap text and acceptance record (`core/terms.ts`, `vscode/termsPanel.ts`); the diagnostics node model (`core/diagnostics.ts`: `id`, `title`, `dependsOn`, `assumption`, `check`, `repair`, `manualFix`, `futureRisk`) | Portal-origin content script; Shell WebSocket driver (one line, and the held-open sitting); Files and Active Jobs clients; the strip, the step machine behind the icon (6.1); side panel (Chrome/Edge), `sidebar_action` (Firefox), a panel tab (Safari); the options page; on-device audit log; kill-list verifier |
-| Access service | The vendor's access service (the Cloudflare Worker behind the request page, deployed from the sibling repository of Beethoven for VS Code (`OpenSpineConsortium/beethoven-vscode`, Desktop folder `ashley`) under two names with the same code, stores and secrets: `beethoven-access.openspineconsortium.workers.dev`, which 7.0.0 uses, and the old `ashley-service.openspineconsortium.workers.dev` for Ashley for VS Code 3.0.0 and builds 4.0.0 to 6.0.0) answers yes or no for one account name (`POST` to the `access_check` address named in `https://openspineconsortium.com/beethoven/services.json`, body `{v, access_id, portal, product, version, install_id}`, where `product` stays `bridge` and, from 8.0.0, an approved account is bound to the first `install_id` that asks), from the same approved list the admin console manages for Beethoven for VS Code; plus a signed JSON kill-list of withdrawn versions on the website, served over HTTPS | The approved list, the admin console and the request page, merchant of record | The `access_check` route and its records; the extension's cached answer (24 h for yes, 7 days when unreachable, 10 min for no); kill-list signing key under hardware-key custody; daily fetch |
+| Access service | The vendor's access service (the Cloudflare Worker behind the request page, deployed from its own repository, `OpenSpineConsortium/beethoven-access` (since 2026-10-07; before that from the repository of Beethoven for VS Code), under two names with the same code, stores and secrets: `beethoven-access.openspineconsortium.workers.dev`, which 7.0.0 uses, and the old `ashley-service.openspineconsortium.workers.dev` for Ashley for VS Code 3.0.0 and builds 4.0.0 to 6.0.0) answers yes or no for one account name (`POST` to the `access_check` address named in `https://openspineconsortium.com/beethoven/services.json`, body `{v, access_id, portal, product, version, install_id}`, where `product` stays `bridge` and, from 8.0.0, an approved account is bound to the first `install_id` that asks), from the same approved list the admin console manages for Beethoven for VS Code; plus a signed JSON kill-list of withdrawn versions on the website, served over HTTPS | The approved list, the admin console and the request page, merchant of record | The `access_check` route and its records; the extension's cached answer (24 h for yes, 7 days when unreachable, 10 min for no); kill-list signing key under hardware-key custody; daily fetch |
 | Partner-site package (optional) | An Open OnDemand Interactive App (`form.yml`, `submit.yml.erb`, `template/script.sh.erb`) that launches the same job template, for campuses that will install it | The job template | The `form.yml` and `view.html.erb` |
 
 Two things are deliberately absent (report, "Components and what each reuses"): any code on
@@ -188,6 +188,44 @@ script's own advice is to publish changed files as the next integer version). It
 to `deploy.log` beside the versions, prints what changed against the previous `current`, the tree, the
 link and the ACLs, and runs `hpcworker version` through `current`.
 
+**Publishing from CI** (greg, 2026-10-07: installing a change to the grid's copy is part of CI).
+GitHub's runners cannot reach the grid and no token may enter the repository, a job file or an argv,
+so the install is pulled from the grid's side, under the account's own `gh` sign-in, by the same
+lane that runs the grid suite (`tools/grid_ci.sh`). A person starts its watcher once in the portal's
+shell: `bash tools/grid_ci.sh --watch [--every 10] [--container] [--site S]`, which on the login node
+is file work, one `squeue` (one watcher per account, by the job name `hpcw_ci_watch`) and one
+`sbatch`. Every `--every` minutes a short job (`tools/grid_ci_watch.sbatch`: ten minutes of wall
+time, one core, node-local temp) first queues its one successor (`--begin`, `--dependency=singleton`)
+and then moves main's head on by at most one job, never waiting on one: GitHub's own check runs on
+the commit all passed; then the grid suite (and with `--container` the container check) as jobs, their
+verdicts posted as before; then `tools/grid_deploy.sbatch`, which runs `deploy_shared.sh --here` from
+the commit's own worktree on a compute node (never `--replace`, its temporary files under
+`/tmp/$USER` on that node, refused outright where `getfacl` or `setfacl` is missing, because
+deploy_shared would otherwise publish and leave the ACL entries unset); and the status
+`grid/deploy`, in deploy_shared's own words ("installed as the lab's shared copy, version N";
+a version already published with other files: "raise framework/VERSION"). A commit main has moved
+past keeps its verdicts and is never installed, and installs run one at a time (`<clone>/deploy.lock`,
+waited on for ten minutes inside a twenty-minute job). An install already in the queue checks again
+when it starts, because a queue can hold it for hours and a person's `--deploy` and the watcher can
+each have one waiting: it refuses, posted as `grid/deploy` error, when its commit is not main's newest
+head as either lane last fetched it (every fetch of main writes `<clone>/main-head` under the clone's
+lock), or when deploy_shared's own dry run shows `current` already naming a newer version.
+deploy_shared moves `current` anywhere from version 11 up, so this is what keeps the shared copy from
+going back. The head it compares with is as new as the last fetch: a commit merged after that may
+still be installed, and the newer one follows it at the next tick. Each submission is
+written down before and after its `sbatch` and recovered by one `sacct` by its job name (unique per
+commit), so a tick killed and run again never submits a second suite or install for a commit. The
+watcher runs from its own copy of its scripts in `<ci dir>/watch/bin`, replaced (by a rename) only
+from a commit it has just installed; `--unwatch` writes `watch/STOP`, which each tick reads first,
+and cancels the queued tick. The install is the publish above, with its checks and its refusals; it
+works only for the account that owns the shared copy's folder (deploy_shared's `chmod` of `ROOT`
+fails for any other), and so far that is the maintainer's. A pull request that changes a published
+file without raising `framework/VERSION` (and the `VERSION=` line with it) fails GitHub's own check
+(`tools/version_check.sh`, which reads deploy_shared's file list from deploy_shared itself), so the
+grid's install is not the first to say so. Whether compute nodes reach github.com, have `getfacl`
+and `setfacl` outside a container, and run the `--begin`/`singleton` chain as described is not yet
+measured (`OPEN_QUESTIONS.md`).
+
 **A running worker and a new version.** A rendered job names the numbered directory it started from,
 not `current`: the command follows the `current` link one level and no further, so
 `/rs/rs_grp_oschome` stays spelled as it is and the volume's physical path never reaches a job file or
@@ -247,10 +285,14 @@ change (two members on 2026-09-29, `OPEN_QUESTIONS.md`, "The lab's shared copy o
 students are not in it, and it is not the list. **The approved list is the root's named-user ACL
 entries**, `user:<AccessID>:rwx` (rwx, because each student makes their own `shared_state_dir` folder
 there), which `tools/grid_access.sh` keeps equal to the accounts the access service approved with the
-extension grant (`admin.mjs roster`: not the store reviewers' mock account, and not an approval for the
-lab only, which by design never opens the grid's folders), run every fifteen minutes from the lab
-lead's PC by a Windows Scheduled Task (`tools/grid_access_task.ps1`, which is installed only after one
-run the lab lead watched). It connects to the grid only when the list has changed (an approved
+extension grant (the service's `GET /admin/roster.txt`, which the tool reads itself with the admin
+token from the vendor folder's `admin_token`, carried in a header file curl reads and never on a
+command line; the service is in `OpenSpineConsortium/beethoven-access`, and its published contract,
+`interface/contract/`, is what the tool codes to: not the store reviewers' mock account, and not an
+approval for the lab only, which by design never opens the grid's folders; only an answer of 200
+plain text counts, and a 401, 403, 404, a page in front or no answer refuses with nothing changed),
+run every fifteen minutes from the lab lead's PC by a Windows Scheduled Task
+(`tools/grid_access_task.ps1`, which is installed only after one run the lab lead watched). It connects to the grid only when the list has changed (an approved
 AccessID the grid does not know yet is recorded with the day and tried again once a day), refuses a
 root that has lost `other::---` or its sticky bit, reports every entry of the root that sits in
 another student's place (named like an AccessID but owned by another account, or a link) or belongs
@@ -264,10 +306,15 @@ Below the gate, `shared/` and everything under `shared/beethoven` is readable by
 it), and the published tree gives the group and others read and execute and no write, so a student
 can run the lab's code and cannot change it; `shared/access` and the lab lead's own folder stay
 closed to others by their own modes. Beside the list, `tools/grid_access.sh` keeps the **readers**
-(`admin.mjs readers`, the access service's read-only approvals, one AccessID and one folder under the
-root at a time): `--x` on the root, and under each approved folder a named entry equal to the read
-and enter the group `oschome` has on each entry there, never write and never a default entry, swept
-when the reader list changes and once a day (`docs/guides/LAB_LEAD.md`, section 9). The directory above the copy, `shared/beethoven`, stays group-writable, so
+(the access service's read-only approvals, its `GET /admin/readers.txt`: `<AccessID> <folder>`
+lines, a folder under the root or `.` for the whole volume): `--x` on the root, and under each approved folder a named entry equal to
+the read and enter the group `oschome` has on each entry there, never write and never a default
+entry, swept when the reader list changes and once a day. A reader of `.` gets the group's read on
+the root itself (`r-x` on `drwxrws--T`; an account on the list keeps `rwx`) and the sweep is the
+whole volume, one `getfacl -R` walk for each such reader; other students' own folders, and anything
+inside them, are counted and left as they are. A taking back that did not finish (over the cap, or a
+`setfacl` that failed) is kept in the state as `# unread <id> <folder>` and tried again at the next
+day's sweep, or at once with `--force` (`docs/guides/LAB_LEAD.md`, section 9). The directory above the copy, `shared/beethoven`, stays group-writable, so
 a member of the group could still rename `hpcworker/` itself (`OPEN_QUESTIONS.md`).
 
 **Where workflow-engine templates would go.** Not built now. A site profile already holds what a

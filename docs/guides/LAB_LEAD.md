@@ -38,9 +38,10 @@ Publish framework 14 with the two commands of section 2 (`--dry-run` first), as 
 - **No python3 on the login node for anything Beethoven types.** Framework 11 reads the site profile
   and fills the job file and the workspace guide with awk and bash (section 6).
 - **An approval for the extension also opens the lab's folders on the grid.** The AccessIDs approved
-  with the extension grant (`admin.mjs approve`, or `grant <id> extension`) are the list of accounts
-  that may enter the lab's volume, kept on the grid by `tools/grid_access.sh`, every fifteen minutes
-  from your PC (section 9). An approval for the lab only (`approve-lab`) does not put anyone on it, and
+  with the extension grant (the admin page, or `admin.mjs approve` or `grant <id> extension` in the
+  service's repository, `OpenSpineConsortium/beethoven-access`) are the list of accounts that may
+  enter the lab's volume, kept on the grid by `tools/grid_access.sh`, which reads it from the service
+  itself, every fifteen minutes from your PC (section 9). An approval for the lab only (`approve-lab`) does not put anyone on it, and
   neither does the store reviewers' mock account. Until a newly approved student is on it, their setup
   ends in `Permission denied`. Otherwise approvals are as before: one approved account, one installation;
   the helper and the browser's key belong to that installation and never talk to the access service.
@@ -281,11 +282,12 @@ their runs live (rwx, because they make it themselves). That set of entries *is*
 is. The group `oschome` is not the list: it belongs to C&IT, only they add members, it holds you and
 ab5188, and students are not in it.
 
-**Who is on it.** Exactly the accounts the access service has approved with the extension grant
-(`admin.mjs approve <id>`, or `admin.mjs grant <id> extension`): `admin.mjs roster` prints those and
-nothing else. Not the store reviewers' mock account, and not an account approved for the lab only
-(`admin.mjs approve-lab <id>`, or `grant <id> lab`): a lab-only approval never opens the grid's
-folders. That is meant: what students reach on the grid is the extension's worker, its image and Claude
+**Who is on it.** Exactly the accounts the access service has approved with the extension grant (on
+the admin page, or `node admin.mjs approve <id>` or `grant <id> extension` in the service's own
+repository, `OpenSpineConsortium/beethoven-access`): the service gives those and nothing else as its
+approved list (`GET /admin/roster.txt`; `admin.mjs roster` there prints the same). Not the store
+reviewers' mock account, and not an account approved for the lab only (`approve-lab <id>`, or
+`grant <id> lab`): a lab-only approval never opens the grid's folders. That is meant: what students reach on the grid is the extension's worker, its image and Claude
 Code. To let a lab-only student in, grant them the extension too.
 
 Below the folder, everything students use is readable by any account that got in: `shared/`,
@@ -297,16 +299,21 @@ for one of them (below, "Readers") gets the group's read there by a named entry,
 publishes each new version that way, open to others for reading, never for writing, and never touches
 the root's ACL.
 
-**The tool.** `tools/grid_access.sh` keeps the list equal to those accounts. It takes them from a
-command you name, `admin.mjs roster` in the access service's repository, which prints them one per
-line, and the readers (below) from `admin.mjs readers`; it looks for nothing beside its own checkout
-and runs no other repository's code unless you name it (`--roster-file` and `--readers-file` take a
-file instead). It runs in WSL, and both it and `admin.mjs` find the vendor folder through
-`BEETHOVEN_VENDOR_DIR` (else `~/.beethoven-vendor`, which in WSL is not your Windows folder). The easy
-way, from PowerShell in the checkout, sets all of that from the one path you give:
+**The tool.** `tools/grid_access.sh` keeps the list equal to those accounts. It asks the access
+service for them itself: `GET /admin/roster.txt` for the approved list and `GET /admin/readers.txt`
+for the readers (below), two plain-text answers from
+`https://beethoven-access.openspineconsortium.workers.dev` (another address only with `--service URL`
+or `BEETHOVEN_SERVICE_URL`; most people never set it), with the admin token. The token is the file
+`admin_token` in the vendor folder (`BEETHOVEN_VENDOR_DIR`, else `~/.beethoven-vendor`, which in WSL
+is not your Windows folder unless you name it): the maintainer's, one line, and the file must be
+yours alone (`chmod 600`; the tool refuses a file that group or other can read and says so). The
+token never appears on a command line, in the log or in a message: curl reads it from a header file
+of the run's own, mode `0600`, in a temporary folder the run removes. The tool looks for nothing
+beside its own checkout and runs no other repository's code; your own list stands in for the
+service's when you name one (`--roster-file FILE` and `--readers-file FILE`, or a command in
+`BEETHOVEN_ROSTER_CMD` and `BEETHOVEN_READERS_CMD`). The easy way, from PowerShell in the checkout:
 
 ```
-$env:BEETHOVEN_ADMIN_TOOL = 'C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs'   # or -AdminTool <path> on each line
 powershell -NoProfile -File tools\grid_access_task.ps1 -Run -ToolArgs '--dry-run --force'   # the grid's entries now, and what it would add and remove; changes nothing
 powershell -NoProfile -File tools\grid_access_task.ps1 -Run                                 # adds and removes, then checks what students need
 ```
@@ -315,13 +322,41 @@ or, in a WSL shell in the checkout:
 
 ```
 export BEETHOVEN_VENDOR_DIR=/mnt/c/Users/grego/.beethoven-vendor
-export BEETHOVEN_ROSTER_CMD='node /mnt/c/Users/grego/OneDrive/Desktop/ashley/tools/intake/admin.mjs roster'
-export BEETHOVEN_READERS_CMD='node /mnt/c/Users/grego/OneDrive/Desktop/ashley/tools/intake/admin.mjs readers'
 tools/grid_access.sh --dry-run --force
 tools/grid_access.sh
 ```
 
-With no list named, the tool refuses and changes nothing.
+**What the service gives.** To see the two lists as the service gives them, open the admin page
+(`https://openspineconsortium.com/beethoven/admin.html`), or run `node admin.mjs roster` and
+`node admin.mjs readers` in the service's own repository, `OpenSpineConsortium/beethoven-access`,
+which print the two answers byte for byte and read the same `admin_token`. Never type the token into
+a command of your own.
+
+**When the tool refuses.** A refusal changes nothing on the grid, writes no state and leaves one line
+in the log (`state\grid_access.log`); each says what to do:
+
+- `no admin_token in the vendor folder (...)`: put the maintainer's token in that file, one line.
+- `admin_token is readable by group or other (mode 644); make it yours alone first: chmod 600 ...`:
+  in WSL, `chmod 600` the file (a link is judged by the file it names). Your vendor folder is on a
+  Windows drive (`/mnt/c`): when WSL mounts it without `metadata`, which is WSL's default, every file
+  there reads as 0777 and `chmod` does nothing, so the tool does not check the mode there and says so
+  in a note instead (`admin_token is on a Windows drive WSL shows without file modes...`); the Windows
+  folder's own permissions keep the file yours (a folder under `C:\Users\<you>` is your account's
+  alone unless you shared it). With `metadata` (`[automount]` `options = "metadata"` in
+  `/etc/wsl.conf`, then `wsl --shutdown`) the modes are real and the tool checks them as anywhere
+  else. Which of the two your PC has is not yet measured.
+- `did not accept the token for the approved list (HTTP 401)` (or `403`): the token in `admin_token`
+  is not the one the deployed service knows; check the file against the vendor folder's copy the
+  service was deployed with.
+- `does not give the approved list yet (HTTP 404): deploy the service`: the service deployed is older
+  than the two routes (they landed 2026-10-07); deploy it, under both names, before the task runs.
+- `answered the approved list as text/html, not as text: a sign-in page or another service stands in
+  front of it`: something answers in the service's place (a sign-in page, a captive network); check
+  the address and the network from WSL.
+- `could not be reached for the approved list (curl: ...)`: no way to the service from WSL just now;
+  the message names the host. The grid was not asked.
+- `gave no AccessID; applying that would shut every student out`: the service's approved list is
+  empty; `--force` applies it when that is meant.
 
 `--dry-run --force` is the way to see the grid's entries as they are: a dry run alone does not connect
 when the list has not changed since the last apply, and `--force` makes it connect. It prints `grid
@@ -345,7 +380,8 @@ anything under `shared/beethoven`. It ends with the list itself: `grid access li
 
 It also keeps the readers (below): each gets `user:<AccessID>:--x` on the folder, beside the list's
 `rwx` entries (a reader who is also on the list keeps `rwx`), and the group's read on the folders
-approved for them.
+approved for them. A reader of the whole volume (`.`, below) gets the group's read on the folder
+itself instead, `r-x`.
 
 Exit 0: done. Exit 1: refused or failed. Exit 2: the list is in place but a check failed; the check's
 line says the fix. For a closed `shared/beethoven`, the fix is `tools/grid_access.sh --open-tree`,
@@ -380,11 +416,14 @@ C&IT's to change. Instead, they ask on `https://openspineconsortium.com/beethove
 AccessID, name, the folders, what for); the request reaches the admin page's section **Lab storage,
 read only** and your mailbox, with one-use links, as an access request does. You approve it with the
 folders you choose (they may be fewer than asked for), deny it, add a reader directly, change a
-reader's folders, or take a reader off, on the admin page or with `admin.mjs storage-approve <id>
-<folder>...`, `storage-deny`, `storage-add`, `storage-remove` and `storage-list`. `admin.mjs readers`
-prints the approved pairs, one `<AccessID> <folder>` per line; that is what this tool applies. A folder
+reader's folders, or take a reader off, on the admin page or with `node admin.mjs storage-approve
+<id> <folder>...`, `storage-deny`, `storage-add`, `storage-remove` and `storage-list` in the
+service's repository (`OpenSpineConsortium/beethoven-access`). The service gives the approved pairs
+as `GET /admin/readers.txt`, one `<AccessID> <folder>` per line (`admin.mjs readers` there prints
+the same); that is what this tool applies. A folder
 is a path under `/rs/rs_grp_oschome`, like `go2432` or `shared/access`: plain characters, no part
-starting with a dot or a dash, so never `..`, never an absolute path and never a hidden folder.
+starting with a dot or a dash, so never `..`, never an absolute path and never a hidden folder; or
+exactly `.`, the whole volume (below, "The whole volume"), and never `./data`, `data/.` or `/`.
 
 What a reader gets under each folder is what the group gets, entry by entry, and nothing else: on each
 file and folder you own, a named entry equal to the group's read and enter there (the owning group's
@@ -396,12 +435,16 @@ is added. The folders on the way get `--x` (enter, not list) where the group may
 not, so a reader of `go2432/data` cannot list `go2432/`. The tool never sets a default entry: with one,
 a new file would ignore the umask of whoever writes it, and a job's token written `0600` would come out
 readable. A file added since is given its entry by the next sweep instead. The sweep reads every entry
-under the reader's folders (`getfacl -R`) and changes only what differs; it runs when the reader list
-changes, on the first run of each day while there is a reader, and with `--force` or `--check-tree`.
-It never touches an entry someone else owns (counted in its line), an entry the reader has with write
-(not the tool's; left as it is), a link, or a name holding a backslash. A folder that is missing,
+under the reader's folders (`getfacl -R`), changes only what differs and reads back each entry it
+changed; it runs when the reader list changes, on the first run of each day while there is a reader,
+and with `--force` or `--check-tree`. It never touches an entry someone else owns, nor anything inside
+a folder someone else owns, even a file of yours there (both counted in its line: that account could
+put a link in place of the file between the read and the change, and `setfacl` follows a link), an
+entry the reader has with write (not the tool's; left as it is), a link, or a name holding a
+backslash. A folder that is missing,
 reached through a link, owned by someone else, behind a folder the group may not enter, or holding more
-than 200,000 entries gets nothing and is a `FAILED` line of its own, for example
+than 200,000 entries gets nothing and is a `FAILED` line of its own (the cap decides what is changed,
+not what is read: the walk still reads the whole folder to count it), for example
 
 ```
   FAILED  reader hy9698: go2432/data holds 312000 entries, more than 200000; not swept
@@ -411,14 +454,75 @@ otherwise each reader's folder has a line `ok      reader hy9698: go2432 reads a
 (... entries, read back ...)`, and the run prints `readers on /rs/rs_grp_oschome: hy9698 (go2432,
 shared/access)` before the list. Taking a reader off, or one of their folders, removes every entry of
 theirs without write under that folder, and the `--x` on the way unless another folder of theirs needs
-it; a reader with no folder left loses the `--x` on the root.
+it; a reader with no folder left loses the `--x` on the root. When the taking back does not finish (the
+folder holds more than the cap, or `setfacl` fails part-way), the reader keeps those entries for now and
+the run says so with the way to do it by hand (the line names the folder by its own path, behind the
+link), for example
+
+```
+  FAILED  reader ab1234: go2432/data not taken back: it holds 312000 entries, more than 200000 (tried again on the first run of a later day, or now with --force; by hand, on the login node: find /rs/rs_grp_oschome/go2432/data -user go2432 ! -type l -exec setfacl -n -x u:ab1234 {} +)
+```
+
+The tool keeps that folder in its state file, on a line `# unread <AccessID> <folder>`, and passes it
+again at the first run of each later day (or at once with `--force`) until a run takes the entries back
+or finds none left; a run that does not connect says `not taken back yet` with the folders that wait.
+The command by hand also takes entries with write and entries in other students' folders that you own,
+which the tool leaves; the next run then finds nothing left and stops trying.
+
+**The whole volume: the folder `.`** (decided 2026-10-07). The folder `.` is `/rs/rs_grp_oschome`
+itself: its reader reads everything in the volume that the group `oschome` reads, entry by entry as
+above, and nothing more. The access service keeps it as `.` and gives the line `<AccessID> .`; it is
+that reader's only folder, since it covers every other (a named folder listed
+beside it has no sweep of its own). On the volume's folder itself the reader gets the group's read
+there, `r-x` on `drwxrws--T` (list and enter, never write), in place of `--x`; a reader who is also on
+the list keeps `rwx`. Below it, every file and folder you own gets the group's read: your own
+`go2432/` and what the group reads in it, `shared/access` (enter only, `--x`, and nothing on its `0600`
+token) and the rest; where others may read already, nothing is added. Other students' own folders and
+everything in them stay theirs: counted in the reader's line (`... N not go2432's, left as they are`),
+never changed, and never a reason to fail the run. The cap is the one above: the whole volume, the
+students' folders included, holds no more than 200,000 entries, or the reader is a line of its own
+with the count,
+
+```
+  FAILED  reader ab1234: all of /rs/rs_grp_oschome holds 312000 entries, more than 200000; not swept
+```
+
+and nothing below the folder is changed (its own `r-x` is still given); the walk still reads every
+entry to count them. Each sweep walks the whole volume with `getfacl -R` on warrior once for each reader
+of `.`, and once more for each `.` taken off in that run, which is file work like the rest of this tool:
+when the reader list changes, on the first run of each day while there is such a reader, and with
+`--force` or `--check-tree`. How many entries the volume holds and how long that walk takes on the grid
+are not yet measured; `-Run -ToolArgs '--dry-run --force'` walks it, prints the count in the reader's
+line (`... reads as the group reads it (N entries; ...)`, or the `FAILED` line above) and changes
+nothing. Time that run: the scheduled task (below) stops a run after ten minutes (whether that also
+ends the walk on warrior is not yet measured), and a run stopped before it ends records nothing, so
+each later run (every fifteen minutes) would start the whole walk again; approve `.` only after a timed dry run has ended well inside ten minutes. To see it before
+approving `.`, put the lines the service gives today (the admin page's readers, or `node admin.mjs
+readers` in its repository) and the line `<AccessID> .` in a file and name it for that one dry run:
+`-Run -ToolArgs '--dry-run --force --readers-file /mnt/c/Users/grego/readers.txt'` (a readers file
+takes the place of the service's answer for that run).
+Taking `.` off removes every entry of that reader's without write under the folder, but not the
+folder's own entry, which follows the reader list: `--x` while the reader still reads another folder,
+gone when they read none. A reader moved from `.` to named folders, or back, is right after one run
+when the taking back finishes; when it does not (the volume over the cap, or `setfacl` failing), the
+line `FAILED  reader ab1234: all of /rs/rs_grp_oschome not taken back: ...` gives the way by hand
+(`find /rs/rs_grp_oschome/ -mindepth 1 -user go2432 ! -type l -exec setfacl -n -x u:ab1234 {} +`,
+which leaves the folder's own entry to the tool) and the tool tries again as above until it is done.
+The run prints `.` in words: `readers on /rs/rs_grp_oschome: ab1234 (all of /rs/rs_grp_oschome)`.
+Approving `.` approves at once everything below that the group may read, `go2432/` included (next
+paragraph).
 
 Before approving a folder, look at what the group can read in it: the approval gives exactly that. A
 folder holding patients' data (`go2432/` may) is your decision under the study's approval, not this
 tool's. A reader also reaches, as every student on the list does, everything below the root that is
 open to others (`shared/beethoven`). Beethoven for VS Code's own lab access (its grid scripts' `access
-admin approve`) gives `--x` entries on `shared/access` of the same shape; taking a reader of
-`shared/access` off takes those away too.
+admin approve`) gives `--x` entries on `shared/access` of the same shape, and each applicant `r--` on
+their own status file there (`shared/access/status/<AccessID>.json`, `0600`), which it gives again at
+each decision. A sweep leaves a reader's own status file as it is (its line says so) rather than take
+that `r--` away at every sweep for VS Code to give back; taking a reader of `shared/access` or `.` off
+takes those entries away with the rest. VS Code's lab access also gives `r--` (`r-x` where the
+file runs) on every file under `shared/` but `shared/access`, including those the group may not read; a
+sweep of a folder holding such files takes those away, since a reader gets the group's read and no more.
 
 **A folder in another student's place.** The root is sticky, so no one can rename or remove a folder
 that is not theirs; but anyone on the list may make a new one, and a student could make
@@ -452,18 +556,26 @@ files were in that folder. Not tried on the grid.
 **Every fifteen minutes, by itself.** In PowerShell on your PC, no administrator rights:
 
 ```
-powershell -NoProfile -File tools\grid_access_task.ps1 -AdminTool C:\Users\grego\OneDrive\Desktop\ashley\tools\intake\admin.mjs -Install
+powershell -NoProfile -File tools\grid_access_task.ps1 -Install
 ```
 
 registers a Windows Scheduled Task, **Beethoven grid access**, that runs the tool with `--quiet` in
-WSL every fifteen minutes while you are signed in to Windows, in a hidden window. It refuses until
-`-Run` has applied the list once while you watched (until `state\grid_access.wayne.ids` exists), so the
-task never makes the first change unseen. `-Run` runs it once in front of you (`-Run -ToolArgs
-'--dry-run --force'` to look first), `-Remove` takes the task away, and the script with no option says
-what the task runs, whether the list has been applied once, and when the task last ran. A task
-registered before 2026-10-07 runs the tool without naming the list, which it now refuses on every run
-(the log says "no approved list named"): run `-Install` again with `-AdminTool`, which replaces it.
-The task never sweeps the whole tree; its first run of each day sweeps the readers' folders, while there is a reader.
+WSL every fifteen minutes while you are signed in to Windows, in a hidden window. The task's command
+is `BEETHOVEN_VENDOR_DIR='<your vendor folder, as WSL sees it>' exec bash '<grid_access.sh>' --quiet`
+and nothing more: the tool asks the service itself with the token from that folder (`-ServiceUrl`,
+or `$env:BEETHOVEN_SERVICE_URL`, adds `BEETHOVEN_SERVICE_URL='...'` for another address; most people
+never set it). It refuses until `-Run` has applied the list once while you watched (until
+`state\grid_access.wayne.ids` exists), so the task never makes the first change unseen. `-Run` runs
+it once in front of you (`-Run -ToolArgs '--dry-run --force'` to look first), `-Remove` takes the
+task away, and the script with no option says what the task runs, whether the list has been applied
+once, and when the task last ran. **A task registered before this change must be registered
+again:** until 2026-10-07 the task ran the access service's `admin.mjs` from another repository's
+checkout on your PC, and that file is no longer there (the service moved to its own repository that
+day), so such a task fails on every run. A task registered earlier still, before the lists were named
+at all, runs the tool with no list named, which now means the service, so it works as it is;
+registering it again does no harm. Run `-Run -ToolArgs '--dry-run --force'` once, then
+`-Install` again, which replaces the task. The task never sweeps the whole tree; its first run of
+each day sweeps the readers' folders, while there is a reader or a folder not yet taken back.
 While your PC is off or you are signed out, nothing runs: a student approved then waits until it is on
 again.
 
@@ -505,9 +617,13 @@ chown to accounts that do not exist), ssh replaced by a stand-in that runs the g
 The readers' grid side was also run once on 2026-10-07 with the real `getfacl` and `setfacl` (acl
 2.3.2, ext4, Ubuntu 24.04) on local accounts standing for a lab lead and two readers, and the kernel
 let each read exactly what the group reads (and nothing at `0600`, nothing under a `drwx--s---`
-folder); that was a cloud container, not CephFS and not the grid. On the grid, only the entry for
-hy9698 that you set by hand on 2026-10-02 has been seen to work, and no reader yet. Run `--dry-run
---force` first.
+folder); that was a cloud container, not CephFS and not the grid. A reader of the whole volume (`.`)
+was run only in the test's temporary folder, with the emulated `setfacl`. The access service as the
+tool's source was run only against a stand-in on `127.0.0.1` that answers the service's published
+vectors (`tools/tests/test_grid_access.sh`); the deployed service has not yet answered the tool,
+and whether your vendor folder under `/mnt/c` has real file modes is not yet measured (above, "When
+the tool refuses"; the tool runs either way). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
+been seen to work, and no reader yet. Run `--dry-run --force` first.
 
 ## 10. Not proven
 
