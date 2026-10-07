@@ -86,7 +86,7 @@ function Get-BashCommand {
   }
   $service = ''
   if ($ServiceUrl) {
-    if ($ServiceUrl -notmatch '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$') {
+    if ($ServiceUrl -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?\z') {   # -cnotmatch and \z: as bash's [[ =~ ]] reads it, case and all
       throw ("the access service's address must be https:// and a host name of plain characters, with nothing after it: $ServiceUrl " +
         "(leave -ServiceUrl and `$env:BEETHOVEN_SERVICE_URL unset for the deployed service)")
     }

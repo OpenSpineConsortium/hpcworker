@@ -17,7 +17,7 @@ Rewritten 2026-09-29 for 7.0.0, when the public name became Beethoven (the repos
 | license terms | `https://openspineconsortium.com/beethoven/terms.html` | `LICENSE.txt`, rendered |
 | support and notice address | `https://openspineconsortium.com/beethoven/support.html` | generated (the site repository's `tools/build_site.py`) |
 | request page (the panel's *Ask for access* button opens it with `?access_id=<account>`) | `https://openspineconsortium.com/beethoven/request.html` | generated (the site repository's `tools/build_site.py`); it posts to the `request` address in the services file beside it, with `"product":"bridge"` |
-| services file (the extension reads `access_check` and `request_page` from it once a day) | `https://openspineconsortium.com/beethoven/services.json` | written in the site by the access service's `deploy.sh` (`OpenSpineConsortium/beethoven-access`) when a service address changes; `docs/site/beethoven/services.json` here is the reference copy of what is published; every route on `https://beethoven-access.openspineconsortium.workers.dev` |
+| services file (the extension reads `access_check` and `request_page` from it once a day) | `https://openspineconsortium.com/beethoven/services.json` | the site repository's own file: when a service address changes, the access service's `deploy.sh` (`OpenSpineConsortium/beethoven-access`) prints the addresses and the site takes them in a reviewed commit of its own; nothing writes it automatically; `docs/site/beethoven/services.json` here is the reference copy of what is published; every route on `https://beethoven-access.openspineconsortium.workers.dev` |
 | kill-list (`KILLLIST_URL` in `extension/src/licensing/killlist.ts`); withdraws versions only | `https://openspineconsortium.com/beethoven/killlist.json` | signed by the license tool, see below; never written by the page build |
 | the old landing address | `https://openspineconsortium.com/ashley/bridge/` | a two-line page that sends the reader to the new landing page (kept as is) |
 
@@ -61,10 +61,10 @@ are in git history.
 What this repository still owns on the site:
 - the two texts (`LICENSE.txt`, `PRIVACY.md`): change them here, bump their `Version N` lines and
   `TERMS_VERSION`, then run the site generator and publish the site;
-- `docs/site/beethoven/services.json`, the reference copy of `/beethoven/services.json` (the access
-  service's `deploy.sh`, in `OpenSpineConsortium/beethoven-access`, writes the published file when a
-  service address changes, and
-  the generator checks it but never writes it; copy the published file here when it changes, as on
+- `docs/site/beethoven/services.json`, the reference copy of `/beethoven/services.json` (the published
+  file is the site repository's: when a service address changes, the access service's `deploy.sh`, in
+  `OpenSpineConsortium/beethoven-access`, prints the addresses and the site takes them in a reviewed
+  commit of its own; the generator checks it but never writes it; copy the published file here when it changes, as on
   2026-09-30 when it gained `report`);
 - the signed kill-list (below);
 - nothing else: the packages in `release/<version>/` are the maintainer's record and are not

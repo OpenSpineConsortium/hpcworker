@@ -337,11 +337,14 @@ in the log (`state\grid_access.log`); each says what to do:
 
 - `no admin_token in the vendor folder (...)`: put the maintainer's token in that file, one line.
 - `admin_token is readable by group or other (mode 644); make it yours alone first: chmod 600 ...`:
-  in WSL, `chmod 600` the file. On a Windows folder under `/mnt/c` that holds only when WSL mounts
-  the drive with `metadata` (`[automount]` `options = "metadata"` in `/etc/wsl.conf`, then `wsl
-  --shutdown`); without it every file there reads as open to everyone and the tool refuses on every
-  run. Not yet measured on your PC: if the refusal stays after the `chmod`, that is why, and the way
-  out is `metadata`, or a vendor folder inside WSL's own file system named by `BEETHOVEN_VENDOR_DIR`.
+  in WSL, `chmod 600` the file (a link is judged by the file it names). Your vendor folder is on a
+  Windows drive (`/mnt/c`): when WSL mounts it without `metadata`, which is WSL's default, every file
+  there reads as 0777 and `chmod` does nothing, so the tool does not check the mode there and says so
+  in a note instead (`admin_token is on a Windows drive WSL shows without file modes...`); the Windows
+  folder's own permissions keep the file yours (a folder under `C:\Users\<you>` is your account's
+  alone unless you shared it). With `metadata` (`[automount]` `options = "metadata"` in
+  `/etc/wsl.conf`, then `wsl --shutdown`) the modes are real and the tool checks them as anywhere
+  else. Which of the two your PC has is not yet measured.
 - `did not accept the token for the approved list (HTTP 401)` (or `403`): the token in `admin_token`
   is not the one the deployed service knows; check the file against the vendor folder's copy the
   service was deployed with.
@@ -568,8 +571,9 @@ task away, and the script with no option says what the task runs, whether the li
 once, and when the task last ran. **A task registered before this change must be registered
 again:** until 2026-10-07 the task ran the access service's `admin.mjs` from another repository's
 checkout on your PC, and that file is no longer there (the service moved to its own repository that
-day), so such a task fails on every run; a task registered earlier still, before the lists were
-named at all, refuses on every run too. Run `-Run -ToolArgs '--dry-run --force'` once, then
+day), so such a task fails on every run. A task registered earlier still, before the lists were named
+at all, runs the tool with no list named, which now means the service, so it works as it is;
+registering it again does no harm. Run `-Run -ToolArgs '--dry-run --force'` once, then
 `-Install` again, which replaces the task. The task never sweeps the whole tree; its first run of
 each day sweeps the readers' folders, while there is a reader or a folder not yet taken back.
 While your PC is off or you are signed out, nothing runs: a student approved then waits until it is on
@@ -617,8 +621,8 @@ folder); that was a cloud container, not CephFS and not the grid. A reader of th
 was run only in the test's temporary folder, with the emulated `setfacl`. The access service as the
 tool's source was run only against a stand-in on `127.0.0.1` that answers the service's published
 vectors (`tools/tests/test_grid_access.sh`); the deployed service has not yet answered the tool,
-and whether `chmod 600` holds on your vendor folder under `/mnt/c` is not yet measured (above, "When
-the tool refuses"). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
+and whether your vendor folder under `/mnt/c` has real file modes is not yet measured (above, "When
+the tool refuses"; the tool runs either way). On the grid, only the entry for hy9698 that you set by hand on 2026-10-02 has
 been seen to work, and no reader yet. Run `--dry-run --force` first.
 
 ## 10. Not proven

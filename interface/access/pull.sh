@@ -51,6 +51,9 @@ print("\n".join(e[0]["paths"]))' "$EXPORT" "$WANT") || { echo "FAILED: $REPO at 
 while IFS= read -r p; do
   [ -z "$p" ] || [[ "$p" == "$PREFIX"* ]] || { echo "FAILED: the export lists $p, which is not under $PREFIX; this copy takes only that folder" >&2; exit 1; }
 done <<< "$patterns"
+# a file the copy may hold: JSON within at most one folder, never one of the copy's own names (pull.sh,
+# ORIGIN, README.md), so nothing the source holds can replace this script or the record of the copy
+copyable() { [[ "${1#$PREFIX}" =~ ^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?\.json$ ]]; }
 listed() { # PATH -> 0 when one of the export's paths covers it ("dir/" a folder, "*" within one part)
   local p re
   while IFS= read -r p; do
@@ -62,7 +65,9 @@ listed() { # PATH -> 0 when one of the export's paths covers it ("dir/" a folder
 }
 
 paths=()
-while IFS= read -r p; do listed "$p" && paths+=("$p"); done \
+while IFS= read -r p; do listed "$p" || continue
+  copyable "$p" || { echo "not taken: $p (the copy holds JSON files at most one folder deep)"; continue; }
+  paths+=("$p"); done \
   < <(gh api "repos/$REPO/git/trees/$sha?recursive=1" --jq '.tree[] | select(.type == "blob") | .path')
 [ "${#paths[@]}" -gt 0 ] || { echo "FAILED: nothing in the export at $sha" >&2; exit 1; }
 origin=("repository $REPO" "commit $sha" "export $EXPORT $WANT")

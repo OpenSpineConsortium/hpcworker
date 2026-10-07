@@ -592,6 +592,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mode == "404": return self.answer(404, "application/json", '{"error":"no such route"}')
         if mode == "html": return self.answer(200, "text/html; charset=utf-8", "<html><body>Sign in</body></html>")
         if mode == "403": return self.answer(403, "application/json", '{"error":"origin not allowed"}')
+        if mode == "500": return self.answer(500, "text/plain; charset=utf-8", "zq0001\nzq0002\n")   # a list-shaped body that must not count
+        if mode == "upper" and self.path == "/admin/roster.txt": return self.answer(200, "Text/Plain; Charset=UTF-8", ROSTER)
         if mode == "401" or self.headers.get("Authorization") != "Bearer " + token:
             return self.answer(401, "application/json", '{"error":"admin token missing or wrong"}')
         if self.path == "/admin/roster.txt": return self.answer(200, "text/plain; charset=utf-8", "" if mode == "empty" else ROSTER)   # empty: vectors/admin-roster-txt-empty.json
@@ -645,6 +647,23 @@ printf '%s\r\n' "$TOKEN" > "$T/vendor/admin_token"   # with a CR, which must not
 gs --dry-run --force
 t "service, dry run: both lists from the stand-in (the token's CR dropped), the vectors' ids and pairs parsed, the grid side asked" eval 'has "^grid access: 2 ids from the access service \(127.0.0.1:$PORT\) and 3 readers from the access service \(127.0.0.1:$PORT\) -> wsu-grid:$ROOT, dry run$" && has "would add ab1234$" && has "^  skipped zz9999" && has "would add cd5678 \(--x, a reader\)" && has "^  skipped rd5678" && has "^  skipped zq0006" && has "^  would grant cd5678 shared/data" && [ "$(calls)" = $((n + 1)) ]'
 t "service, dry run: two requests, nothing changed, no state" eval '[ "$(curls)" = 2 ] && grep -q -- "$SVC/admin/roster.txt " "$SHIM_CURL_CALLS" && grep -q -- "$SVC/admin/readers.txt " "$SHIM_CURL_CALLS" && [ "$(named)" = "$before" ] && cmp -s "$STATE" "$T/state.before"'
+# the token's mode where WSL shows a Windows drive without file modes (every file 0777 there, chmod ignored):
+# the scheduled task's vendor folder is on C:. GA_PROC stands in for /proc
+chmod 644 "$T/vendor/admin_token"; mkdir -p "$T/proc"; VREAL=$(readlink -f "$T/vendor")
+echo "Linux version 5.15.153.1-microsoft-standard-WSL2 (root@buildhost) (gcc)" > "$T/proc/version"
+wslmounts() { printf '%s\n' "rootfs / ext4 rw 0 0" "C:\\134 $VREAL 9p rw,noatime,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000;${1}symlinkroot=/mnt/,mmap,access=client,trans=fd 0 0" > "$T/proc/mounts"; }
+wslmounts ""; c=$(curls); GA_PROC="$T/proc" gs --dry-run --force
+t "service: admin_token 0644 on a WSL Windows drive without file modes: its mode not checked, said so, both lists fetched" eval 'lacks "readable by group or other" && has "^note: $T/vendor/admin_token is on a Windows drive WSL shows without file modes, so its mode is not checked" && has "^grid access: 2 ids from the access service" && [ "$(curls)" = $((c + 2)) ]'
+wslmounts "metadata;"; c=$(curls); GA_PROC="$T/proc" gs --dry-run --force
+t "service: the same drive mounted with metadata (real modes): 0644 refused, nothing sent" eval 'rc_is 1 && has "admin_token is readable by group or other \(mode 644\)" && lacks "^note: .*Windows drive" && [ "$(curls)" = $c ]'
+wslmounts ""; echo "Linux version 6.8.0-1021-generic (buildd@host) (gcc)" > "$T/proc/version"; c=$(curls); GA_PROC="$T/proc" gs --dry-run --force
+t "service: not WSL, whatever the mounts say: 0644 refused, nothing sent" eval 'rc_is 1 && has "admin_token is readable by group or other \(mode 644\)" && [ "$(curls)" = $c ]'
+# a linked admin_token is judged by the file it names, which is what the refusal's chmod changes
+mv "$T/vendor/admin_token" "$T/token.real"; ln -s "$T/token.real" "$T/vendor/admin_token"; c=$(curls); gs --dry-run --force
+t "service: admin_token a link to a 0644 file: refused with the file's mode" eval 'rc_is 1 && has "admin_token is readable by group or other \(mode 644\)" && [ "$(curls)" = $c ]'
+chmod 600 "$T/token.real"; c=$(curls); gs --dry-run --force
+t "service: admin_token a link to a 0600 file: accepted, both lists fetched" eval 'lacks "readable by group or other" && has "^grid access: 2 ids from the access service" && [ "$(curls)" = $((c + 2)) ]'
+rm -f "$T/vendor/admin_token"; mv "$T/token.real" "$T/vendor/admin_token"; chmod 600 "$T/vendor/admin_token"
 gs
 t "service: applied as from any source; the unknown ids recorded, the pair of the known reader only" eval 'rc_is 0 && lacks FAILED && has "^  added   ab1234$" && has "^  removed zq0003 " && has "^  added   cd5678 \(--x, a reader\)" && [ "$(named)" = "ab1234 cd5678" ] && [ "$(state_ids)" = ab1234 ] && grep -qx "# unknown zz9999 $TODAY" "$STATE" && grep -qx "# read cd5678 shared/data" "$STATE" && ! grep -q "^# read \(rd5678\|zq0006\)" "$STATE"'
 t "service: the readers' line and the list, as from any source" eval 'has "^readers on $ROOT: cd5678 \(shared/data\)$" && last_line_is_list && has "^grid access list on $ROOT: ab1234$"'
@@ -668,6 +687,11 @@ mode 404; c=$(curls); gs --force
 t "service: a service deployed before the routes (404): refused, says to deploy, no second try" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) does not give the approved list yet \(HTTP 404\): deploy the service; nothing changed$" && [ "$(curls)" = $((c + 1)) ] && unchanged $n'
 mode html; gs --force
 t "service: a page in front (200 text/html): refused as not text" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) answered the approved list as text/html; charset=utf-8, not as text: a sign-in page or another service stands in front of it; nothing changed$" && unchanged $n'
+mode 500; c=$(curls); gs --force
+t "service: an error (HTTP 500) with a list-shaped body: refused, the body not taken, no second try" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:$PORT\) answered HTTP 500 for the approved list; nothing changed$" && [ "$(curls)" = $((c + 1)) ] && unchanged $n'
+mode upper; gs --dry-run --force
+t "service: 200 Text/Plain in capitals is plain text (a media type has no case)" eval 'lacks "not as text" && has "^grid access: 2 ids from the access service"'
+n=$(calls)   # that dry run asked the grid side
 mode ok
 c=$(curls); gs --force --service https://127.0.0.1:1
 t "service: a closed port: refused naming the host, after two more tries" eval 'rc_is 1 && has "^grid_access: the access service \(127.0.0.1:1\) could not be reached for the approved list \(curl: \(7\) .*127.0.0.1.*\); nothing changed$" && [ "$(curls)" = $((c + 3)) ] && unchanged $n'

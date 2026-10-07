@@ -27,8 +27,10 @@
 # /admin/roster.txt and GET /admin/readers.txt at --service URL (else $BEETHOVEN_SERVICE_URL, else the
 # service's own name, https://beethoven-access.openspineconsortium.workers.dev; https and a host name of
 # plain characters, nothing after it), with the maintainer's admin token, the one line of the vendor
-# folder's admin_token. That file must be the owner's alone (mode 0600; a run that finds it readable by
-# group or other refuses and says to chmod it). The token leaves it only for a header file of this run's
+# folder's admin_token. That file must be the owner's alone (mode 0600, of the file a link names; a run
+# that finds it readable by group or other refuses and says to chmod it; on a WSL Windows drive mounted
+# without file modes, where every file reads 0777, the Windows folder's permissions stand in for the mode
+# and the run says so). The token leaves it only for a header file of this run's
 # own, mode 0600 in a temporary folder the run removes, which curl reads (-H @FILE): never an argument,
 # never a line of the log, never a word of a message. Only an answer of 200 and text/plain is a list;
 # anything else refuses with nothing changed and says what it was: the token not accepted (401, 403:
@@ -654,13 +656,37 @@ service=${service%/}
 svc_name="the access service (${service#https://})"
 tmpd="" svc_hdr="" svc_body=""
 trap '[ -z "$tmpd" ] || rm -rf "$tmpd"' EXIT
+# On WSL a Windows drive (drvfs, or 9p with aname=drvfs) mounted without the metadata option shows every
+# file as 0777 and ignores chmod, so a mode there says nothing about who can read the token; the Windows
+# folder's own permissions do (a folder under C:\Users\<you> is that account's by default). The scheduled
+# task's vendor folder is such a drive. There, and only there, the mode is not checked, and the run says
+# so; with metadata the modes are real and checked as anywhere else. GA_PROC is /proc but for the tests.
+GA_PROC=${GA_PROC:-/proc}
+ga_wsl_nomodes() { # FILE -> 0 when FILE lies on a WSL Windows drive mounted without file modes
+  local real dev m t o rest best="" bt="" bo=""
+  grep -qi microsoft "$GA_PROC/version" 2>/dev/null || return 1
+  real=$(readlink -f -- "$1" 2>/dev/null) || return 1
+  while read -r dev m t o rest; do
+    m=${m//\\040/ }
+    [ "$m" = / ] || case "$real" in "$m"/*) ;; *) continue;; esac
+    [ ${#m} -lt ${#best} ] || { best=$m bt=$t bo=$o; }   # the deepest mount holding the file; a later one shadows
+  done < "$GA_PROC/mounts"
+  case "$bt" in drvfs) ;; 9p) case "$bo" in *aname=drvfs*) ;; *) return 1;; esac;; *) return 1;; esac
+  case "$bo" in *metadata*) return 1;; esac
+  return 0
+}
 svc_token() { # the header file, made once from admin_token's first line (CR and blanks dropped), 0600 in a folder of this run's
   [ -z "$svc_hdr" ] || return 0
   local tokf="$vendor/admin_token" mode
   [ -e "$tokf" ] || refuse "no admin_token in the vendor folder ($vendor): the access service's token is the maintainer's, one line in that file; nothing changed"
   [ -r "$tokf" ] || refuse "cannot read $tokf; nothing changed"
-  mode=$(stat -c %a -- "$tokf" 2>/dev/null)
-  case "$mode" in *00) ;; *) refuse "$tokf is readable by group or other (mode ${mode:-unknown}); make it yours alone first: chmod 600 $tokf; nothing changed";; esac
+  # -L: a linked admin_token is judged by the file it names, which is what chmod changes
+  mode=$(stat -L -c %a -- "$tokf" 2>/dev/null)
+  if ga_wsl_nomodes "$tokf"; then
+    note "$tokf is on a Windows drive WSL shows without file modes, so its mode is not checked; the Windows folder's own permissions keep it yours"
+  else
+    case "$mode" in *00) ;; *) refuse "$tokf is readable by group or other (mode ${mode:-unknown}); make it yours alone first: chmod 600 $tokf; nothing changed";; esac
+  fi
   tmpd=$(mktemp -d "${TMPDIR:-/tmp}/grid_access.XXXXXX") || refuse "cannot make a temporary folder under ${TMPDIR:-/tmp}; nothing changed"
   svc_hdr="$tmpd/header"
   ( umask 077; awk 'NR == 1 { sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == "") exit 1; print "Authorization: Bearer " $0; ok = 1; exit } END { exit !ok }' "$tokf" > "$svc_hdr" ) \
@@ -684,7 +710,7 @@ svc_fetch() { # WHAT ROUTE: the answer's body into the file $svc_body, or a refu
   fi
   status=${meta%% *} ctype=${meta#* }
   case "$status" in
-    200) case "$ctype" in text/plain*) return 0;; esac
+    200) case "${ctype,,}" in text/plain*) return 0;; esac   # a media type is the same in any case (RFC 9110 8.3.1)
          refuse "$svc_name answered $what as ${ctype:-no content type}, not as text: a sign-in page or another service stands in front of it; nothing changed";;
     401|403) refuse "$svc_name did not accept the token for $what (HTTP $status): check admin_token in the vendor folder ($vendor); nothing changed";;
     404) refuse "$svc_name does not give $what yet (HTTP 404): deploy the service; nothing changed";;
