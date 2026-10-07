@@ -11,8 +11,10 @@
 #   - setfacl recalculates the mask as the union of the group class unless -n is given or the call sets
 #     the mask itself; the default ACL is seeded from the access ACL the first time it is set;
 #   - a user or group the system (or $SHIM_USERS) does not know is refused as setfacl refuses it, and
-#     that file is left unchanged.
-# Not emulated: -R, -M, -X, --restore, --set, X in permissions, numeric qualifiers.
+#     that file is left unchanged;
+#   - getfacl -R walks each folder named, the folder first, links neither listed nor followed (as -P
+#     does), and prints a name holding a backslash or a newline escaped (\\, \012), as getfacl does.
+# Not emulated: setfacl -R, -M, -X, --restore, --set, X in permissions, numeric qualifiers; getfacl -L.
 # Every call is appended to $SHIM_LOG. With SHIM_ACL_FAIL=x, setfacl -x fails (a grid side that stops
 # half-way).
 set -uo pipefail
@@ -61,19 +63,30 @@ pr_eff() { # ENTRY MASKDIGIT
 }
 
 if [ "$me" = getfacl ]; then
-  omit=0 paths=() rc=0
+  omit=0 paths=() rc=0 rec=0
   while [ $# -gt 0 ]; do case "$1" in
-    -p|--absolute-names|-n|--numeric|-e|--all-effective) shift;;
+    -p|--absolute-names|-n|--numeric|-e|--all-effective|-P|--physical) shift;;
+    -R|--recursive) rec=1; shift;;
     -c|--omit-header) omit=1; shift;;
     --) shift; paths+=("$@"); break;;
     -*) echo "getfacl: unsupported option $1 (test shim)" >&2; exit 2;;
     *) paths+=("$1"); shift;;
   esac; done
-  for p in "${paths[@]}"; do
+  if [ $rec = 1 ]; then
+    walk=()
+    for p in "${paths[@]}"; do
+      [ -L "$p" ] && continue
+      if [ ! -e "$p" ]; then walk+=("$p"); continue; fi
+      while IFS= read -r -d '' f; do walk+=("$f"); done < <(find "$p" ! -type l -print0)
+    done
+    paths=(${walk[@]+"${walk[@]}"})
+  fi
+  for p in ${paths[@]+"${paths[@]}"}; do
     if ! readmode "$p"; then echo "getfacl: $p: No such file or directory" >&2; rc=1; continue; fi
     load "$p"
     if [ $omit = 0 ]; then
-      echo "# file: $p"
+      shown=${p//\\/\\\\}; shown=${shown//$'\n'/\\012}
+      echo "# file: $shown"
       echo "# owner: $(stat -L -c %U -- "$p")"
       echo "# group: $(stat -L -c %G -- "$p")"
       if [ "$SP" != 0 ]; then echo "# flags: $( (( SP & 4 )) && echo s || echo -)$( (( SP & 2 )) && echo s || echo -)$( (( SP & 1 )) && echo t || echo -)"; fi

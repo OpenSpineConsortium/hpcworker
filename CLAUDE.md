@@ -117,7 +117,9 @@ name and identifier carry no university name.
 - **The grid's approved list is the named-user ACL on the volume root, kept by
   `tools/grid_access.sh` equal to `admin.mjs roster` (extension grant only; lab-only approvals and the
   reviewers' mock are not on it, by design); `deploy_shared` never closes the tree to other below the
-  gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed.** The scheduled
+  gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed to other; a
+  reader the service approved for a folder (`admin.mjs readers`) gets the group's read there by named
+  entries, never w, never a default entry, and no more.** The scheduled
   run makes only cheap checks (the full sweep is `--check-tree`) and reports any root entry in another
   student's place.
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
