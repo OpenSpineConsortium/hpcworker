@@ -170,6 +170,17 @@ class Modules(unittest.TestCase):
         site["egress"]["measured"]["example.org"] = 200
         P.compose(site, read(LAB))
 
+    def test_a_credential_in_a_module_is_refused_and_the_rule_is_published(self):
+        """beethoven-sites applies refused_values from the module schema, so such a module never merges there"""
+        site = read(SITE)
+        site["notes"] = "paste sk-ant-abc here"
+        self.refused(site, read(LAB), "site.json: field notes looks like it carries a credential; a module never does")
+        lab = read(LAB)
+        lab["notes"] = "first run claude setup-token"
+        self.assertEqual(P.validate_module(lab, "lab"), ["field notes looks like it carries a credential; a module never does"])
+        rules = P.module_schema()["refused_values"]
+        self.assertEqual([r["pattern"] for r in rules], [P.CREDENTIAL.pattern])
+
     def test_what_a_module_says_about_itself(self):
         site, lab = read(SITE), read(LAB)
         site["kind"] = "lab"

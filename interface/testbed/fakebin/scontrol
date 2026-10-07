@@ -1,0 +1,6 @@
+#!/bin/bash
+# fake scontrol (hpcworker's test bed): `show job ID` with FAKE_SUBMIT_TIME (default 2026-10-01T08:00:00).
+d="${FAKE_SCHED_DIR:?}"
+echo "scontrol $*" >> "$d/calls"
+[ "$1 $2" = "show job" ] && echo "JobId=$3 JobName=hpcw_worker UserId=st1234 SubmitTime=${FAKE_SUBMIT_TIME:-2026-10-01T08:00:00} StartTime=Unknown"
+exit 0

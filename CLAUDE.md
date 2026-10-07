@@ -304,6 +304,17 @@ format or a line and you change it in both repositories together, against the sa
 The site profiles under `framework/profiles/` are canonical HERE; the client repository vendors them
 as data (`framework/profiles/pull.sh` there refreshes its copy).
 
+Since 2026-10-07 (greg: each repository independent, no direct access to another's code, standard
+API-type interfacing) the seam is published, not described: `interface/INTERFACE.json` lists what this
+repository offers (the `contract` export: `cli.json`, `lines.json`, the JSON Schemas, `rules.json` and
+the vectors the real writer produced; the profiles; the module schema; the testbed and the framework as
+programs for clients' tests) and what it takes (beethoven-sites' modules); `interface/README.md` says
+how a client takes an export and how one changes. A change to what the framework prints or writes
+rewrites the vectors with `python3 framework/tests/vectors.py --write` in the same pull request, and
+raises the export's version when a client must act; `test_interface.py` fails until then.
+`test_boundary.py` fails on any tracked line that reaches another repository's checkout. The
+standard every repository follows is `INTERFACES.md` in `OpenSpineConsortium/beethoven`.
+
 CI runs in three lanes, none holding a secret:
 - `.github/workflows/ci.yml`: the suite on ubuntu, and in a `centos:7` container — python 3.6.8,
   bash 4.2.46, util-linux 2.23, the login node's own stack (`.github/centos7-suite.sh`).

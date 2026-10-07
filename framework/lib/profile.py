@@ -287,7 +287,7 @@ def validate(prof):
             errs.append("binds entries must be non-empty paths without whitespace (got %r)" % (b,))
     # a profile is a settings file: it must never carry a credential
     for key, val in _walk(prof):
-        if isinstance(val, str) and re.search(r"(sk-ant-|CLAUDE_CODE_OAUTH_TOKEN=|setup-token)", val):
+        if isinstance(val, str) and CREDENTIAL.search(val):
             errs.append("field %s looks like it carries a credential; the profile never does" % key)
     return errs
 
@@ -457,6 +457,9 @@ FIELD_LAYERS = {
 # Lists that add up across the layers (the product's $HOME, then the site's, then the lab's volumes);
 # every other list a later layer sets replaces the earlier one.
 ADDITIVE = ("binds",)
+# what no string of a profile, and so of a module, may hold: the shapes of a Claude credential and of
+# the way one is made; module_schema publishes it so beethoven-sites refuses such a module before it merges
+CREDENTIAL = re.compile(r"(sk-ant-|CLAUDE_CODE_OAUTH_TOKEN=|setup-token)")
 
 # The product's own values, laid down before any module. The sign-in directory Beethoven starts Claude
 # Code in and the consent markers beside it are the product's alone; $HOME is every worker's first
@@ -555,6 +558,9 @@ def validate_module(mod, kind):
                 errs.append("%s.%s is not a key of %s (it has %s)" % (key, sub, key, ", ".join(n for n, _t, _r in SUBFIELDS[key])))
             elif not _type_ok(subs[sub], value[sub]):
                 errs.append("field %s.%s: expected %s, got %r" % (key, sub, _type_name(subs[sub]), value[sub]))
+    for key, val in _walk(mod):
+        if isinstance(val, str) and CREDENTIAL.search(val):
+            errs.append("field %s looks like it carries a credential; a module never does" % key)
     return errs
 
 
@@ -811,6 +817,8 @@ def module_schema():
         "id_match": "whole",
         "profile_is_site": PROFILE_IS_SITE,
         "additive": list(ADDITIVE),
+        "refused_values": [{"pattern": CREDENTIAL.pattern, "applies_to": "every string anywhere in a module",
+                            "why": "a profile is a settings file and never carries a credential"}],
         "fields": fields,
     }
 

@@ -1,0 +1,18 @@
+#!/bin/bash
+# fake sacct (hpcworker's test bed), the account's history for `queue report`: FAKE_SACCT holds the records sacct
+# prints (its -P lines; nothing when unset), FAKE_SACCT_FAIL the message it fails with instead. A field written
+# @SECONDS is an instant, printed in the zone of this environment's TZ and the form SLURM_TIME_FORMAT names. Each call
+# is also logged to $FAKE_SCHED_DIR/argv: the name, TZ and SLURM_TIME_FORMAT as seen ("(unset)" when not set), the
+# number of arguments, then each argument on a line of its own.
+d="${FAKE_SCHED_DIR:?}"
+echo "sacct $*" >> "$d/calls"
+{ printf '%s\n%s\n%s\n%d\n' "${0##*/}" "${TZ-(unset)}" "${SLURM_TIME_FORMAT-(unset)}" $#; [ $# -gt 0 ] && printf '%s\n' "$@"; } >> "$d/argv"
+if [ -n "${FAKE_SACCT_FAIL:-}" ]; then echo "$FAKE_SACCT_FAIL" >&2; exit 1; fi
+[ -n "${FAKE_SACCT:-}" ] || exit 0
+case "${SLURM_TIME_FORMAT:-standard}" in standard) f='+%Y-%m-%dT%H:%M:%S';; relative) f='+%d %b %H:%M';; *) f="+$SLURM_TIME_FORMAT";; esac
+while IFS= read -r line; do
+  out=""
+  while [[ "$line" =~ ^([^@]*)@([0-9]+)(.*)$ ]]; do out="$out${BASH_REMATCH[1]}$(date -d "@${BASH_REMATCH[2]}" "$f")"; line="${BASH_REMATCH[3]}"; done
+  printf '%s%s\n' "$out" "$line"
+done <<< "$FAKE_SACCT"
+exit 0

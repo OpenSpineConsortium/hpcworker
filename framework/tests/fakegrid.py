@@ -21,121 +21,21 @@ CODE = "GOODCODE#0123456789abcdef"
 INSTALL_ID = "0123456789abcdef0123456789abcdef"
 AUTH_URL = "https://claude.ai/oauth/authorize?code=true&client_id=x&state=y"
 
-FAKE_SBATCH = r"""#!/bin/bash
-# fake sbatch: logs, refuses when <sched>/sbatch_fail holds a message, else prints the next id and lists the job PENDING
-d="${FAKE_SCHED_DIR:?}"
-echo "sbatch $*" >> "$d/calls"
-sleep "${FAKE_SBATCH_DELAY:-0}"
-if [ -s "$d/sbatch_fail" ]; then cat "$d/sbatch_fail" >&2; exit 1; fi
-n=$(cat "$d/next_id" 2>/dev/null || echo 40501234); echo $((n + 1)) > "$d/next_id"
-echo "$n|PENDING|${FAKE_REASON:-Priority}|N/A|" >> "$d/jobs"
-echo "$n"
-"""
+# The fake scheduler: sbatch, squeue, scancel, scontrol, srun, sacct and sinfo, each a script of its own under
+# interface/testbed/fakebin/, which the repository publishes (interface/INTERFACE.json, the export "testbed") so
+# another repository's test stands the same scheduler up without reading this file. Each script's head says what
+# it plays and which FAKE_* knobs it takes; every call is logged in <sched>/calls, sacct's and sinfo's also in
+# <sched>/argv, each argument apart (Grid.argvs reads it back).
+TESTBED = os.path.join(os.path.dirname(ROOT), "interface", "testbed", "fakebin")
 
-# jobs file: ID|STATE|REASON|START|NODE, one line per job the "scheduler" still lists
-FAKE_SQUEUE = r"""#!/bin/bash
-d="${FAKE_SCHED_DIR:?}"
-echo "squeue $*" >> "$d/calls"
-if [ -e "$d/squeue_fail" ]; then echo "slurm_load_jobs error: Socket timed out on send/recv operation" >&2; exit 1; fi
-ids=""; fmt="%i|%T|%N"
-while [ $# -gt 0 ]; do case "$1" in -j) ids="$2"; shift 2;; -o) fmt="$2"; shift 2;; *) shift;; esac; done
-found=0
-for id in ${ids//,/ }; do
-  line=$(grep "^$id|" "$d/jobs" 2>/dev/null | tail -1); [ -n "$line" ] || continue
-  IFS='|' read -r jid st re sta no <<< "$line"
-  found=1
-  case "$fmt" in
-    '%i|%T|%N') echo "$jid|$st|$no";;
-    '%T|%r|%S|%N') echo "$st|$re|$sta|$no";;
-    '%T|%N') echo "$st|$no";;
-    *) echo "$st";;
-  esac
-done
-if [ $found = 0 ] && [ -n "$ids" ]; then echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1; fi
-exit 0
-"""
 
-FAKE_SCANCEL = r"""#!/bin/bash
-d="${FAKE_SCHED_DIR:?}"
-echo "scancel $*" >> "$d/calls"
-for id in "$@"; do [ -s "$d/jobs" ] && grep -v "^$id|" "$d/jobs" > "$d/jobs.tmp"; mv -f "$d/jobs.tmp" "$d/jobs" 2>/dev/null; done
-exit 0
-"""
+def _fake(name):
+    with open(os.path.join(TESTBED, name), encoding="utf-8", newline="") as fh:
+        return fh.read()
 
-FAKE_SCONTROL = r"""#!/bin/bash
-d="${FAKE_SCHED_DIR:?}"
-echo "scontrol $*" >> "$d/calls"
-[ "$1 $2" = "show job" ] && echo "JobId=$3 JobName=hpcw_worker UserId=st1234 SubmitTime=${FAKE_SUBMIT_TIME:-2026-10-01T08:00:00} StartTime=Unknown"
-exit 0
-"""
 
-# Both also log each call to <sched>/argv with its arguments kept apart, which "calls" (joined by spaces) cannot: a
-# record is the name, TZ and SLURM_TIME_FORMAT as the program saw them ("(unset)" when not set), the number of
-# arguments, then each argument on a line of its own (Grid.argvs reads it back).
-FAKE_ARGV_LOG = r"""{ printf '%s\n%s\n%s\n%d\n' "${0##*/}" "${TZ-(unset)}" "${SLURM_TIME_FORMAT-(unset)}" $#; [ $# -gt 0 ] && printf '%s\n' "$@"; } >> "$d/argv"
-"""
-
-# the account's history, for `queue report`: FAKE_SACCT holds the records sacct prints (its -P lines, planted by
-# the test; nothing when unset, as for an account with no jobs), FAKE_SACCT_FAIL the message it fails with instead.
-# A field written @SECONDS is an instant, printed the way sacct prints a time: in the zone of its own environment's TZ
-# and in the form SLURM_TIME_FORMAT names (standard or unset: YYYY-MM-DDTHH:MM:SS; relative: a short day and time;
-# anything else: a date format), so a test sees what a caller's zone and format would do to the report
-FAKE_SACCT = r"""#!/bin/bash
-d="${FAKE_SCHED_DIR:?}"
-echo "sacct $*" >> "$d/calls"
-""" + FAKE_ARGV_LOG + r"""if [ -n "${FAKE_SACCT_FAIL:-}" ]; then echo "$FAKE_SACCT_FAIL" >&2; exit 1; fi
-[ -n "${FAKE_SACCT:-}" ] || exit 0
-case "${SLURM_TIME_FORMAT:-standard}" in standard) f='+%Y-%m-%dT%H:%M:%S';; relative) f='+%d %b %H:%M';; *) f="+$SLURM_TIME_FORMAT";; esac
-while IFS= read -r line; do
-  out=""
-  while [[ "$line" =~ ^([^@]*)@([0-9]+)(.*)$ ]]; do out="$out${BASH_REMATCH[1]}$(date -d "@${BASH_REMATCH[2]}" "$f")"; line="${BASH_REMATCH[3]}"; done
-  printf '%s%s\n' "$out" "$line"
-done <<< "$FAKE_SACCT"
-exit 0
-"""
-
-# the partitions, for `queue report --limits` and diag's partition check: FAKE_SINFO holds the lines sinfo prints (nothing when unset)
-FAKE_SINFO = r"""#!/bin/bash
-d="${FAKE_SCHED_DIR:?}"
-echo "sinfo $*" >> "$d/calls"
-""" + FAKE_ARGV_LOG + r"""[ -n "${FAKE_SINFO:-}" ] && printf '%s\n' "$FAKE_SINFO"
-exit 0
-"""
-
-# srun as the sign-in sitting plays out. FAKE_SRUN: signin (the link, a code read from stdin, SIGNED-IN
-# or a refusal), already (signed in at once), nonode (no computer in time), timeout (no code arrived),
-# other (an unexplained failure), billed (framework 17: Claude Code offered a sign-in that bills by use),
-# othersignin (framework 17: already signed in, not with a Claude subscription). FAKE_SRUN_DELAY:
-# seconds of silence first (the wait for a computer).
-# FAKE_SRUN_CRLF=1: lines end in CR LF, as a pseudo-terminal sends them.
-FAKE_SRUN = r"""#!/bin/bash
-d="${FAKE_SCHED_DIR:?}"
-echo "srun $*" >> "$d/calls"
-e=$'\n'; [ "${FAKE_SRUN_CRLF:-0}" = 1 ] && e=$'\r\n'
-p() { printf '%s%s' "$1" "$e"; }
-sleep "${FAKE_SRUN_DELAY:-0}"
-case "${FAKE_SRUN:-signin}" in
-  nonode) echo "srun: error: Unable to allocate resources: Job not run since it would not start within the requested time" >&2; exit 1;;
-esac
-p "HPCW-LOGIN: on node01; checking whether you are signed in already"
-case "${FAKE_SRUN:-signin}" in
-  already) p "SIGNED-IN st1234@wayne.edu max"; exit 0;;
-  timeout) p "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"; p "HPCW-LOGIN-FAILED: no code arrived within 10 minutes; start the sign-in again"; exit 3;;
-  other) p "HPCW-LOGIN-FAILED: the sign-in did not complete; start it again"; exit 3;;
-  billed) p "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"; p "HPCW-LOGIN-FAILED: Claude Code offered a sign-in that bills by use instead of your Claude subscription, and Beethoven signs in only with a Claude subscription; start the sign-in again, and if it repeats ask your lead"; exit 3;;
-  othersignin) p "HPCW-LOGIN-FAILED: Claude Code on the grid is signed in in a way that bills by use or is not a Claude subscription, and Beethoven never runs on that; ask your lead to help you sign in again with your Claude subscription"; exit 3;;
-  silentok) exit 0;;
-esac
-p "HPCW-LOGIN: starting Claude Code's sign-in; waiting for the sign-in link"
-p "AUTH-URL: ${FAKE_AUTH_URL:-https://claude.ai/oauth/authorize?code=true}"
-p "HPCW-LOGIN: paste the code from that page"
-IFS= read -r -t 20 code || code=""
-code="${code%$'\r'}"
-if [ "$code" = "${FAKE_CODE:?}" ]; then p "HPCW-LOGIN: code received, checking"; p "SIGNED-IN st1234@wayne.edu ${FAKE_PLAN:-max}"; exit 0; fi
-p "HPCW-LOGIN: code received, checking"
-p "HPCW-LOGIN-FAILED: Claude Code did not accept the code; start the sign-in again and paste the whole code"
-exit 3
-"""
+FAKE_SBATCH, FAKE_SQUEUE, FAKE_SCANCEL, FAKE_SCONTROL, FAKE_SRUN, FAKE_SACCT, FAKE_SINFO = (
+    _fake(n) for n in ("sbatch", "squeue", "scancel", "scontrol", "srun", "sacct", "sinfo"))
 
 
 def posix(path):
