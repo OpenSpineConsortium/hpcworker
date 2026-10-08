@@ -122,8 +122,11 @@ name and identifier carry no university name.
   approve accounts and never sits on a shared machine; `--watch` refuses while it is there) (0600;
   the token travels in a configuration file curl reads with `-q -K`, never in argv, a log or a message; only 200 plain
   text counts); `deploy_shared` never closes the tree to
-  other below the gate (its `deploy.log` is 0644); `shared/access` and the owner's folder stay closed
-  to other; a reader the service approved for a folder (`GET /admin/readers.txt`) gets the group's
+  other below the gate (its `deploy.log` is 0644); `shared/access` stays closed to other; the owner's
+  folder and everything of the owner's the group reads are opened to other for reading, never writing,
+  by `tools/grid_access.sh --here --open-volume` run once in a Slurm job (greg, 2026-10-08 00:36Z: "i
+  genuinely dont care if the students have access to all the files"; 00:39Z: "i dont want students
+  fuckign up my CI and workers"), and nothing below the gate is ever made writable by other; a reader the service approved for a folder (`GET /admin/readers.txt`) gets the group's
   read there by named entries, never w, never a default entry, and no more.** The service's
   `admin.mjs` lives in its own repository, `OpenSpineConsortium/beethoven-access`, and nothing here
   names a checkout of it; its published contract is pinned under `interface/access/` by

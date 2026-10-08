@@ -5,23 +5,27 @@
 # their own folder there; the root's sticky bit stops anyone renaming or removing another's entries;
 # its other::--- keeps every account not on the list out. Those two facts are the gate, and this tool
 # refuses to touch a root that lacks either. Below the gate, everything students use (shared/,
-# shared/beethoven and all under it) is readable by other; shared/access and the owner's own folder
-# stay closed by their own modes. The Unix group (oschome) is C&IT's to change and is not the list.
+# shared/beethoven and all under it) is readable by other, and, once --open-volume has run, everything of
+# the owner's that the group reads, the owner's own folder included (greg, 2026-10-08 00:36Z: "i
+# genuinely dont care if the students have access to all the files"); nothing below the gate is ever
+# made writable by other, and shared/access stays closed. The Unix group (oschome) is C&IT's to change
+# and is not the list.
 #
 # Beside the list it keeps the readers: accounts the lab lead approved to read named folders under the
 # root, as the lab's group reads them (the access service's reader list; LAB_LEAD.md, section 9). A
 # reader gets user:<id>:--x on the root (or keeps rwx, if also on the list) and, under each of its
 # folders, a named entry equal to the read and enter the root's group has on each entry there, never w,
 # never a default entry; see "readers" below. The folder "." is the root itself, the whole volume: such a
-# reader gets on the root the group's read there (r-x on drwxrws--T; rwx kept if on the list) and the
-# group's read on every entry under it that the root's owner owns. Other students' own folders, and
-# everything inside them, stay theirs (counted, never changed). A "." is that reader's only folder in the
-# access service's list; another folder beside it is covered by it and has no sweep of its own.
+# reader gets on the root the group's read there (r-x on drwxrws--T; rwx kept if on the list) and nothing
+# below it, where it reads what every account on the list reads (what --open-volume opened), so that
+# approving "." is one entry and takes effect at the next run. A "." is that reader's only folder in the
+# access service's list.
 #
 #   tools/grid_access.sh [--site ID] [--host HOST] [--root DIR] [--service URL]
 #                        [--roster-file FILE] [--readers-file FILE]
 #                        [--dry-run] [--force] [--quiet] [--open-tree] [--check-tree]
 #   tools/grid_access.sh --here --roster-file FILE --readers-file FILE [the same options]   on the cluster
+#   tools/grid_access.sh --here --open-volume [the same options]                 on the cluster, in a job
 #   tools/grid_access.sh --watch [--every 15] [--site ID] [--root DIR] [--service URL]       on the cluster
 #   tools/grid_access.sh --unwatch                                                           on the cluster
 #
@@ -114,7 +118,7 @@
 # swept to take its entries back), on the first run of a UTC day while there is a reader or a folder
 # not yet taken back (so that a file added since gets its entry, and a taking back that did not finish
 # is tried again), and with --force or --check-tree. --force,
-# --open-tree or --check-tree connects anyway. --dry-run connects when a run would, changes nothing on
+# --open-tree, --open-volume or --check-tree connects anyway. --dry-run connects when a run would, changes nothing on
 # the grid and writes no state; `--dry-run --force` is the way to see the grid's entries as they are
 # now. --quiet prints nothing unless the grid side changed something, skipped an id or a check failed
 # (errors always go to stderr; the log has every run): for the scheduled task.
@@ -133,6 +137,13 @@
 #      id's entry, if it has one, is left as it is. It runs setfacl with -n, so the mask is never
 #      recalculated: the owner's user:: entry and the group, mask and other entries are never changed,
 #      and no default entry is touched;
+#  3c. with --open-volume (only inside a Slurm job: it reads the whole volume once), gives other, on each
+#      entry under the root that the root's owner owns, the read and enter the group has there (added to
+#      what other has, never w, never taken away), with setfacl -P -n -m o::PERMS on what differs, each
+#      entry set read back. Left as they are: what the group may not read (a 0600 token, a 0700 folder and
+#      all below it), shared/access and the staging folders, students' folders and all in them, folders
+#      other may write that are not sticky and all in them, links, and names getfacl escapes. No default
+#      entry. It prints the counts and the folders near the top it left closed;
 #   3. with --open-tree, does what was done by hand on 2026-10-02, idempotently, and only that:
 #      chmod o+rx ROOT/shared; o+rX on everything under ROOT/shared/beethoven (links not followed);
 #      setfacl -d -m o::r-x on each folder under ROOT/shared/beethoven. It never touches
@@ -147,11 +158,8 @@
 #      entries is a FAILED check and gets nothing; the cap decides what is done, not what is read: the
 #      walk reads the whole folder to count it. A folder taken off and not taken back (over the cap, or a
 #      setfacl that failed) says "<folder> not taken back:" in its FAILED line, which keeps it for the next
-#      sweep. For "." the folder is the root: no folder on the way, the walk is the whole volume (one
-#      getfacl -R over every entry for each reader of "." in a sweep, and one more for each "." taken off;
-#      students' own folders included, which are counted and left), the same cap holds, and the root's own
-#      entry is step 2's, never the sweep's (a "." taken off leaves it to step 2: --x while another folder
-#      is read, gone otherwise). A folder taken off while the reader still has "." keeps its entries.
+#      sweep. "." has no sweep: its entry is the root's, step 2's (a "." taken off leaves it to step 2:
+#      --x while another folder is read, gone otherwise), and nothing below the root is the reader's own.
 #      Without --sweep-readers, only the root's entry;
 #   4. checks what a student needs and prints one line per check (ok or FAILED). Every run, cheap: the
 #      gate still holds (owner, sticky, other::---) and the mask lets the entries' rwx through; the list
@@ -160,8 +168,9 @@
 #      owner, so no one has taken the place of another student's folder before that student's first run;
 #      shared and shared/beethoven open to other (read and enter); hpcworker/current/bin/hpcworker
 #      readable and runnable by other, and every folder on the way enterable; the sandbox
-#      (containers/claude-node22) and npm-claude-node22 likewise; shared/access and ROOT/<owner> closed
-#      to other (no r, no x); each reader's folder read as the group reads it, when swept. Only with
+#      (containers/claude-node22) and npm-claude-node22 likewise; shared/access closed to other (no r, no
+#      x); shared and ROOT/<owner> not writable by other; each reader's folder read as the group reads it,
+#      when swept. Only with
 #      --open-tree or --check-tree, the full sweep: nothing under
 #      shared/beethoven closed to other (tens of thousands of entries; the staging folders left out).
 #      A failed check does not undo the list.
@@ -230,6 +239,14 @@ ga_closed() { # LABEL PATH: other may neither read nor enter PATH (absent is fin
   elif [ "${o:0:1}" != r ] && ! ga_o_enter "$o"; then ga_ok "$1 is closed to other ($(ga_mode "${phys:-$2}"))"
   else ga_fail "$1 is open to other ($(ga_mode "${phys:-$2}")) (fix: chmod o-rwx ${phys:-$2})"; fi
 }
+ga_nowrite() { # LABEL PATH: other may not write in PATH (absent is fine); the volume is read, never written, by the list
+  local phys o
+  if [ ! -e "$2" ] && [ ! -L "$2" ]; then ga_ok "$1 is absent"; return 0; fi
+  phys=$(readlink -f -- "$2" 2>/dev/null); o=$(ga_other "${phys:-$2}")
+  if [ -z "$o" ]; then ga_fail "$1: its mode cannot be read"
+  elif [ "${o:1:1}" = w ]; then ga_fail "$1 may be written by other ($(ga_mode "${phys:-$2}")) (fix: chmod o-w ${phys:-$2})"
+  else ga_ok "$1 is not writable by other ($(ga_mode "${phys:-$2}"))"; fi
+}
 ga_entries() { # PROOT OWNER: each entry of the root is a student's own (named for the account that owns it, not a link) or the owner's
   local proot="$1" owner="$2" name info u ty shown n=0 bad=0
   while IFS= read -r -d '' name; do
@@ -268,9 +285,9 @@ in_list() { case " $2 " in *" $1 "*) return 0;; esac; return 1; }   # ID " a b c
 # readable; a new file gets its entry from the next sweep instead. Nothing inside a folder another account
 # owns is given an entry either, even an entry this account owns: that account could put a link in its
 # place between the walk and setfacl, and setfacl follows a link (counted with the others' entries).
-# The folder "." (READ_RE's other branch) is the root itself: the walk is the whole volume.
+# The folder "." (READ_RE's other branch) is the root itself, whose entry is step 2's: it has no walk.
 READ_RE='^[a-z]{2}[0-9]{4}:(\.|[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*)$'
-GA_READ_CAP=${GA_READ_CAP:-200000}    # entries under one folder (the whole volume for "."); more and the folder is not swept (FAILED)
+GA_READ_CAP=${GA_READ_CAP:-200000}    # entries under one folder; more and the folder is not swept (FAILED)
 # The awk below reads getfacl's records (-p: absolute names; a name holding a backslash or an unprintable
 # character comes escaped and is left out; -R walks a folder before what it holds) and prints what the
 # reader's entry should become, one line each: "set PERMS PATH", "del - PATH", "noenter - PATH", then
@@ -337,7 +354,7 @@ ga_readplan() { # MODE ID PATH [-R]
   getfacl ${4:-} -P -p -- "$3" 2>/dev/null | ga_plan "$1" "$2"
 }
 ga_readback() { # MODE ID PLAN -> the count line for the plan's paths read again: one getfacl of what was set
-  # or removed, not a second walk (on "." that would be the whole volume again)
+  # or removed, not a second walk
   printf '%s\n' "$3" | sed -n 's/^set [-rwx][-rwx][-rwx] //p; s/^del - //p' | xargs -r -d '\n' getfacl -P -p -- 2>/dev/null \
     | ga_plan "$1" "$2" | sed -n 's/^count //p'
 }
@@ -366,9 +383,9 @@ ga_readers() { # PROOT: the revocations, then the grants, then the folders on th
   for pair in $unreads; do
     id=${pair%%:*} rel=${pair#*:}; p=$(ga_rpath "$proot" "$rel"); f=$(ga_folder "$rel")
     if ! id -u "$id" >/dev/null 2>&1; then say "  left    $id $f: no such account now; any entry it has stays (a uid alone)"; continue; fi
-    # under "." the folder's entries are the group's read already; taking them back would only cut the
-    # reader off until the grant below gave them again
-    if [ "$rel" != . ] && in_list "$id:." "$reads"; then say "  note    $id $f: still read with all of $GA_NAME, nothing taken back"; continue; fi
+    # "." gives the root's entry alone (step 2's) since 2026-10-08; taking it off still walks the volume
+    # once for entries a sweep before then gave (it finds none otherwise). A folder taken off beside "."
+    # is taken back as any other, since "." gives nothing below the root
     if [ ! -d "$p" ] || [ -L "$p" ] || [ "$(readlink -f -- "$p")" != "$p" ]; then say "  note    $id $f: no such folder now, nothing to take back"; continue; fi
     plan=$(ga_readplan revoke "$id" "$p" -R); cnt=$(printf '%s\n' "$plan" | sed -n 's/^count //p')
     ga_counts $cnt
@@ -383,7 +400,9 @@ ga_readers() { # PROOT: the revocations, then the grants, then the folders on th
   for pair in $reads; do
     id=${pair%%:*} rel=${pair#*:}; p=$(ga_rpath "$proot" "$rel"); f=$(ga_folder "$rel")
     in_list "$id" "$skipsp" && continue
-    if [ "$rel" != . ] && in_list "$id:." "$reads"; then ga_read_check "note reader $id: $rel is part of all of $GA_NAME, so it has no sweep of its own"; continue; fi
+    # "." is the root's entry alone, set in step 2: below the gate the reader reads what other reads, which
+    # --open-volume makes what the group reads (greg, 2026-10-08), so approving "." changes one entry
+    if [ "$rel" = . ]; then ga_read_check "note reader $id: all of $GA_NAME, read below the root as every account on the list reads it (--open-volume opens it to them)"; continue; fi
     if [ ! -d "$p" ] || [ -L "$p" ] || [ "$(readlink -f -- "$p")" != "$p" ]; then
       ga_read_check "FAILED reader $id: $rel is not a plain folder under the root (missing, or a link on the way)"; continue
     fi
@@ -432,23 +451,141 @@ ga_readers() { # PROOT: the revocations, then the grants, then the folders on th
     done
   done
 }
-ga_still_needed() { # ID REL: a folder the reader still reads, or one on the way to such a folder ("." covers every one)
+ga_still_needed() { # ID REL: a folder the reader still reads, or one on the way to such a folder ("." needs none)
   local pair f
   for pair in $reads; do
     [ "${pair%%:*}" = "$1" ] || continue
     f=${pair#*:}
-    [ "$f" != . ] || return 0
+    [ "$f" != . ] || continue
     case "$f/" in "$2/"*) return 0;; esac
     case "$2/" in "$f/"*) return 0;; esac
   done
   return 1
 }
 
+# ---- the volume opened: other reads below the gate what the group reads, and never writes -------------
+# greg, 2026-10-08 00:32Z and 00:36Z: every account on the list may read everything of his on the volume,
+# his own folder included; nothing of it may be written by them. Below the gate (the root's other::---,
+# which keeps every account not on the list out) other gets, on each entry the root's owner owns, the
+# read and enter the group has there (the owning group's entry or the root's group's named entry, within
+# the mask), added to what other has and never taking anything away, never w. A 0600 file (a job's
+# token) or a 0700 folder (the locked imaging, a run folder) stays closed, since its group reads nothing;
+# so does everything below a folder left closed. shared/access (the applicants' records), deploy_shared's
+# staging folders, students' own folders and everything in them, folders other may write and that are
+# not sticky (whose entries another account could swap for a link between the walk and setfacl), and
+# links are never touched. No default entry: a new file reads as its creator's umask makes it, until
+# the next --open-volume.
+GA_OPEN='
+function rx(p) { return (substr(p, 1, 1) == "r" ? "r" : "-") "-" (substr(p, 3, 1) == "x" ? "x" : "-") }
+function both(a, b,   i, s, c) { s = ""; for (i = 1; i <= 3; i++) { c = substr(a, i, 1); s = s ((c != "-" && c == substr(b, i, 1)) ? c : "-") }; return s }
+function either(a, b,   i, s, c) { s = ""; for (i = 1; i <= 3; i++) { c = substr(a, i, 1); if (c == "-") c = substr(b, i, 1); s = s c }; return s }
+function flush(   g, w, nw) {
+  if (path == "") return
+  n++
+  if (mode == "nowrite") {
+    # the first pass: other loses w on each entry the owner owns, keeping its r and x
+    if (path != top && !index(path, "\\") && fowner == owner && substr(O, 2, 1) == "w") { ns++; print "set", rx(O), path }
+    path = ""; fowner = ""; flags = ""; G = ""; M = ""; NG = ""; O = ""; return
+  }
+  if (inside != "" && index(path, inside "/") != 1) inside = ""
+  if (path == top) ;
+  else if (inside != "") under++
+  else if (path == acc || index(path, acc "/") == 1 || index(path, stg) == 1) { skipped++; inside = path }
+  else if (index(path, "\\")) { esc++; inside = path }
+  else if (fowner != owner) { foreign++; inside = path }
+  else if (substr(O, 2, 1) == "w" && substr(flags, 3, 1) != "t") { unsafe++; inside = path }
+  else {
+    g = G; if (NG != "") g = either(g, NG)
+    w = rx(both(g, (M == "" ? "rwx" : M)))
+    nw = rx(either(O, w))
+    if (nw == O) covered++; else { ns++; print "set", nw, path }
+    if (substr(nw, 1, 1) != "r" && substr(nw, 3, 1) != "x") closed++
+    # what other may not enter after this run keeps everything under it out of reach: nothing there opens
+    if (substr(nw, 3, 1) != "x") inside = path
+  }
+  path = ""; fowner = ""; flags = ""; G = ""; M = ""; NG = ""; O = ""
+}
+/^# file: / { flush(); path = substr($0, 9); next }
+/^# owner: / { fowner = substr($0, 10); next }
+/^# flags: / { flags = substr($0, 10); next }
+/^#/ || /^default:/ { next }
+/^$/ { flush(); next }
+{
+  split($0, f, "\t"); t = f[1]; p = substr(t, length(t) - 2); t = substr(t, 1, length(t) - 4)
+  if (t == "group:") G = p; else if (t == "mask:") M = p; else if (t == "other:") O = p
+  else if (t == "group:" grp) NG = p
+}
+END { flush(); print "count", n + 0, ns + 0, covered + 0, closed + 0, foreign + 0, unsafe + 0, esc + 0, skipped + 0, under + 0 }'
+ga_open_plan() { # [MODE] getfacl's records on stdin -> GA_OPEN's lines (MODE nowrite: the first pass)
+  awk -v mode="${1:-open}" -v owner="$GA_OWNER" -v grp="$GA_GROUP" -v top="$GA_TOP" -v acc="$GA_TOP/shared/access" \
+    -v stg="$GA_TOP/shared/beethoven/hpcworker/.incoming-" "$GA_OPEN"
+}
+ga_ocounts() { n=${1:-0} ns=${2:-0} covered=${3:-0} closed=${4:-0} foreign=${5:-0} unsafe=${6:-0} esc=${7:-0} skipped=${8:-0} under=${9:-0}; }   # GA_OPEN's count line, into the caller's locals
+ga_open_apply() { # PLAN: setfacl -P -n -m o::PERMS for its "set" lines, grouped by PERMS; fails when any setfacl did
+  local perm bad=0
+  for perm in r-x r-- --x rwx rw- -wx -w-; do
+    printf '%s\n' "$1" | sed -n "s/^set $perm //p" | xargs -r -d '\n' setfacl -P -n -m "o::$perm" || bad=1
+  done
+  return $bad
+}
+ga_open_left() { # MODE PLAN -> how many of the plan's entries, read again, still need setting
+  printf '%s\n' "$2" | sed -n 's/^set [-rwx][-rwx][-rwx] //p' | xargs -r -d '\n' getfacl -P -p -- 2>/dev/null | ga_open_plan "$1" \
+    | sed -n 's/^count [0-9]* \([0-9]*\) .*/\1/p'
+}
+ga_open_volume() { # PROOT: write taken from other, then the walk, setfacl -P on what differs, each entry set read back
+  local proot=$1 plan wplan cnt n ns covered closed foreign unsafe esc skipped under bad=0 left shut wn
+  # 1. other's write, wherever the owner's entries have it, goes first (greg, 2026-10-08 00:39Z: "i dont
+  # want students fuckign up my CI and workers"): opening a folder must never make reachable an entry
+  # under it that other may write, and once no folder of the owner's is writable by other, nothing in one
+  # can be swapped for a link between the walk below and its setfacl. Every folder either the group or
+  # other may enter is walked (one other may enter, the group not, may already be reachable); a
+  # student's folder and what is in it are theirs, and stay as they are
+  wplan=$(find "$proot" -mindepth 1 \( -path "$proot/shared/access" -o -path "$proot/shared/beethoven/hpcworker/.incoming-*" \
+      -o \( -type d \( ! -user "$GA_OWNER" -o \( ! -perm -0010 ! -perm -0001 \) \) \) \) -prune \
+      -o -user "$GA_OWNER" ! -type l -perm -0002 -print0 2>/dev/null | xargs -0 -r getfacl -P -p -- 2>/dev/null | ga_open_plan nowrite)
+  wn=$(printf '%s\n' "$wplan" | sed -n 's/^count [0-9]* \([0-9]*\) .*/\1/p')
+  if [ $dry = 1 ]; then [ "${wn:-0}" = 0 ] || say "  would open-volume: ${wn} entries no longer writable by other"
+  elif [ "${wn:-0}" != 0 ]; then
+    ga_open_apply "$wplan" || bad=1
+    say "  open-volume: $wn entries no longer writable by other"
+    left=$(ga_open_left nowrite "$wplan")
+    if [ $bad = 1 ] || [ "${left:-0}" != 0 ]; then
+      ga_fail "the volume: ${left:-?} entries of $GA_OWNER's still writable by other after setfacl, so nothing was opened (tools/grid_access.sh --here --open-volume again)"
+      return 0
+    fi
+  fi
+  # 2. the opening
+  # the walk: find prunes what is never opened, so that getfacl reads only what may be (folders the group
+  # may not enter, by their mode, among them); the awk decides from the ACLs themselves
+  plan=$(find "$proot" -mindepth 1 \( -path "$proot/shared/access" -o -path "$proot/shared/beethoven/hpcworker/.incoming-*" \
+      -o \( -type d \( ! -user "$GA_OWNER" -o ! -perm -0010 -o \( -perm -0002 ! -perm -1000 \) \) \) \) -prune \
+      -o -user "$GA_OWNER" ! -type l -print0 2>/dev/null | xargs -0 -r getfacl -P -p -- 2>/dev/null | ga_open_plan)
+  cnt=$(printf '%s\n' "$plan" | sed -n 's/^count //p')
+  # shellcheck disable=SC2086
+  ga_ocounts $cnt
+  # the folders left closed near the top, by name, so the lab lead sees what stays theirs alone
+  shut=$(find "$proot" -mindepth 1 -maxdepth 3 \( -path "$proot/shared/access" -o -path "$proot/shared/beethoven/hpcworker/.incoming-*" \
+      -o \( -type d ! -user "$GA_OWNER" \) \) -prune -o \( -type d -perm -0002 ! -perm -1000 -printf '%P (others may write it)\n' -prune \) \
+      -o \( -type d ! -perm -0010 -printf '%P\n' -prune \) 2>/dev/null | sort | head -12 | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+  if [ $dry = 1 ]; then
+    say "  would open-volume: $ns entries opened to other for reading as the group reads them ($n read, $covered open enough already)"
+  else
+    ga_open_apply "$plan" || bad=1
+    say "  open-volume: $ns entries opened to other for reading as the group reads them ($n read, $covered open enough already)"
+  fi
+  say "  open-volume: left as they are: $closed the group may not read (and $under below folders left out), $foreign not $GA_OWNER's, $unsafe in folders others may write, $esc with escaped names, $skipped in shared/access and staging"
+  [ -z "$shut" ] || say "  open-volume: folders left closed near the top (the group may not enter them, or others may write them): $shut"
+  [ $dry = 0 ] || return 0
+  left=$(ga_open_left open "$plan")
+  if [ $bad = 0 ] && [ "${left:-0}" = 0 ]; then ga_ok "the volume: other reads what the group reads below the gate, and writes nothing of $GA_OWNER's ($ns opened now, ${wn:-0} closed to writing, read back)"
+  else ga_fail "the volume: ${left:-?} entries still closed to other after setfacl$([ $bad = 0 ] || echo ', and setfacl failed on part of it') (tools/grid_access.sh --here --open-volume again)"; fi
+}
+
 apply() {
-  local dry=0 open=0 sweep=0 sweep_r=0 reads="" unreads="" pair
+  local dry=0 open=0 openv=0 sweep=0 sweep_r=0 reads="" unreads="" pair
   while [ $# -gt 0 ]; do case "$1" in
     --dry-run) dry=1; shift;; --open-tree) open=1; shift;; --check-tree) sweep=1; shift;; --) shift; break;;
-    --sweep-readers) sweep_r=1; shift;;
+    --sweep-readers) sweep_r=1; shift;; --open-volume) openv=1; shift;;
     --read|--unread)
       pair=${2:-}
       { [[ "$pair" =~ $READ_RE ]] && [ ${#pair} -le 207 ]; } || die "$1 '$pair' is not an AccessID and a folder under the root (like ab1234:shared/data, or ab1234:. for the root itself); nothing changed"
@@ -462,6 +599,9 @@ apply() {
   local id
   for id in "$@"; do [[ "$id" =~ $ID_RE ]] || die "'$id' is not an AccessID (like ab1234); nothing changed"; done
   { command -v getfacl && command -v setfacl; } >/dev/null 2>&1 || die "no getfacl or setfacl on $(hostname -s); nothing changed"
+  # the whole volume is read once: a compute node's work, never the login node's
+  # SLURMD_NODENAME, not SLURM_JOB_ID: salloc's own shell has a job and may sit on the login node
+  [ $openv = 0 ] || [ -n "${SLURMD_NODENAME:-}" ] || die "--open-volume reads every entry of the volume, so it runs in a job step on a compute node (srun or sbatch), never on the login node; nothing changed"
   local proot me owner problems
   proot=$(readlink -f -- "$root" 2>/dev/null)
   [ -n "$proot" ] && [ -d "$proot" ] || die "$root is not a folder here; nothing changed"
@@ -558,6 +698,9 @@ apply() {
     fi
   fi
 
+  # 3c. the volume opened for reading, when asked (the lab lead's one step, run again at will)
+  [ $openv = 0 ] || ga_open_volume "$proot"
+
   # 3b. the readers' folders: swept when the lab lead's side asks (a changed reader list, or once a day)
   if [ -n "$reads$unreads" ]; then
     if [ $sweep_r = 1 ]; then ga_readers "$proot"
@@ -603,7 +746,8 @@ apply() {
     else ga_fail "$nclosed entries under shared/beethoven are closed to other, like $(printf '%s\n' "$closed" | head -3 | sed "s#^$proot/##" | tr '\n' ' ')(fix: tools/grid_access.sh --open-tree)"; fi
   fi
   ga_closed "shared/access" "$sh/access"
-  ga_closed "$owner (the owner's folder)" "$proot/$owner"
+  ga_nowrite "shared" "$sh"
+  ga_nowrite "$owner (the owner's folder)" "$proot/$owner"
   local line
   while IFS= read -r line; do case "$line" in
     ok\ *) ga_ok "${line#ok }";; FAILED\ *) ga_fail "${line#FAILED }";; note\ *) say "  note    ${line#note }";;
@@ -632,7 +776,7 @@ if [ "${1:-}" = --apply ]; then shift; apply "$@" < /dev/null; exit $?; fi
 # ---- the lab lead's side ------------------------------------------------------------------------------
 HERE=$(cd "$(dirname "$0")/.." && pwd) || die "cannot find the repository"
 FW="$HERE/framework"
-site=wayne host=wsu-grid root="" roster_file="" dry=0 force=0 quiet=0 open=0 check=0 local_run=0
+site=wayne host=wsu-grid root="" roster_file="" dry=0 force=0 quiet=0 open=0 openv=0 check=0 local_run=0
 readers_file="" service=""
 mode=run every="" svc_flag=0 run_only="" w_part="" w_qos="" w_place_given=0
 setmode() { [ "$mode" = run ] || [ "$mode" = "$1" ] || die "one of --watch, --unwatch and --tick at a time"; mode=$1; }
@@ -646,6 +790,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --dry-run) dry=1; run_only="$run_only $1"; shift;; --force) force=1; run_only="$run_only $1"; shift;;
   --quiet) quiet=1; run_only="$run_only $1"; shift;;
   --open-tree) open=1; run_only="$run_only $1"; shift;; --check-tree) check=1; run_only="$run_only $1"; shift;;
+  --open-volume) openv=1; run_only="$run_only $1"; shift;;
   --here) local_run=1; run_only="$run_only $1"; shift;;
   --watch) setmode watch; shift;; --unwatch) setmode unwatch; shift;;
   --every) every="${2:-}"; shift 2 || die "--every needs a value";;
@@ -663,6 +808,8 @@ else
   # the chain applies the access service's lists as they are, to the root, every few minutes, and nothing else
   [ -z "$run_only" ] || die "--$mode takes no${run_only}: the chain applies the access service's lists as they are"
 fi
+# the opening reads every entry of the volume: in a job on a compute node, never over ssh on the login node
+[ $openv = 0 ] || [ $local_run = 1 ] || die "--open-volume goes with --here, in a Slurm job on a compute node (srun or sbatch): it reads every entry of the volume, which the login node is not for"
 [ "$mode" = tick ] || [ $w_place_given = 0 ] || die "--partition and --qos are what --watch hands each job of the chain; before --watch, set HPCW_ACCESS_PARTITION and HPCW_ACCESS_QOS instead"
 every=${every:-15}
 { [[ "$every" =~ ^[0-9]+$ ]] && [ "$every" -ge 5 ] && [ "$every" -le 1440 ]; } || die "--every is the minutes between two looks of the chain, 5 to 1440: $every"
@@ -1110,7 +1257,7 @@ sweep_r=0
 if [ -n "$pairs$prev_pairs$pending" ] && { [ "$prev_pairs" != "$known_pairs" ] || [ $force = 1 ] || [ $check = 1 ] \
    || { [ -n "$known_pairs$pending" ] && [[ "$prev_swept" < "$today" ]]; }; }; then sweep_r=1; fi
 in_words() { printf '%s\n' "$@" | sed "s#^\([a-z0-9]*\):\.\$#\1 (all of $root)#" | tr '\n' ' ' | sed 's/ $//'; }   # PAIR... -> "id (all of ROOT) id:folder"
-if [ $force = 0 ] && [ $open = 0 ] && [ $check = 0 ] && [ -s "$statef" ] && [ "$prev_target" = "$target" ] \
+if [ $force = 0 ] && [ $open = 0 ] && [ $openv = 0 ] && [ $check = 0 ] && [ -s "$statef" ] && [ "$prev_target" = "$target" ] \
    && [ "$prev_ids" = "$known" ] && [ -z "$due" ] && [ $sweep_r = 0 ]; then
   log "unchanged ($count ids, $nreaders readers, $nwait unknown to the grid$([ -z "$pending" ] || printf '; %s folders not taken back yet' "$(printf '%s\n' $pending | grep -c .)")); not connected"
   if [ $quiet = 0 ]; then
@@ -1127,6 +1274,7 @@ fi
 args="--apply"
 [ $dry = 1 ] && args="$args --dry-run"
 [ $open = 1 ] && args="$args --open-tree"
+[ $openv = 1 ] && args="$args --open-volume"
 [ $check = 1 ] && args="$args --check-tree"
 [ $sweep_r = 1 ] && args="$args --sweep-readers"
 for pair in $pairs; do args="$args --read $pair"; done
@@ -1141,7 +1289,7 @@ else
   out=$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$host" "bash -s -- $args 2>&1" < "$0"); rc=$?
 fi
 # (grep without -q after these pipes: under pipefail, grep -q leaving early fails the printf with SIGPIPE)
-CHANGE_RE='^  (added|changed|removed|skipped|would|open-tree|granted|revoked)|^  FAILED'
+CHANGE_RE='^  (added|changed|removed|skipped|would|open-tree|open-volume: [1-9]|granted|revoked)|^  FAILED'
 if [ $quiet = 0 ]; then
   [ -z "$out" ] || printf '%s\n' "$out"
 elif [ $rc != 0 ] && [ $rc != 2 ]; then

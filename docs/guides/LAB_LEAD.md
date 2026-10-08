@@ -293,9 +293,11 @@ Code. To let a lab-only student in, grant them the extension too.
 Below the folder, everything students use is readable by any account that got in: `shared/`,
 `shared/beethoven` and everything under it (folders `r-x` for others, files `r--`, or `r-x` where the
 file runs, and every folder under `shared/beethoven` carries a default `o::r-x`, so new files inherit
-it). Others never get write. Two folders stay closed to others by their own modes and are never opened
-to them: `shared/access` (`drwx--s---`) and your own `go2432/` (`drwxr-s---`). A reader you approve
-for one of them (below, "Readers") gets the group's read there by a named entry, and no more. `tools/deploy_shared.sh`
+it). Others never get write. Once you have opened the volume (below, "Opening the volume", greg's
+decision of 2026-10-08), everything of yours below the folder that the group reads is readable by
+others too, your own `go2432/` included, and still never writable by them; `shared/access`
+(`drwx--s---`, the applicants' records) stays closed. A reader you approve for a folder (below,
+"Readers") gets the group's read there by a named entry, and no more. `tools/deploy_shared.sh`
 publishes each new version that way, open to others for reading, never for writing, and never touches
 the root's ACL.
 
@@ -394,7 +396,7 @@ tools/grid_access.sh
 ```
 
 On the grid, the same by hand runs in a shell on a compute node, never on the login node (the tool
-reads the service there with `curl` and, for a reader of `.`, walks the whole volume):
+reads the service there with `curl`, and with `--open-volume` walks the whole volume):
 
 ```
 srun -p secp --qos=secondary -t 00:30:00 --pty bash        # a shell on a compute node
@@ -479,7 +481,7 @@ anything under `shared/beethoven`. It ends with the list itself: `grid access li
 It also keeps the readers (below): each gets `user:<AccessID>:--x` on the folder, beside the list's
 `rwx` entries (a reader who is also on the list keeps `rwx`), and the group's read on the folders
 approved for them. A reader of the whole volume (`.`, below) gets the group's read on the folder
-itself instead, `r-x`.
+itself instead, `r-x`, and nothing below it.
 
 Exit 0: done. Exit 1: refused or failed. Exit 2: the list is in place but a check failed; the check's
 line says the fix. For a closed `shared/beethoven`, the fix is `tools/grid_access.sh --open-tree`,
@@ -571,63 +573,49 @@ or finds none left; a run that does not connect says `not taken back yet` with t
 The command by hand also takes entries with write and entries in other students' folders that you own,
 which the tool leaves; the next run then finds nothing left and stops trying.
 
-**The whole volume: the folder `.`** (decided 2026-10-07). The folder `.` is `/rs/rs_grp_oschome`
-itself: its reader reads everything in the volume that the group `oschome` reads, entry by entry as
-above, and nothing more. The access service keeps it as `.` and gives the line `<AccessID> .`; it is
-that reader's only folder, since it covers every other (a named folder listed
-beside it has no sweep of its own). On the volume's folder itself the reader gets the group's read
-there, `r-x` on `drwxrws--T` (list and enter, never write), in place of `--x`; a reader who is also on
-the list keeps `rwx`. Below it, every file and folder you own gets the group's read: your own
-`go2432/` and what the group reads in it, `shared/access` (enter only, `--x`, and nothing on its `0600`
-token) and the rest; where others may read already, nothing is added. Other students' own folders and
-everything in them stay theirs: counted in the reader's line (`... N not go2432's, left as they are`),
-never changed, and never a reason to fail the run. The cap is the one above: the whole volume, the
-students' folders included, holds no more than 200,000 entries, or the reader is a line of its own
-with the count,
+**Opening the volume** (greg, 2026-10-08 00:32Z and 00:36Z: "i genuinely dont care if the students
+have access to all the files", and "i dont want students fuckign up my CI and workers"). Once, on a
+compute node, `tools/grid_access.sh --here --open-volume` does two things to every file and folder you
+own below `/rs/rs_grp_oschome`. First it takes away any write others have (a folder left `2777` by a
+job, a log left `666`), keeping their read and enter, reads every change back, and opens nothing if
+one is still writable. Then it gives others the read and enter the group `oschome` has there, added to
+what others have and never taken away, and never write. Since the folder's own `other::---` keeps out
+every account that is not on the list, that is: every student on the list and every reader reads what
+the group reads, your `go2432/` included, and none of them writes anything of yours. What the group may
+not read stays closed: a job's token (`0600`), a run folder or the locked imaging (`0700`,
+`0500`/`0400`) and everything below a folder that stays closed. `shared/access`, a publish's staging
+folders, other students' folders and everything in them, and links are left as they are. No default entry is
+set, so a file made later reads as its maker's umask makes it (with umask `022` or `002`, readable by
+others already); run the opening again to catch up. It walks the whole volume once, so it runs only
+inside a Slurm job and only with `--here`; it prints how many entries it opened and the folders near
+the top it left closed, and reads back every entry it set:
 
 ```
-  FAILED  reader ab1234: all of /rs/rs_grp_oschome holds 312000 entries, more than 200000; not swept
+srun -p secp --qos=secondary -t 02:00:00 bash ~/hpcworker-access/tools/grid_access.sh --here --open-volume
 ```
 
-and nothing below the folder is changed (its own `r-x` is still given); the walk still reads every
-entry to count them. Each sweep walks the whole volume with `getfacl -R` once for each reader of `.`,
-and once more for each `.` taken off in that run: on the chain's compute node (the grid's way), or on
-warrior over ssh (the PC's way), file work like the rest of this tool. It runs when the reader list
-changes, on the first run of each day while there is such a reader, and with `--force` or
-`--check-tree`. How many entries the volume holds and how long that walk takes on the grid are not
-yet measured. A chain's job has thirty minutes and the PC's task stops a run after ten (whether that
-also ends the walk on warrior is not yet measured); a run cut off before it ends records nothing, so
-every later run would start the whole walk again. So time it before approving `.`, on a compute
-node, never on the login node: put the lines the service gives today (the admin page's readers, or
-`node admin.mjs readers` in its repository) and the line `<AccessID> .` in a file, and name that file
-for one dry run, which walks the volume, prints the count in the reader's line (`... reads as the
-group reads it (N entries; ...)`, or the `FAILED` line above) and changes nothing:
+How long it takes on the grid is not yet measured; `--dry-run` with it counts without changing anything.
+To open a folder the group may not read (a dataset kept at `0700`), give the group its read first
+(`chmod -R g+rX` on that folder) and run the opening again; do not do that to a folder of patients'
+data without the study's approval for it (`go2432/data/imaging` holds DICOM headers with patients'
+names, locked to you alone by its migration plan).
 
-```
-srun -p secp --qos=secondary -t 00:30:00 --pty bash        # a shell on a compute node
-export TMPDIR=$(mktemp -d /tmp/grid_access_by_hand.XXXXXX)  # a new folder, yours alone, on the node's own disk
-cat > "$TMPDIR/readers.txt"                                 # paste today's lines and `<AccessID> .`, then Ctrl-D
-cd ~/hpcworker-access && time bash tools/grid_access.sh --here --dry-run --force --readers-file "$TMPDIR/readers.txt"
-rm -rf "$TMPDIR"; exit
-```
+**The whole volume: the folder `.`** (decided 2026-10-07, made one entry on 2026-10-08). The folder `.`
+is `/rs/rs_grp_oschome` itself. The access service keeps it as `.` (the admin page's "All of the lab
+storage") and gives the line `<AccessID> .`; it is that reader's only folder. Its reader gets on the
+folder itself the group's read there, `r-x` on `drwxrws--T` (list and enter, never write), in place of
+`--x` (a reader who is also on the list keeps `rwx`), and nothing below it: below the folder the reader
+reads what every account on the list reads, which is everything the group reads once the volume is
+opened (above). So approving `.` is one entry, made by the next run (the chain's next look, within its
+minutes), with no walk; taking `.` off takes that entry back the same way (`--x` while the reader still
+reads another folder, gone when they read none). The run prints `.` in words: `readers on
+/rs/rs_grp_oschome: ab1234 (all of /rs/rs_grp_oschome)`. A named folder listed beside `.` (only a file
+of your own can say so; the service never does) is swept as any other.
 
-The readers file takes the place of the service's answer for that run only; the approved list still
-comes from the service, with the grid token. Approve `.` only after that run has ended well inside the
-limit of the way you use: thirty minutes for the chain, ten for the PC's task, with room for the
-volume to grow. On the PC the same run is `-Run -ToolArgs '--dry-run --force --readers-file
-/mnt/c/Users/grego/readers.txt'`, which times the walk from warrior instead.
-Taking `.` off removes every entry of that reader's without write under the folder, but not the
-folder's own entry, which follows the reader list: `--x` while the reader still reads another folder,
-gone when they read none. A reader moved from `.` to named folders, or back, is right after one run
-when the taking back finishes; when it does not (the volume over the cap, or `setfacl` failing), the
-line `FAILED  reader ab1234: all of /rs/rs_grp_oschome not taken back: ...` gives the way by hand
-(`find /rs/rs_grp_oschome/ -mindepth 1 -user go2432 ! -type l -exec setfacl -n -x u:ab1234 {} +`,
-which leaves the folder's own entry to the tool) and the tool tries again as above until it is done.
-The run prints `.` in words: `readers on /rs/rs_grp_oschome: ab1234 (all of /rs/rs_grp_oschome)`.
-Approving `.` approves at once everything below that the group may read, `go2432/` included (next
-paragraph).
-
-Before approving a folder, look at what the group can read in it: the approval gives exactly that. A
+Once the volume is opened, every reader reads everything it opened, whichever folder they were
+approved for, so a folder approval still matters only for a folder the opening left closed (one the
+group may not read stays closed to its reader too). Before approving a folder, look at what the group
+can read in it: the approval gives exactly that. A
 folder holding patients' data (`go2432/` may) is your decision under the study's approval, not this
 tool's. A reader also reaches, as every student on the list does, everything below the root that is
 open to others (`shared/beethoven`). Beethoven for VS Code's own lab access (its grid scripts' `access
@@ -735,8 +723,10 @@ chown to accounts that do not exist), ssh replaced by a stand-in that runs the g
 The readers' grid side was also run once on 2026-10-07 with the real `getfacl` and `setfacl` (acl
 2.3.2, ext4, Ubuntu 24.04) on local accounts standing for a lab lead and two readers, and the kernel
 let each read exactly what the group reads (and nothing at `0600`, nothing under a `drwx--s---`
-folder); that was a cloud container, not CephFS and not the grid. A reader of the whole volume (`.`)
-was run only in the test's temporary folder, with the emulated `setfacl`. The access service as the
+folder); that was a cloud container, not CephFS and not the grid. The opening of the volume
+(`--open-volume`) was run only in the test's temporary folder, with the emulated `setfacl`; the real
+`setfacl -P` (acl 2.3.2) was seen to skip a link named to it, and acl 2.2.51 on the grid is not yet
+measured. The access service as the
 tool's source was run only against a stand-in on `127.0.0.1` that answers the service's published
 vectors (`tools/tests/test_grid_access.sh`); the deployed service has not yet answered the tool,
 and whether your vendor folder under `/mnt/c` has real file modes is not yet measured (above, "When

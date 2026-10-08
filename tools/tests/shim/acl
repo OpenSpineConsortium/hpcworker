@@ -14,7 +14,7 @@
 #     that file is left unchanged;
 #   - getfacl -R walks each folder named, the folder first, links neither listed nor followed (as -P
 #     does), and prints a name holding a backslash or a newline escaped (\\, \012), as getfacl does.
-# Not emulated: setfacl -R, -M, -X, --restore, --set, X in permissions, numeric qualifiers; getfacl -L.
+# setfacl -P skips a link named as an argument. Not emulated: setfacl -R, -M, -X, --restore, --set, X in permissions, numeric qualifiers; getfacl -L.
 # Every call is appended to $SHIM_LOG. With SHIM_ACL_FAIL=x, setfacl -x fails (a grid side that stops
 # half-way).
 set -uo pipefail
@@ -115,9 +115,10 @@ if [ "$me" = getfacl ]; then
 fi
 
 [ "$me" = setfacl ] || { echo "acl shim: called as $me" >&2; exit 2; }
-ops=() paths=() nomask=0 dflag=0
+ops=() paths=() nomask=0 dflag=0 phys=0
 while [ $# -gt 0 ]; do case "$1" in
   -n|--no-mask) nomask=1; shift;;
+  -P|--physical) phys=1; shift;;
   -d|--default) dflag=1; shift;;
   -m|--modify) ops+=("m ${2:?}"); shift 2;;
   -x|--remove) ops+=("x ${2:?}"); shift 2;;
@@ -130,6 +131,8 @@ esac; done
 [ ${#paths[@]} -gt 0 ] || { echo "setfacl: no file given" >&2; exit 2; }
 rc=0
 for p in "${paths[@]}"; do
+  # -P skips a link named as an argument, as setfacl's physical walk does
+  if [ $phys = 1 ] && [ -L "$p" ]; then continue; fi
   if ! readmode "$p"; then echo "setfacl: $p: No such file or directory" >&2; rc=1; continue; fi
   load "$p"
   bad="" named=0 xmask=0 dnamed=0 dxmask=0
