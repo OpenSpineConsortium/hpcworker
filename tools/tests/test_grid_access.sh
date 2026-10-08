@@ -220,11 +220,14 @@ t "a closed folder on the way to hpcworker: FAILED naming it, exit 2, no sweep" 
 t "exit 2 still writes the state (the list was applied)" eval '[ "$(state_ids)" = "ef9012 hy9698" ]'
 ga --roster-file "$T/roster" --check-tree
 t "--check-tree connects although unchanged and sweeps: 1 entry closed" eval 'rc_is 2 && has "^  FAILED  1 entries under shared/beethoven are closed to other, like shared/beethoven/hpcworker/v12 "'
-chmod o+rx "$V/shared/access" "$V/$ME"
+chmod o+rx "$V/shared/access"; chmod o+rwx "$V/$ME"
 ga --roster-file "$T/roster" --open-tree
 t "open-tree reopens hpcworker's folder" eval 'has "^  ok      hpcworker" && [ "$(stat -c %A "$L/hpcworker/v12")" = drwxr-sr-x ]'
-t "an opened shared/access and owner folder: FAILED, and open-tree leaves them alone" eval 'rc_is 2 && has "^  FAILED  shared/access is open to other" && has "^  FAILED  $ME \(the owner.s folder\) is open to other" && [ "$(stat -c %A "$V/shared/access")" = drwx--Sr-x ]'
-chmod o-rx "$V/shared/access" "$V/$ME"
+t "an opened shared/access, an owner folder other may write: FAILED, and open-tree leaves them alone" eval 'rc_is 2 && has "^  FAILED  shared/access is open to other" && has "^  FAILED  $ME \(the owner.s folder\) may be written by other \(drwxr-srwx\) \(fix: chmod o-w " && [ "$(stat -c %A "$V/shared/access")" = drwx--Sr-x ] && [ "$(stat -c %A "$V/$ME")" = drwxr-srwx ]'
+chmod o-rx "$V/shared/access"; chmod o-w "$V/$ME"
+ga --roster-file "$T/roster" --force
+t "an owner folder other may read and enter, not write (the volume opened): ok" eval 'rc_is 0 && lacks FAILED && has "^  ok      $ME \(the owner.s folder\) is not writable by other \(drwxr-sr-x\)$" && has "^  ok      shared is not writable by other "'
+chmod o-rx "$V/$ME"
 ga --roster-file "$T/roster" --force
 t "closed again: every check ok" eval 'rc_is 0 && lacks FAILED'
 
@@ -355,7 +358,7 @@ t "readers: nothing where other reads already, where only other reads, on anothe
 t "readers: the check line counts what was left out" eval 'has "1 open to other already; 1 not $ME.s, left as they are; 1 whose names getfacl escapes"'
 t "readers: no entry the mask cuts, no mode changed, no default entry, the link not followed" eval '! uem "$D/results.csv" hy9698 && ! uem "$D" hy9698 && [ "$(find "$D" "$V/$ME" -printf "%m %p\n" | sort)" = "$MODES0" ] && ! getfacl -R -p "$V/$ME" | grep "^default:" >/dev/null && [ -z "$(ue "$V/shared/access/admin_token" hy9698)" ]'
 t "readers: shared/access closed to the group (2700): nothing for ab1234 there, ok" eval 'has "^  ok      reader ab1234: shared/access reads as the group reads it \(2 entries\)$" && [ -z "$(ue "$V/shared/access" ab1234)" ] && [ -z "$(ue "$V/shared/access/admin_token" ab1234)" ]'
-t "readers: shared/access and the owner's folder still closed to other" eval 'has "^  ok      shared/access is closed to other" && has "^  ok      $ME \(the owner.s folder\) is closed to other"'
+t "readers: shared/access still closed to other, the owner's folder not writable by it" eval 'has "^  ok      shared/access is closed to other" && has "^  ok      $ME \(the owner.s folder\) is not writable by other"'
 t "readers: the readers' line, then the list of rwx entries" eval 'has "^readers on $ROOT: ab1234 \(shared/access\); hy9698 \($ME/data\)$" && last_line_is_list && has "^grid access list on $ROOT: cd5678 hy9698$"'
 t "readers: the state records each pair and the sweep" eval 'grep -qx "# read hy9698 $ME/data" "$STATE" && grep -qx "# read ab1234 shared/access" "$STATE" && grep -qx "# swept $TODAY" "$STATE" && [ "$(state_ids)" = "cd5678 hy9698" ]'
 n=$(calls); ga
@@ -437,8 +440,10 @@ t "back to no reader: ab1234's --x goes" eval 'rc_is 0 && [ -z "$(ue "$V" ab1234
 unset SHIM_GROUP_OWNERS BEETHOVEN_ROSTER_CMD
 
 echo "== readers: the whole volume (\".\")"
-# a fresh small volume, its tree under shared/beethoven opened as on the grid, shared/access at 2710 as on
-# the grid, a 0600 file of the owner's, and a student's own folder (zq0002) holding a file the owner owns
+# "." is the root's entry alone, the group's read there: below the root the reader reads what every account
+# on the list reads, which --open-volume makes what the group reads (greg, 2026-10-08). A fresh small volume,
+# its tree under shared/beethoven opened as on the grid, shared/access at 2710 as on the grid, a 0600 file
+# of the owner's, and a student's own folder (zq0002) holding a file the owner owns
 mkvol; : > "$SHIM_OWNERS"
 export SHIM_USERS="$SHIM_USERS zq0001 zq0002 zq0003" BEETHOVEN_ROSTER_CMD="cat $T/roster" BEETHOVEN_READERS_CMD="cat $T/readers"
 roster zq0003 cd5678; readers '# none'
@@ -455,68 +460,34 @@ MODES1=$(find "$V" -printf '%m %p\n' | sort)
 readers "zq0001 ." "zq0003 ."
 n=$(calls)
 ga --dry-run
-t "whole volume, dry run: the root's r-x and the grant, as would, with the count" eval 'has "^  would add zq0001 \(r-x, a reader\)" && has "^  would grant zq0001 all of $ROOT: 4 entries set to the group.s read, 0 removed where the group may not read, 0 folders on the way made enterable" && has "^  ok      reader zq0001: all of $ROOT would read as the group reads it after this run \([0-9]+ entries; "'
-t "whole volume, dry run: nothing changed" eval '[ -z "$(zq zq0001)" ] && [ "$(calls)" = $((n + 1)) ] && ! grep -q "^# read" "$STATE"'
+t "whole volume, dry run: the root's r-x, as would, and no walk" eval 'has "^  would add zq0001 \(r-x, a reader\)" && lacks "would grant" && [ -z "$(zq zq0001)" ] && [ "$(calls)" = $((n + 1)) ] && ! grep -q "^# read" "$STATE"'
+: > "$SHIM_LOG"
 ga
-t "whole volume: zq0001 gets the group's read on the root (r-x), zq0003 on the list keeps rwx" eval 'has "^  added   zq0001 \(r-x, a reader\)" && [ "$(ue "$V" zq0001)" = r-x ] && [ "$(ue "$V" zq0003)" = rwx ] && [ "$(ue "$V" cd5678)" = rwx ]'
-t "whole volume: granted, read back, exit 0" eval 'rc_is 0 && lacks FAILED && has "^  granted zq0001 all of $ROOT: 4 entries set to the group.s read, 0 removed" && has "^  ok      reader zq0001: all of $ROOT reads as the group reads it \([0-9]+ entries, read back; [0-9]+ open to other already; 4 not $ME.s, left as they are\)$"'
-t "whole volume: what the group reads gets its read (the owner's folder r-x, data r-x, a 0640 file r--)" eval '[ "$(ue "$V/$ME" zq0001)" = r-x ] && [ "$(ue "$V/$ME/data" zq0001)" = r-x ] && [ "$(ue "$V/$ME/data/results.csv" zq0001)" = r-- ] && ! uem "$V/$ME" zq0001'
-t "whole volume: shared/access included, as the group has it: enter only, nothing on its 0600 token" eval '[ "$(ue "$V/shared/access" zq0001)" = --x ] && [ -z "$(ue "$V/shared/access/admin_token" zq0001)" ]'
-t "whole volume: a 0600 file gets nothing" eval '[ -z "$(ue "$V/$ME/secret.txt" zq0001)" ]'
-t "whole volume: a student's own folder is counted and left, the owner's file inside it too" eval '[ -z "$(ue "$V/zq0002" zq0001)" ] && [ -z "$(ue "$V/zq0002/notes.csv" zq0001)" ] && [ -z "$(ue "$V/zq0002/sub/ours.csv" zq0001)" ]'
-t "whole volume: nothing where other reads already (shared/beethoven), no default entry, no mode changed" eval '! getfacl -R -p "$V/shared/beethoven" | grep -E "^(default:)?user:zq0001:" >/dev/null && ! getfacl -R -p "$V" | grep -E "^default:user:(zq0001|zq0003):" >/dev/null && [ "$(find "$V" -printf "%m %p\n" | sort)" = "$MODES1" ]'
-t "whole volume: zq0003's grant is the same below the root" eval '[ "$(zq zq0003 | grep -v "^$V user:")" = "$(zq zq0001 | grep -v "^$V user:" | sed s/zq0001/zq0003/)" ] && [ "$(zq zq0003 | wc -l)" = 5 ]'
+t "whole volume: zq0001 gets the group's read on the root (r-x), zq0003 on the list keeps rwx, exit 0" eval 'rc_is 0 && lacks FAILED && has "^  added   zq0001 \(r-x, a reader\)" && [ "$(ue "$V" zq0001)" = r-x ] && [ "$(ue "$V" zq0003)" = rwx ] && [ "$(ue "$V" cd5678)" = rwx ]'
+t "whole volume: the root's entry and nothing below it, no walk, no mode changed" eval '! grep -E "^getfacl .*-R" "$SHIM_LOG" && [ "$(zq zq0001)" = "$V user:zq0001:r-x" ] && [ "$(zq zq0003)" = "$V user:zq0003:rwx" ] && [ "$(find "$V" -printf "%m %p\n" | sort)" = "$MODES1" ]'
+t "whole volume: a note says what the reader reads" eval 'has "^  note    reader zq0001: all of $ROOT, read below the root as every account on the list reads it \(--open-volume opens it to them\)$"'
 t "whole volume: the list read back expects the root's r-x, the root's entries ok" eval 'has "^  ok      the list read back from $ROOT is the list applied$" && has "^  ok      the root.s entries: each of the 3 "'
 t "whole volume: the readers' line says it in words, then the list" eval 'has "^readers on $ROOT: zq0001 \(all of $ROOT\); zq0003 \(all of $ROOT\)$" && last_line_is_list && has "^grid access list on $ROOT: cd5678 zq0003$"'
 t "whole volume: the state records \".\"" eval 'grep -qx "# read zq0001 ." "$STATE" && grep -qx "# read zq0003 ." "$STATE"'
 ACLS1=$(getfacl -R -p "$V")
 ga --force
-t "whole volume, a second run: nothing changes, the root's entry stays r-x" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && has "^  ok      reader zq0001: all of $ROOT reads as the group reads it \([0-9]+ entries; " && [ "$(getfacl -R -p "$V")" = "$ACLS1" ]'
+t "whole volume, a second run: nothing changes, the root's entry stays r-x" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS1" ]'
 n=$(calls); ga
 t "whole volume, unchanged the same day: no connection, the readers in words" eval 'rc_is 0 && [ "$(calls)" = $n ] && has "^readers on $ROOT: zq0001 \(all of $ROOT\) zq0003 \(all of $ROOT\)$"'
-echo new > "$V/$ME/data/new.csv"; chmod 640 "$V/$ME/data/new.csv"
-GA_READ_CAP=5 ga --force
-t "whole volume over the cap: FAILED with the count, nothing swept, exit 2" eval 'rc_is 2 && has "^  FAILED  reader zq0001: all of $ROOT holds [0-9]+ entries, more than 5; not swept" && lacks "^  granted " && [ -z "$(ue "$V/$ME/data/new.csv" zq0001)" ] && [ "$(ue "$V" zq0001)" = r-x ]'
-# a setfacl that skips one path and still exits 0: the read-back, not setfacl's word, decides (the shim
-# stays as it is; the stand-in sits before it on PATH and hands it every other path)
-mkdir -p "$T/real"; ln -s "$T/bin/acl.shim" "$T/real/setfacl"; rm "$T/bin/setfacl"
-printf '%s\n' '#!/usr/bin/env bash' 'a=() n=0' \
-  'while [ $# -gt 0 ]; do case "$1" in -m|-x) a+=("$1" "$2"); shift 2;; -*) a+=("$1"); shift;; *) [ "$1" = "$SHIM_DROP" ] || { a+=("$1"); n=$((n + 1)); }; shift;; esac; done' \
-  "[ \$n -gt 0 ] || exit 0; exec '$T/real/setfacl' \"\${a[@]}\"" > "$T/bin/setfacl"
-chmod 755 "$T/bin/setfacl"
-SHIM_DROP="$V/$ME/data/new.csv" ga --force
-t "a setfacl that skips an entry and says nothing: the read-back finds it, FAILED, exit 2" eval 'rc_is 2 && has "^  FAILED  reader zq0001: 1 entries under all of $ROOT still differ from the group.s read after setfacl$" && lacks "^  ok      reader zq0001:" && [ -z "$(ue "$V/$ME/data/new.csv" zq0001)" ]'
-rm "$T/bin/setfacl"; ln -s acl.shim "$T/bin/setfacl"
-ga --force
-t "within the cap again: the new file gets its entry" eval 'rc_is 0 && has "^  granted zq0001 all of $ROOT: 1 entries" && [ "$(ue "$V/$ME/data/new.csv" zq0001)" = r-- ]'
-ZQ1=$(zq zq0001); ACLS1=$(getfacl -R -p "$V")
 readers "zq0001 ." "zq0001 $ME/data" "zq0003 ."
 ga
-t "\".\" and a named folder: the folder is covered, no sweep of its own, nothing changes" eval 'rc_is 0 && lacks FAILED && has "^  note    reader zq0001: $ME/data is part of all of $ROOT, so it has no sweep of its own" && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS1" ]'
+t "\".\" and a named folder: the folder is swept as any other, the root stays r-x" eval 'rc_is 0 && lacks FAILED && has "^  granted zq0001 $ME/data: " && [ "$(ue "$V/$ME/data/results.csv" zq0001)" = r-- ] && [ "$(ue "$V/$ME" zq0001)" = --x ] && [ "$(ue "$V" zq0001)" = r-x ]'
 t "\".\" and a named folder: both on the readers' line" eval 'has "^readers on $ROOT: zq0001 \(all of $ROOT, $ME/data\); zq0003 \(all of $ROOT\)$"'
+readers "zq0001 ." "zq0003 ."
+ga
+t "the named folder taken off beside \".\": taken back, the --x on the way too, the root r-x" eval 'rc_is 0 && lacks FAILED && has "^  revoked zq0001 $ME/data: " && has "^  revoked zq0001 $ME: its --x" && [ "$(zq zq0001)" = "$V user:zq0001:r-x" ]'
 readers "zq0001 $ME/data"
 ga
-t "\".\" taken off, a named folder kept: the root's entry back to --x" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: r-x -> --x" && [ "$(ue "$V" zq0001)" = --x ] && has "^  ok      the list read back from $ROOT is the list applied$"'
-t "\".\" taken off: everything else of zq0001's goes, then the named folder is granted" eval 'has "^  revoked zq0001 all of $ROOT: 5 entries removed" && has "^  granted zq0001 $ME/data: " && [ "$(ue "$V/$ME" zq0001)" = --x ] && [ "$(ue "$V/$ME/data" zq0001)" = r-x ] && [ "$(ue "$V/$ME/data/results.csv" zq0001)" = r-- ] && [ -z "$(ue "$V/shared/access" zq0001)" ] && [ "$(zq zq0001 | wc -l)" = 5 ]'
-t "\".\" taken off zq0003, on the list: its entries go, its rwx on the root stays" eval 'has "^  revoked zq0003 all of $ROOT: 5 entries removed" && [ "$(zq zq0003)" = "$V user:zq0003:rwx" ]'
-ACLS2=$(getfacl -R -p "$V")
-ga --force
-t "and a second run changes nothing (no flip on the root)" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS2" ]'
-readers "zq0001 ."
-ga
-t "back to \".\": the named folder's entries are not taken back first, the root r-x again" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: --x -> r-x" && has "^  note    zq0001 $ME/data: still read with all of $ROOT, nothing taken back" && lacks "^  revoked " && has "^  granted zq0001 all of $ROOT: 2 entries"'
-t "back to \".\": the same entries as the first time" eval '[ "$(zq zq0001)" = "$ZQ1" ]'
-# a folder the group may enter and not list (2710), on the way to a named folder: its --x is what "." gives too
-mkdir -m 2710 "$V/lab"; mkdir -m 2750 "$V/lab/pub"; echo pub > "$V/lab/pub/a.csv"; chmod 640 "$V/lab/pub/a.csv"
-readers "zq0001 lab/pub"
-ga
-t "from \".\" to a folder behind a 2710 one: --x on the way, the folder's read" eval 'rc_is 0 && lacks FAILED && [ "$(ue "$V/lab" zq0001)" = --x ] && [ "$(ue "$V/lab/pub/a.csv" zq0001)" = r-- ] && [ "$(ue "$V" zq0001)" = --x ] && [ -z "$(ue "$V/$ME" zq0001)" ]'
-readers "zq0001 ."
-ga
-t "and back to \".\": the --x on the way stays (\".\" needs it), nothing taken back" eval 'rc_is 0 && lacks FAILED && lacks "^  revoked " && [ "$(ue "$V/lab" zq0001)" = --x ] && [ "$(ue "$V/lab/pub/a.csv" zq0001)" = r-- ] && [ "$(ue "$V/$ME" zq0001)" = r-x ] && [ "$(ue "$V" zq0001)" = r-x ]'
+t "\".\" taken off, a named folder kept: the root's entry back to --x, the folder granted, nothing else" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: r-x -> --x" && lacks "revoked zq0001 all of" && [ "$(ue "$V" zq0001)" = --x ] && [ "$(ue "$V/$ME/data/results.csv" zq0001)" = r-- ] && has "^  ok      the list read back from $ROOT is the list applied$"'
+t "\".\" taken off zq0003, on the list: its rwx on the root stays, nothing else to take back" eval 'lacks "revoked zq0003" && [ "$(zq zq0003)" = "$V user:zq0003:rwx" ]'
 readers '# none'
 ga
-t "\".\" taken off, no folder left: every entry of zq0001's goes, the root's too" eval 'rc_is 0 && lacks FAILED && has "^  removed zq0001 \(was r-x\)" && has "^  revoked zq0001 all of $ROOT: 8 entries removed" && [ -z "$(zq zq0001)" ] && lacks "^readers on " && ! grep -q "^# read" "$STATE"'
+t "every folder taken off: zq0001's entries go, the root's too" eval 'rc_is 0 && lacks FAILED && has "^  removed zq0001 \(was --x\)" && [ -z "$(zq zq0001)" ] && lacks "^readers on " && ! grep -q "^# read" "$STATE"'
 # the root's entry for "." is the group's read there, not a fixed r-x: a root whose group may enter and
 # not list (g::-wx, the mask still rwx) gives a reader of "." enter only
 setfacl -n -m g::-wx "$V"
@@ -526,34 +497,79 @@ t "a root whose group entry lacks r: a reader of \".\" gets --x there, as the gr
 ga --force
 t "and a second run leaves the root at --x" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(ue "$V" zq0001)" = --x ]'
 setfacl -n -m g::rwx "$V"
-# Beethoven for VS Code's grid scripts give each applicant r-- on their own status file
-# (shared/access/status/<id>.json, 0600) and the --x on the way; a sweep of "." leaves that r-- alone
-mkdir -m 2710 "$V/shared/access/status"
-( umask 077; echo '{"user":"zq0001","state":"approved"}' > "$V/shared/access/status/zq0001.json" )
-setfacl -m u:zq0001:r-- "$V/shared/access/status/zq0001.json"
-setfacl -n -m u:zq0001:--x "$V/shared/access" "$V/shared/access/status"
-ga --force
-t "a reader's own status file of Beethoven for VS Code: its r-- left as it is, and said" eval 'rc_is 0 && lacks FAILED && has "^  changed zq0001: --x -> r-x" && [ "$(ue "$V/shared/access/status/zq0001.json" zq0001)" = r-- ] && [ "$(ue "$V/shared/access/status" zq0001)" = --x ] && has "^  ok      reader zq0001: all of $ROOT reads as the group reads it \(.*; zq0001.s own status file of Beethoven for VS Code left as it is\)$"'
-ACLS3=$(getfacl -R -p "$V")
-ga --force
-t "and the next sweep does not take it either" eval 'rc_is 0 && lacks FAILED && lacks "^  (added|changed|removed|granted|revoked) " && [ "$(getfacl -R -p "$V")" = "$ACLS3" ]'
-# taking back that does not finish (over the cap, a setfacl that fails) is kept in the state and passed
-# again at the next sweep until it does; a dropped pair would leave the reader its entries for good
+# an older state may keep "# unread <id> ." (a taking back of the old whole-volume sweep that did not
+# finish): there is nothing below the root to take back, so it goes at the next sweep
 readers '# none'
-GA_READ_CAP=5 ga
-t "\".\" taken off over the cap: FAILED, the way by hand given, nothing taken back, kept as # unread" eval 'rc_is 2 && has "^  removed zq0001 \(was r-x\)" && has "^  FAILED  reader zq0001: all of $ROOT not taken back: it holds [0-9]+ entries, more than 5 \(tried again on the first run of a later day, or now with --force; by hand, on the login node: find $V -mindepth 1 -user $ME ! -type l -exec setfacl -n -x u:zq0001 \{\} \+\)$" && [ "$(ue "$V/$ME" zq0001)" = r-x ] && grep -qx "# unread zq0001 ." "$STATE" && ! grep -q "^# read" "$STATE"'
-n=$(calls); ga
-t "the same day: not tried again, no connection, and it says what waits" eval 'rc_is 0 && [ "$(calls)" = $n ] && has "^not taken back yet, tried again on the first run of a later day \(or now with --force\): zq0001 \(all of $ROOT\)$" && grep -q "1 folders not taken back yet); not connected$" "$LOG"'
-sed -i "s/^# swept .*/# swept 2000-01-01/" "$STATE"
 ga
-t "a later day, within the cap: taken back, the status file's r-- with it, and no longer kept" eval 'rc_is 0 && [ "$(calls)" = $((n + 1)) ] && has "^  revoked zq0001 all of $ROOT: [0-9]+ entries removed" && [ -z "$(zq zq0001)" ] && ! grep -q "^# unread" "$STATE"'
-readers "zq0003 ."
+printf '# unread zq0003 .\n' >> "$STATE"; sed -i "s/^# swept .*/# swept 2000-01-01/" "$STATE"
 ga
-readers '# none'
-SHIM_ACL_FAIL=x ga
-t "\".\" taken off a list member, setfacl failing: FAILED, kept as # unread, its rwx on the root kept" eval 'rc_is 2 && has "^  FAILED  reader zq0003: all of $ROOT not taken back: setfacl failed on part of it \(tried again on the first run of a later day, or now with --force\)$" && grep -qx "# unread zq0003 ." "$STATE" && [ "$(ue "$V/$ME" zq0003)" = r-x ] && [ "$(ue "$V" zq0003)" = rwx ]'
-ga --force
-t "--force tries it at once: taken back, only the list's rwx left" eval 'rc_is 0 && has "^  revoked zq0003 all of $ROOT: " && [ "$(zq zq0003)" = "$V user:zq0003:rwx" ] && ! grep -q "^# unread" "$STATE"'
+t "an old \"# unread <id> .\": nothing taken back, no longer kept" eval 'rc_is 0 && lacks FAILED && lacks "revoked zq0003" && ! grep -q "^# unread" "$STATE"'
+
+echo "== --open-volume: other reads what the group reads, below the gate"
+# what greg asked on 2026-10-08: everything of his the group reads, his own folder included, readable by
+# every account on the list, and nothing writable by them. A tree with what must stay closed beside it
+mkvol; : > "$SHIM_OWNERS"; readers '# none'
+ga --open-tree
+chmod 2710 "$V/shared/access"
+D=$V/$ME; mkdir -p "$D/runs/r1" "$D/imaging/raw" "$D/images" "$D/tmpw" "$D/sticky" "$D/half" "$L/hpcworker/.incoming-x"
+echo token > "$D/runs/r1/job.token"; chmod 600 "$D/runs/r1/job.token"; chmod 2700 "$D/runs/r1"
+echo conn > "$D/runs/connection.json"; chmod 640 "$D/runs/connection.json"; chmod 2750 "$D/runs"
+echo scan > "$D/imaging/raw/a.dcm"; chmod 400 "$D/imaging/raw/a.dcm"; chmod 500 "$D/imaging/raw"; chmod 700 "$D/imaging"
+echo sif > "$D/images/a.sif"; chmod 640 "$D/images/a.sif"; chmod 2750 "$D/images"
+echo run > "$D/images/run.sh"; chmod 750 "$D/images/run.sh"
+echo grp > "$D/images/g.txt"; chmod 600 "$D/images/g.txt"; setfacl -m g::r-- "$D/images/g.txt"   # the group's read through the ACL
+echo named > "$D/images/n.txt"; chmod 600 "$D/images/n.txt"; setfacl -m "g:$GRP:r--" "$D/images/n.txt"   # through the group's named entry
+echo w > "$D/tmpw/f"; chmod 640 "$D/tmpw/f"; chmod 2777 "$D/tmpw"
+echo s > "$D/sticky/f"; chmod 640 "$D/sticky/f"; chmod 3777 "$D/sticky"
+mkdir -p "$D/logs" "$D/work"; echo l > "$D/logs/x.log"; chmod 666 "$D/logs/x.log"; chmod 2750 "$D/logs"   # other may write what it cannot reach yet
+echo r > "$D/work/run.sh"; chmod 750 "$D/work/run.sh"; chmod 2777 "$D/work"
+mkdir "$D/half/in"; echo h > "$D/half/in/f"; chmod 640 "$D/half/in/f"; chmod 2750 "$D/half/in"
+chmod 2740 "$D/half"; setfacl -n -m m::rwx "$D/half"   # the mask lets x through, the group's entry has none
+echo stage > "$L/hpcworker/.incoming-x/f"; chmod 640 "$L/hpcworker/.incoming-x/f"; chmod 2750 "$L/hpcworker/.incoming-x"
+ln -s ../../shared/access/admin_token "$D/token.link"
+mkdir -m 2750 "$V/zq0002"; echo theirs > "$V/zq0002/notes.csv"; chmod 640 "$V/zq0002/notes.csv"; owns "$V/zq0002" zq0002; owns "$V/zq0002/notes.csv" zq0002
+chmod 2750 "$D"
+om() { stat -c %A "$1" | cut -c8-10; }   # PATH -> other's three places
+MODES2=$(find "$V/shared/access" "$V/zq0002" "$D/runs/r1" "$D/imaging" "$L/hpcworker/.incoming-x" -printf '%m %p\n' | sort)
+n=$(calls)
+ga --here --open-volume
+t "open-volume: refused outside a job step on a compute node, nothing changed" eval 'rc_is 1 && has "runs in a job step on a compute node" && [ "$(om "$D")" = --- ]'
+OUT=$(SLURM_JOB_ID=1 bash "$GA" --site wayne --root "$ROOT" --here --open-volume 2>&1); RC=$?; runs=$((runs + 1))
+t "open-volume: a job with no step on a node (salloc's own shell) is refused too" eval 'rc_is 1 && has "runs in a job step on a compute node" && [ "$(om "$D")" = --- ]'
+OUT=$(bash "$GA" --site wayne --root "$ROOT" --open-volume 2>&1); RC=$?   # refused before the log is opened: no run
+t "open-volume: refused without --here (it would run on the login node), no connection" eval 'rc_is 1 && has "goes with --here" && [ "$(calls)" = $n ] && [ "$(om "$D")" = --- ]'
+OUT=$(SLURMD_NODENAME=node1 bash "$GA" --site wayne --root "$ROOT" --here --open-volume --dry-run 2>&1); RC=$?; runs=$((runs + 1))
+t "open-volume, dry run: says what it would close to writing and open, changes nothing" eval 'has "^  would open-volume: 4 entries no longer writable by other$" && has "^  would open-volume: [0-9]+ entries opened to other" && [ "$(om "$D")" = --- ] && [ "$(om "$D/images/a.sif")" = --- ] && [ "$(om "$D/logs/x.log")" = rw- ]'
+: > "$SHIM_LOG"
+OUT=$(SLURMD_NODENAME=node1 bash "$GA" --site wayne --root "$ROOT" --here --open-volume 2>&1); RC=$?; runs=$((runs + 1))
+t "open-volume: write taken first, then opened and read back, exit 0" eval 'rc_is 0 && lacks FAILED && has "^  open-volume: 4 entries no longer writable by other$" && has "^  open-volume: [0-9]+ entries opened to other for reading as the group reads them" && has "^  ok      the volume: other reads what the group reads below the gate, and writes nothing of $ME.s \([0-9]+ opened now, 4 closed to writing, read back\)$"'
+t "open-volume: what other could write behind a closed folder is read only before the folder opens" eval '[ "$(om "$D/logs")" = r-x ] && [ "$(om "$D/logs/x.log")" = r-- ] && [ "$(om "$D/work")" = r-x ] && [ "$(om "$D/work/run.sh")" = r-x ]'
+t "open-volume: the owner's folder and what the group reads in it: r-x or r--, never w" eval '[ "$(om "$D")" = r-x ] && [ "$(om "$D/runs")" = r-x ] && [ "$(om "$D/runs/connection.json")" = r-- ] && [ "$(om "$D/images/a.sif")" = r-- ] && [ "$(om "$D/images/run.sh")" = r-x ] && [ "$(om "$D/data/results.csv")" = r-- ] && ! find "$V" -mindepth 1 ! -type l -perm -0002 | grep . >/dev/null'
+t "open-volume: the group's read through its ACL entry or its named entry counts" eval '[ "$(om "$D/images/g.txt")" = r-- ] && [ "$(om "$D/images/n.txt")" = r-- ]'
+t "open-volume: a job token, a run folder, the locked scans, shared/access, staging, a student's folder: untouched" eval '[ "$(om "$D/runs/r1/job.token")" = --- ] && [ "$(find "$V/shared/access" "$V/zq0002" "$D/runs/r1" "$D/imaging" "$L/hpcworker/.incoming-x" -printf "%m %p\n" | sort)" = "$MODES2" ]'
+t "open-volume: folders others could write, sticky or not: write taken, then opened with what is in them" eval '[ "$(om "$D/tmpw")" = r-x ] && [ "$(om "$D/tmpw/f")" = r-- ] && [ "$(om "$D/sticky")" = r-t ] && [ "$(om "$D/sticky/f")" = r-- ]'
+t "open-volume: below a folder the group may not enter (its entry, the mask aside): nothing opened" eval '[ "$(om "$D/half")" = r-- ] && [ "$(om "$D/half/in")" = --- ] && [ "$(om "$D/half/in/f")" = --- ]'
+t "open-volume: the root keeps other::---, no default entry, the link not followed" eval '[ "$(stat -c %A "$V")" = drwxrws--T ] && ! getfacl -R -p "$D" | grep "^default:" >/dev/null && [ "$(om "$V/shared/access/admin_token")" = --- ]'
+t "open-volume: setfacl -P, never on shared/access or the student's folder" eval 'grep -q "^setfacl -P -n -m o::" "$SHIM_LOG" && ! grep -E "^setfacl .*($V/shared/access|$V/zq0002)" "$SHIM_LOG"'
+t "open-volume: the folders left closed near the top, named" eval 'has "^  open-volume: folders left closed near the top .*: .*$ME/imaging" && has "$ME/runs/r1" && lacks "others may write it\)"'
+t "open-volume: the owner's folder, read and not written by other, ok" eval 'has "^  ok      $ME \(the owner.s folder\) is not writable by other \(drwxr-sr-x\)$" && has "^  ok      shared/access is closed to other"'
+ACLS4=$(getfacl -R -p "$V"); : > "$SHIM_LOG"
+OUT=$(SLURMD_NODENAME=node1 bash "$GA" --site wayne --root "$ROOT" --here --open-volume 2>&1); RC=$?; runs=$((runs + 1))
+t "open-volume again: nothing to open, nothing changed" eval 'rc_is 0 && has "^  open-volume: 0 entries opened" && lacks "no longer writable" && ! grep -q "^setfacl " "$SHIM_LOG" && [ "$(getfacl -R -p "$V")" = "$ACLS4" ]'
+OUT=$(SLURMD_NODENAME=node1 bash "$GA" --site wayne --root "$ROOT" --here --open-volume --quiet 2>&1); RC=$?; runs=$((runs + 1))
+t "open-volume --quiet with nothing to open: says nothing" eval 'rc_is 0 && [ -z "$OUT" ]'
+echo new > "$D/images/new.csv"; chmod 640 "$D/images/new.csv"
+mkdir -p "$T/real"; ln -sf "$T/bin/acl.shim" "$T/real/setfacl"; rm "$T/bin/setfacl"
+printf '%s\n' '#!/usr/bin/env bash' 'a=() n=0' \
+  'while [ $# -gt 0 ]; do case "$1" in -m|-x) a+=("$1" "$2"); shift 2;; -*) a+=("$1"); shift;; *) [ "$1" = "$SHIM_DROP" ] || { a+=("$1"); n=$((n + 1)); }; shift;; esac; done' \
+  "[ \$n -gt 0 ] || exit 0; exec '$T/real/setfacl' \"\${a[@]}\"" > "$T/bin/setfacl"
+chmod 755 "$T/bin/setfacl"
+OUT=$(SHIM_DROP="$D/images/new.csv" SLURMD_NODENAME=node1 bash "$GA" --site wayne --root "$ROOT" --here --open-volume 2>&1); RC=$?; runs=$((runs + 1))
+t "a setfacl that skips an entry and says nothing: the read-back finds it, FAILED, exit 2" eval 'rc_is 2 && has "^  FAILED  the volume: 1 entries still closed to other after setfacl" && [ "$(om "$D/images/new.csv")" = --- ]'
+rm "$T/bin/setfacl"; ln -s acl.shim "$T/bin/setfacl"
+roster zq0003 cd5678; readers "zq0001 ."
+ga
+t "then a reader of \".\": one entry on the root, and it reads what the list reads" eval 'rc_is 0 && lacks FAILED && [ "$(zq zq0001)" = "$V user:zq0001:r-x" ]'
 cp "$STATE" "$T/state.before"; n=$(calls); before=$(named)
 for bad in "zq0001 ./x" "zq0001 .." "zq0001 /" "zq0001 ./" "zq0001 x/." "zq0001 . x"; do
   readers "zq0001 ." "$bad"

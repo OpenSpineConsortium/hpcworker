@@ -310,15 +310,17 @@ student's setup line ends `Permission denied` (exit 126). The image, `claude_bin
 Below the gate, `shared/` and everything under `shared/beethoven` is readable by others (folders
 `r-x`, files `r--` or `r-x` where they run, a default `o::r-x` on every folder so new files inherit
 it), and the published tree gives the group and others read and execute and no write, so a student
-can run the lab's code and cannot change it; `shared/access` and the lab lead's own folder stay
-closed to others by their own modes. Beside the list, `tools/grid_access.sh` keeps the **readers**
+can run the lab's code and cannot change it. `tools/grid_access.sh --here --open-volume`, run once in
+a Slurm job (greg, 2026-10-08), gives others below the gate the read and enter the group has on every
+entry the lab lead owns, the lab lead's own folder included, never write; a `0600` token, a `0700`
+folder and all below it, `shared/access`, students' folders and links stay as they are. Beside the list, `tools/grid_access.sh` keeps the **readers**
 (the access service's read-only approvals, its `GET /admin/readers.txt`: `<AccessID> <folder>`
 lines, a folder under the root or `.` for the whole volume): `--x` on the root, and under each approved folder a named entry equal to
 the read and enter the group `oschome` has on each entry there, never write and never a default
 entry, swept when the reader list changes and once a day. A reader of `.` gets the group's read on
-the root itself (`r-x` on `drwxrws--T`; an account on the list keeps `rwx`) and the sweep is the
-whole volume, one `getfacl -R` walk for each such reader; other students' own folders, and anything
-inside them, are counted and left as they are. A taking back that did not finish (over the cap, or a
+the root itself (`r-x` on `drwxrws--T`; an account on the list keeps `rwx`) and nothing below it, where
+it reads what every account on the list reads (what the opening made the group's read), so approving
+`.` is one entry and no walk. A taking back that did not finish (over the cap, or a
 `setfacl` that failed) is kept in the state as `# unread <id> <folder>` and tried again at the next
 day's sweep, or at once with `--force` (`docs/guides/LAB_LEAD.md`, section 9). The directory above the copy, `shared/beethoven`, stays group-writable, so
 a member of the group could still rename `hpcworker/` itself (`OPEN_QUESTIONS.md`).
