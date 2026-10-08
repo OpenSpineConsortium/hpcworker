@@ -162,6 +162,25 @@ under that account and no other. Everything below is designed and tested against
 | How long does an install take on a compute node: `deploy_shared.sh --here --dry-run`, then the publish (tar, `chmod`, `setfacl` over the version's files on the lab volume)? | `tools/grid_deploy.sbatch` has twenty minutes of wall time and waits at most ten of them for another install's lock, which leaves ten for its own two runs; a publish cut off by the wall time leaves a `.incoming-v<N>` folder for a person to remove | The first install job's log: its first and last lines carry the times, and `sacct -j <id> -o Elapsed` | Not yet measured (seconds on a laptop's disk, against a temporary root) |
 | Is the compute nodes' `git` the login node's (with `git worktree`), and is `flock` honoured on the lab volume between a login node and a compute node? | One clone serves a person's run and the watcher; git there runs under `<clone>/.lock`, and installs one at a time under `deploy.lock` | `git --version` and `flock --version` in a tick's log; a person's `grid_ci.sh` run while a tick fetches | Not yet measured |
 
+## The grid keeps its own access lists (decided 2026-10-07)
+
+The lab lead's PC has no WSL, so the scheduled task there cannot run; the grid applies the access
+service's two lists itself (`guides/LAB_LEAD.md`, section 9). `tools/grid_access.sh --watch`, started
+once in a grid shell under the account that owns the volume's root, queues `tools/grid_access_watch.sbatch`
+(job name `hpcw_access`, thirty minutes of wall time), which queues its successor fifteen minutes on
+with `--begin` and `--dependency=singleton` and then runs the tool as `--here --quiet` on its compute
+node with the vendor folder's `grid_token`, a token that reads the two lists and nothing else. The
+`getfacl`/`setfacl` and singleton-chain questions of the CI lane above hold for this chain too (the
+tool refuses on a node without the two, naming the node, and changes nothing). Designed and tested
+against stand-ins (`tools/tests/test_grid_access.sh`); none of it has run on the grid yet.
+
+| Question | Why it matters | First test | Result |
+|---|---|---|---|
+| Do compute nodes reach the access service, `https://beethoven-access.openspineconsortium.workers.dev`? | Each job asks it for both lists with `curl`; with no way there every look refuses and the list on the grid stays as it was | The first job's lines in `~/.beethoven-vendor/access-watch/access.log` and `~/.beethoven-vendor/state/grid_access.log`: `tick done: exit 0` and an `applied ...` or `unchanged ...` line mean it answered; `could not be reached for the approved list (curl: ...)` names the host it could not reach | Not yet measured. What is known: on 2026-09-28 `asx15` reached `api.anthropic.com` and `platform.claude.com` directly; that says nothing yet about Cloudflare's `workers.dev` |
+| Does the service accept the grid token for the two lists? | The chain uses nothing else, and refuses to start while `admin_token` is in the grid's vendor folder | The first job's lines in `access.log`: no `did not accept the token ... check grid_token` line | Not yet measured: the token is made on the service's admin page, and the contract pinned here (`interface/access/`) still names only the admin token for the two routes until the service publishes the grid token and `interface/access/pull.sh` takes it |
+| Which curl do the compute nodes have, and does it send the token the way the tool hands it over? | The tool gives curl the token in a configuration file (`curl -q -K FILE`, a `header = "..."` line), never on its command line; `-H @FILE`, the earlier way, is curl 7.55's and later, and an older curl (CentOS 7 ships 7.29) sends nothing for it, so every look would come back 401 | The first job of the chain writes `curl on <node>: curl <version> ...` to `~/.beethoven-vendor/access-watch/access.log`; no `did not accept the token` line after it means the header arrived | Not yet measured on the grid. Measured 2026-10-07 in a cloud container, against the test's stand-in service: a curl built from the source of the `curl-7_29_0` tag (it names itself 7.28.2-DEV, as a build from the repository does) sent the header from the tool's own `-q -K FILE` (200) and sent nothing for `-H @FILE` (401); that says nothing yet about the nodes' own curl |
+| How long does a sweep of the whole volume (a reader of `.`) take inside a chain job, on a compute node over CephFS? | The job has thirty minutes; a sweep cut off records nothing, so every later job would start it again | Before approving `.`: `time bash tools/grid_access.sh --here --dry-run --force --readers-file FILE` on a compute node, the file holding today's readers and `<AccessID> .` (`guides/LAB_LEAD.md`, section 9) | Not yet measured; nobody reads `.` yet |
+
 ## Two questions that are not technical
 
 Run in parallel with the above; both precede any paid licence (report, "Licensing and terms carry-over").

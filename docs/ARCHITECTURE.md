@@ -285,14 +285,20 @@ change (two members on 2026-09-29, `OPEN_QUESTIONS.md`, "The lab's shared copy o
 students are not in it, and it is not the list. **The approved list is the root's named-user ACL
 entries**, `user:<AccessID>:rwx` (rwx, because each student makes their own `shared_state_dir` folder
 there), which `tools/grid_access.sh` keeps equal to the accounts the access service approved with the
-extension grant (the service's `GET /admin/roster.txt`, which the tool reads itself with the admin
-token from the vendor folder's `admin_token`, carried in a header file curl reads and never on a
-command line; the service is in `OpenSpineConsortium/beethoven-access`, and its published contract,
+extension grant (the service's `GET /admin/roster.txt`, which the tool reads itself with a token from
+the vendor folder: `grid_token`, made on the service's admin page, which reads the two lists and
+nothing else, else `admin_token`, the maintainer's, which can also approve accounts and is kept on a
+PC only; carried in a configuration file curl reads (`-q -K`) and never on a command line; the service is in `OpenSpineConsortium/beethoven-access`, and its published contract,
 `interface/contract/`, is what the tool codes to: not the store reviewers' mock account, and not an
 approval for the lab only, which by design never opens the grid's folders; only an answer of 200
 plain text counts, and a 401, 403, 404, a page in front or no answer refuses with nothing changed),
-run every fifteen minutes from the lab lead's PC by a Windows Scheduled Task
-(`tools/grid_access_task.ps1`, which is installed only after one run the lab lead watched). It connects to the grid only when the list has changed (an approved
+run every fifteen minutes on the cluster by a chain of short Slurm jobs under the root's owner
+(`tools/grid_access.sh --watch`, started once in a grid shell; each `tools/grid_access_watch.sbatch`
+job queues its successor with `--begin` and `--dependency=singleton`, then applies the lists from its
+compute node with `grid_token`, and `--watch` refuses while `admin_token` is in the grid's vendor
+folder; Wayne State's way since 2026-10-07, the lab lead's PC having no WSL), or from a lab lead's PC
+by a Windows Scheduled Task (`tools/grid_access_task.ps1`, which is installed only after one run the
+lab lead watched); one of the two, never both. It connects to the grid only when the list has changed (an approved
 AccessID the grid does not know yet is recorded with the day and tried again once a day), refuses a
 root that has lost `other::---` or its sticky bit, reports every entry of the root that sits in
 another student's place (named like an AccessID but owned by another account, or a link) or belongs

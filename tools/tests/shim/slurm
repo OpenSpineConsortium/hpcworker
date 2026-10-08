@@ -12,8 +12,10 @@
 # _<12 hex>) finishes a job at once: its first line is the state, the rest the log. While
 # $SHIM_SLURM/refuse exists sbatch refuses with its text; while $SHIM_SLURM/refuse-<name> exists it
 # refuses only a job of that name. While $SHIM_SLURM/warn exists sbatch also writes its text to stderr
-# when it takes a job, as sbatch's own warnings and a site's submit plugin do. sacct refuses a -j list
-# that is not job numbers, as the real one does.
+# when it takes a job, as sbatch's own warnings and a site's submit plugin do. While $SHIM_SLURM/sqwarn
+# exists squeue writes its text to stderr before it answers (a site's notice, a setting it complains of),
+# and while $SHIM_SLURM/sqout exists it writes that text to its output first (an answer that is not the
+# job list asked for). sacct refuses a -j list that is not job numbers, as the real one does.
 set -uo pipefail
 S=${SHIM_SLURM:?SHIM_SLURM is not set}
 ROOT=${SHIM_SLURM_ROOT:?SHIM_SLURM_ROOT is not set}
@@ -62,6 +64,8 @@ if [ "$me" = sbatch ]; then
 fi
 
 if [ "$me" = squeue ]; then
+  [ -e "$S/sqwarn" ] && cat "$S/sqwarn" >&2
+  [ -e "$S/sqout" ] && cat "$S/sqout"
   names="" states="" fmt="%i"
   while [ $# -gt 0 ]; do case "$1" in
     -h|--noheader) shift;; -u|--user) shift 2;; --user=*) shift;;
