@@ -296,6 +296,34 @@ it starts, and refuses when main has moved on or the shared copy already names a
 that owns the shared copy's folder can install (deploy_shared refuses any other). What the grid has
 not yet shown is in `docs/OPEN_QUESTIONS.md`.
 
+**A GitHub Actions runner on the grid.** A workflow job of a private or internal repository can run on
+a compute node: `tools/grid_runner.sh` serves GitHub's own self-hosted runner as a chain of Slurm jobs,
+so a job that names the runner's labels (`runs-on: [self-hosted, grid, wayne]`) runs there, GitHub
+keeps its log and its artifacts as for any job, and no Actions minutes are spent. A public repository
+is refused, as GitHub advises: its forks' pull requests could run their code on the grid. The
+connection points the same way as the CI lane's, from the grid out: nothing of GitHub's reaches the
+grid beyond a one-job credential, and nothing of the grid's reaches GitHub. Every command names the
+site, `--site wayne`, whose profile gives the runtime, the worker queue (`partition_cpu_batch` and
+`qos_batch`; `--partition` and `--qos` override them) and the runner's folder beside the account's
+state (`shared_state_dir` with `-runner` added: `/rs/rs_grp_oschome/$USER/hpcworker-runner` at Wayne
+State), read with the framework's own awk reader, since warrior's banner bans python3. `bash
+tools/grid_runner.sh --install --site wayne` runs one job that pulls the runner's image
+(`ghcr.io/actions/actions-runner`: the runner is a .NET application built for RHEL 8 and later, which
+an EL7 node is not, hence a container) as a SIF under the folder's `image/` and tries the runner inside
+it once, so a flag the site's Apptainer refuses is seen there and never in a chain; `--start --repo
+OWNER/NAME --site wayne` starts the chain (`--hours`, `--margin`, `--cpus`, `--mem`, `--gres`,
+`--labels`; `--slurm` binds the host's Slurm client in as the worker's is, so a step may `sbatch`).
+Each job queues its successor first, then registers the runner for one GitHub job at a time with a
+just-in-time credential that the account's own `gh` sign-in mints (three mode-0600 files on the node's
+own disk, gone with the job; GitHub discards the registration itself once the job has run, and the
+chain deletes one that ran nothing), inside the image with `--containall --cleanenv --no-mount
+bind-paths`: no home, no lab volume, no environment, until a margin before its wall time; a GitHub job
+must end within that margin, or the wall time cuts it off and GitHub reports it lost. `--stop --repo
+OWNER/NAME --site wayne` ends the chain once the job in flight is done, `--now` at once, and `--status
+--site wayne` shows the folder, the image and each chain. Everything is designed and tested against
+stand-ins (`tools/tests/test_grid_runner.sh`); what the grid has not yet shown is in
+`docs/OPEN_QUESTIONS.md`.
+
 **Site pages.** The website generates its own pages, the Beethoven ones included: run
 `python -X utf8 tools/build_site.py` in `../openspineconsortium.github.io` after changing
 `LICENSE.txt`, `PRIVACY.md` or a release, then publish the site (`docs/PUBLISHING_SITE.md`).

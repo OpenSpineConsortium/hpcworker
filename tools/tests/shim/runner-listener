@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Runner.Listener for tools/tests/test_grid_runner.sh: GitHub's runner as the stand-in image
+# carries it, run by tests/shim/apptainer in the folder the job bound as /home/runner, with an
+# empty environment.
+#   Runner.Listener --version
+#       prints the version bin/VERSION names (the image's runner)
+#   Runner.Listener run
+#       one registration. The three files .runner, .credentials and .credentials_rsaparams must be
+#       beside bin/, each mode 0600, or the run is BAD; the line
+#       "run <runner name> files ok|BAD env=<what the container's environment carries>" goes to
+#       $SHIM_APPTAINER/runs, and a log to _diag/ as the runner writes one. Then the first line of
+#       $SHIM_APPTAINER/plan says what the runner does (the line is taken off the plan; no line
+#       means done):
+#         done               a job ran: the worker's log is written to _diag/, the registration's
+#                            files go, exit 0 (an ephemeral runner ends after its one job)
+#         stop               the runner idles until it is ended, after writing STOP into the chain
+#                            folder $SHIM_APPTAINER/chain names, as a person's --stop would
+#         clock=SECONDS      the runner idles, after moving the test's clock ($HPCW_RUNNER_CLOCK)
+#         busy-clock=SECONDS a job is running (the worker's log is there) while the clock moves to
+#                            SECONDS; the job ends, exit 0, once the job script has looked twice
+#                            more (two more lines in $SHIM_SLEEPS)
+#         retry              exit 2, as the runner does when it is to be started again
+#         update             exit 3, as the runner does once it has updated itself
+#         term               exit 1, as the runner does when ended before any job
+#         crash              exit 99
+set -uo pipefail
+A=${SHIM_APPTAINER:?SHIM_APPTAINER is not set}
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/.." && pwd)   # the folder bound as /home/runner
+case "${1:-}" in
+  --version) cat "$here/VERSION"; exit 0;;
+  run) ;;
+  *) echo "Runner.Listener: unknown command ${1:-} (test shim)" >&2; exit 2;;
+esac
+ok=ok
+for f in .runner .credentials .credentials_rsaparams; do
+  if [ ! -f "$root/$f" ]; then ok="BAD(no $f)"; continue; fi
+  m=$(stat -c %a "$root/$f" 2>/dev/null); [ "$m" = 600 ] || ok="BAD($f mode $m)"
+done
+name=$(sed -n 's/.*"agentName":[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.runner" 2>/dev/null | head -1)
+envs=$(env | grep -Ev '^(HOME|PATH|SHIM_APPTAINER|SHIM_SLEEPS|HPCW_RUNNER_CLOCK|PWD|OLDPWD|SHLVL|_)=' | sort | tr '\n' ',' | sed 's/,$//')
+printf 'run %s files %s env=%s\n' "${name:-unnamed}" "$ok" "${envs:--}" >> "$A/runs"
+mkdir -p "$root/_diag" && printf 'runner %s started\n' "${name:-unnamed}" > "$root/_diag/Runner_20261016-000000-utc.log"
+plan=""
+if [ -s "$A/plan" ]; then plan=$(head -1 "$A/plan"); tail -n +2 "$A/plan" > "$A/plan.rest"; mv -f "$A/plan.rest" "$A/plan"; fi
+plan=${plan:-done}
+realsleep() { local s; for s in /bin/sleep /usr/bin/sleep; do [ -x "$s" ] && { "$s" "$@"; return; }; done; }
+worker_log() { printf 'job started\n' > "$root/_diag/Worker_20261016-000000-utc.log"; }
+idle() { local i; for i in $(seq 1 2400); do realsleep 0.05; done; echo "Runner.Listener: nobody ended the idle runner (test shim)" >&2; exit 1; }
+sleeps() { grep -c . "${SHIM_SLEEPS:-/dev/null}" 2>/dev/null || echo 0; }
+case "$plan" in
+  done) worker_log; rm -f "$root/.runner" "$root/.credentials" "$root/.credentials_rsaparams"; exit 0;;
+  stop) date -u +%FT%TZ > "$(cat "$A/chain")/STOP" || exit 1; idle;;
+  clock=*) printf '%s\n' "${plan#clock=}" > "$HPCW_RUNNER_CLOCK" || exit 1; idle;;
+  busy-clock=*)
+    worker_log; n0=$(sleeps)
+    printf '%s\n' "${plan#busy-clock=}" > "$HPCW_RUNNER_CLOCK" || exit 1
+    for i in $(seq 1 2400); do [ $(( $(sleeps) - n0 )) -ge 2 ] && exit 0; realsleep 0.05; done
+    exit 0;;
+  retry) exit 2;;
+  update) exit 3;;
+  term) exit 1;;
+  crash) exit 99;;
+  *) echo "Runner.Listener: unknown plan line $plan (test shim)" >&2; exit 2;;
+esac

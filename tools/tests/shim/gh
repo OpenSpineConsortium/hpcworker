@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# gh for tools/tests/test_grid_ci.sh: the two API calls tools/grid_ci.sh makes, against files. Every call
-# is appended to $SHIM_GH/calls, and to $SHIM_GH/leaks when GITHUB_TOKEN or GH_TOKEN reached it.
+# gh for tools/tests/test_grid_ci.sh and tools/tests/test_grid_runner.sh: the API calls
+# tools/grid_ci.sh and tools/grid_runner.sh make, against files. Every call is appended to
+# $SHIM_GH/calls, and to $SHIM_GH/leaks when GITHUB_TOKEN or GH_TOKEN reached it.
 #   gh api repos/O/N/statuses/SHA -f context=C -f state=S -f description=D --silent
 #       appends "SHA<tab>C<tab>S<tab>D" to $SHIM_GH/statuses; a description over 140 characters is
 #       refused as GitHub refuses it (422)
 #   gh api repos/O/N/commits/SHA/check-runs[?query] [--jq EXPR]
 #       answers $SHIM_GH/checks/SHA (GitHub's JSON), or no check runs; --jq goes through the real jq
+#   gh api repos/O/N [--jq EXPR]
+#       the repository, whose visibility is $SHIM_GH/visibility (private, internal or public), else private
+#   gh api -X POST repos/O/N/actions/runners/generate-jitconfig --input FILE
+#       a just-in-time runner registration: the request (name, runner_group_id, labels, work_folder)
+#       is appended to $SHIM_GH/jit/requests, one line; the answer is GitHub's shape, a runner id
+#       counted from 100 and encoded_jit_config carrying .runner, .credentials and
+#       .credentials_rsaparams (with a marker that must never leave the job's node-local temp);
+#       refused (403) while $SHIM_GH/refuse-jit exists
+#   gh api -X DELETE repos/O/N/actions/runners/ID --silent
+#       appends ID to $SHIM_GH/deleted; 404 while $SHIM_GH/delete-404 exists
 # While $SHIM_GH/offline exists every call fails as gh does without a network. Anything else is refused.
 set -uo pipefail
 G=${SHIM_GH:?SHIM_GH is not set}
@@ -15,14 +26,17 @@ printf 'gh %s\n' "$*" >> "$G/calls"
 [ "${1:-}" = api ] || { echo "gh: unsupported command $* (test shim)" >&2; exit 2; }
 [ -e "$G/offline" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
 shift
-ep="" jq_expr="" fields=()
+ep="" jq_expr="" method="" input="" fields=()
 while [ $# -gt 0 ]; do case "$1" in
   -f|--raw-field) fields+=("$2"); shift 2;;
   --jq|-q) jq_expr=$2; shift 2;;
+  -X|--method) method=$2; shift 2;;
+  --input) input=$2; shift 2;;
   --silent|--paginate) shift;;
   -*) echo "gh: unsupported flag $1 (test shim)" >&2; exit 2;;
   *) ep=$1; shift;;
 esac; done
+answer() { if [ -n "$jq_expr" ]; then printf '%s' "$1" | jq -r "$jq_expr"; else printf '%s\n' "$1"; fi; }
 if [[ "$ep" =~ ^repos/[^/]+/[^/]+/statuses/([0-9a-f]{40})$ ]]; then
   sha=${BASH_REMATCH[1]} c="" s="" d=""
   for f in "${fields[@]}"; do case "$f" in context=*) c=${f#*=};; state=*) s=${f#*=};; description=*) d=${f#*=};; esac; done
@@ -34,7 +48,62 @@ fi
 if [[ "$ep" =~ ^repos/[^/]+/[^/]+/commits/([0-9a-f]{40})/check-runs(\?.*)?$ ]]; then
   f="$G/checks/${BASH_REMATCH[1]}"; json='{"total_count":0,"check_runs":[]}'
   [ -f "$f" ] && json=$(cat "$f")
-  if [ -n "$jq_expr" ]; then printf '%s' "$json" | jq -r "$jq_expr"; else printf '%s\n' "$json"; fi
+  answer "$json"; exit $?
+fi
+if [[ "$ep" =~ ^repos/([^/]+/[^/]+)$ ]]; then
+  v=$(cat "$G/visibility" 2>/dev/null); v=${v:-private}
+  case "$v" in private|internal|public) ;; *) echo "gh: HTTP 404: Not Found (https://api.github.com/$ep)" >&2; exit 1;; esac
+  p=true; [ "$v" = public ] && p=false
+  answer "$(printf '{"full_name":"%s","private":%s,"visibility":"%s"}' "${BASH_REMATCH[1]}" "$p" "$v")"; exit $?
+fi
+if [[ "$ep" =~ ^repos/([^/]+/[^/]+)/actions/runners/generate-jitconfig$ ]]; then
+  [ "$method" = POST ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep): the registration is a POST" >&2; exit 1; }
+  [ -n "$input" ] && [ -f "$input" ] || { echo "gh: --input names no file" >&2; exit 1; }
+  [ -e "$G/refuse-jit" ] && { echo "gh: HTTP 403: Resource not accessible by personal access token (https://api.github.com/$ep)" >&2; exit 1; }
+  mkdir -p "$G/jit"
+  { tr -d '\n' < "$input"; echo; } >> "$G/jit/requests"
+  python3 - "$input" "$G/jit" "${BASH_REMATCH[1]}" <<'PY'
+import base64, json, os, sys
+with open(sys.argv[1]) as f:
+    req = json.load(f)
+d, repo = sys.argv[2], sys.argv[3]
+for k in ("name", "runner_group_id", "labels", "work_folder"):
+    if k not in req:
+        sys.exit("gh: HTTP 422: Validation Failed: %s is missing" % k)
+if not isinstance(req["labels"], list) or not req["labels"] or not all(isinstance(l, str) and l for l in req["labels"]):
+    sys.exit("gh: HTTP 422: Validation Failed: labels")
+if not isinstance(req["name"], str) or not req["name"] or len(req["name"]) > 64:
+    sys.exit("gh: HTTP 422: Validation Failed: name")
+counter = os.path.join(d, "counter")
+n = 100
+if os.path.exists(counter):
+    with open(counter) as f:
+        n = int(f.read().strip()) + 1
+with open(counter, "w") as f:
+    f.write("%d\n" % n)
+runner = {"agentId": n, "agentName": req["name"], "poolId": 1, "poolName": "Default", "ephemeral": True,
+          "serverUrl": "https://pipelines.actions.githubusercontent.com/shim",
+          "gitHubUrl": "https://github.com/" + repo, "workFolder": req["work_folder"], "useV2Flow": True}
+cred = {"scheme": "OAuth", "data": {"clientId": "jit-client-%d" % n,
+        "authorizationUrl": "https://pipelines.actions.githubusercontent.com/shim/_apis/oauth2/token",
+        "requireFipsCryptography": "False"}}
+rsa = {"d": "jitsecret_must_not_leak_%d" % n, "dp": "x", "dq": "x", "exponent": "AQAB",
+       "inverseQ": "x", "modulus": "x", "p": "x", "q": "x"}
+def b(o):
+    return base64.b64encode(json.dumps(o).encode("utf-8")).decode("ascii")
+files = {".runner": b(runner), ".credentials": b(cred), ".credentials_rsaparams": b(rsa)}
+labels = ["self-hosted", "linux", "x64"] + list(req["labels"])
+answer = {"runner": {"id": n, "name": req["name"], "os": "Linux", "status": "offline", "busy": False,
+                     "labels": [{"id": i + 1, "name": l, "type": "custom"} for i, l in enumerate(labels)]},
+          "encoded_jit_config": b(files)}
+print(json.dumps(answer))
+PY
   exit $?
+fi
+if [[ "$ep" =~ ^repos/[^/]+/[^/]+/actions/runners/([0-9]+)$ ]]; then
+  [ "$method" = DELETE ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep): only a DELETE is known here" >&2; exit 1; }
+  [ -e "$G/delete-404" ] && { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep)" >&2; exit 1; }
+  printf '%s\n' "${BASH_REMATCH[1]}" >> "$G/deleted"
+  exit 0
 fi
 echo "gh: HTTP 404: unsupported endpoint $ep (test shim)" >&2; exit 1
