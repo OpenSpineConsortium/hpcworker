@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# apptainer for tools/tests/test_grid_runner.sh: a container runtime that runs nothing in a
+# container. Every call is appended to $SHIM_APPTAINER/calls, and to $SHIM_APPTAINER/leaks when
+# GITHUB_TOKEN or GH_TOKEN reached it (the job files unset both before anything runs).
+#   apptainer --version
+#       prints a version
+#   apptainer pull DEST docker://ghcr.io/actions/actions-runner:TAG
+#       writes a stand-in SIF at DEST that holds the runner version the tag names (latest: the one
+#       in $SHIM_APPTAINER/latest, else 2.338.0); fails as a pull does without a network while
+#       $SHIM_APPTAINER/offline exists, and refuses any other image
+#   apptainer exec [--containall] [--cleanenv] [--no-mount bind-paths] [--nv] [--env K=V]...
+#                  [--pwd P] [--home SRC:DST] [-B SRC:DST[:ro]]... IMAGE CMD...
+#       IMAGE is a stand-in SIF. Every bind source, and the home, must exist and lie under
+#       $SHIM_SLURM_ROOT (the test's folder) or this job's own node-local temp (/tmp/$USER/hpcw_runner_*
+#       or /dev/shm/$USER/hpcw_runner_*): never the home, the volume or a system folder. A bind or a
+#       home the environment would add (APPTAINER_BIND, APPTAINER_BINDPATH, APPTAINER_HOME and their
+#       SINGULARITY_ names), which the real one honours, is refused. As an Apptainer that cannot mount
+#       a SIF on the node does, it says on stderr that it unpacks the image first, and for a command it
+#       does not hand over to, that it cleans up after. Two commands are known:
+#         cp -R --preserve=mode,timestamps /home/runner/. /mnt/out/
+#             the runner's files out of the image: $SHIM_APPTAINER/tree/home/runner (the test puts
+#             tests/shim/runner-listener there as bin/Runner.Listener) copied into the bind at
+#             /mnt/out, with bin/VERSION naming the version the SIF holds
+#         /home/runner/bin/Runner.Listener ARGS...
+#             the copy in the --home source, run with the environment --cleanenv gives a container:
+#             HOME, PATH, the image's own ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 (the one variable of
+#             the runner image's that a job must override), what APPTAINERENV_* names and --env
+#             gives, in that order, each later one winning, plus the test's own SHIM_* and the clock
+#       The runner's two calls must carry --containall, --cleanenv and --no-mount bind-paths (the
+#       flags every job uses).
+set -uo pipefail
+A=${SHIM_APPTAINER:?SHIM_APPTAINER is not set}
+ROOT=${SHIM_SLURM_ROOT:?SHIM_SLURM_ROOT is not set}
+mkdir -p "$A"
+printf 'apptainer %s\n' "$*" >> "$A/calls"
+{ [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; } && printf 'apptainer TOKEN-IN-ENV %s\n' "$*" >> "$A/leaks"
+refused() { printf 'apptainer: refused by the test shim: %s\n' "$*" | tee -a "$A/refused" >&2; exit 9; }
+allowed() { # a path that exists, under the test's folder or this job's node-local temp
+  local p
+  if [ -d "$1" ]; then p=$(cd "$1" && pwd -P); else p=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)/$(basename "$1"); fi
+  case "$p/" in "$(cd "$ROOT" && pwd -P)/"*|"/tmp/$USER/hpcw_runner_"[0-9]*|"/dev/shm/$USER/hpcw_runner_"[0-9]*) return 0;; esac
+  return 1
+}
+
+case "${1:-}" in
+  --version) echo "apptainer version 1.2.2-shim"; exit 0;;
+  pull)
+    shift; dest="" ref=""
+    while [ $# -gt 0 ]; do case "$1" in
+      -F|--force) shift;;
+      -*) refused "pull option $1";;
+      *) if [ -z "$dest" ]; then dest=$1; else ref=$1; fi; shift;;
+    esac; done
+    [[ "$ref" =~ ^docker://ghcr\.io/actions/actions-runner:([A-Za-z0-9._-]+)$ ]] || refused "pull of $ref (only the runner image is known)"
+    tag=${BASH_REMATCH[1]}
+    [ -n "$dest" ] && allowed "$(dirname "$dest")" || refused "pull into $dest"
+    if [ -e "$A/offline" ]; then
+      echo "FATAL:   While making image from oci registry: error fetching image to cache: failed to get checksum for $ref: pinging container registry ghcr.io: Get \"https://ghcr.io/v2/\": dial tcp: lookup ghcr.io: no such host" >&2
+      exit 255
+    fi
+    if [ "$tag" = latest ]; then v=$(cat "$A/latest" 2>/dev/null); v=${v:-2.338.0}; else v=$tag; fi
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FATAL:   While making image from oci registry: error fetching image to cache: failed to get checksum for $ref: reading manifest $tag in ghcr.io/actions/actions-runner: manifest unknown" >&2; exit 255; }
+    echo "INFO:    Converting OCI blobs to SIF format"
+    printf 'SIF %s\n' "$v" > "$dest"
+    exit 0;;
+  exec) ;;
+  *) echo "apptainer: unknown command ${1:-} (test shim)" >&2; exit 2;;
+esac
+
+for v in APPTAINER_BIND APPTAINER_BINDPATH APPTAINER_HOME SINGULARITY_BIND SINGULARITY_BINDPATH SINGULARITY_HOME; do
+  [ -n "${!v:-}" ] && refused "exec with $v=${!v} in the environment, which would bind it into the container"
+done
+shift; contain=0 clean=0 nomount="" home="" pwd_="" binds=() image="" given=()
+while [ $# -gt 0 ]; do case "$1" in
+  -C|--containall) contain=1; shift;; -e|--cleanenv) clean=1; shift;;
+  --no-mount) nomount=$2; shift 2;; --no-mount=*) nomount=${1#*=}; shift;;
+  --pwd) pwd_=$2; shift 2;; --pwd=*) pwd_=${1#*=}; shift;;
+  -H|--home) home=$2; shift 2;; --home=*) home=${1#*=}; shift;;
+  -B|--bind) binds+=("$2"); shift 2;; --bind=*) binds+=("${1#*=}"); shift;;
+  --nv) shift;;
+  --env) given+=("$2"); shift 2;; --env=*) given+=("${1#*=}"); shift;;
+  -*) refused "exec option $1";;
+  *) image=$1; shift; break;;
+esac; done
+[ -n "$image" ] && [ -f "$image" ] && grep -q '^SIF ' "$image" || refused "exec of ${image:-nothing}, which is not a stand-in SIF"
+version=$(sed -n 's/^SIF //p' "$image" | head -1)
+declare -A at=()
+for b in ${binds[@]+"${binds[@]}"}; do
+  src=${b%%:*}; rest=${b#*:}; dst=${rest%%:*}; [ "$rest" = "$b" ] && dst=$src
+  [ -e "$src" ] || refused "bind source $src does not exist"
+  allowed "$src" || refused "bind source $src is outside the test's folders"
+  at[$dst]=$src
+done
+hsrc=""
+if [ -n "$home" ]; then
+  hsrc=${home%%:*}; hdst=${home#*:}; [ "$hdst" = "$home" ] && hdst="/home/$USER"
+  [ -d "$hsrc" ] || refused "home $hsrc does not exist"
+  allowed "$hsrc" || refused "home $hsrc is outside the test's folders"
+  [ "$hdst" = /home/runner ] || refused "the home is bound at $hdst, not /home/runner"
+fi
+runner_flags() { [ $contain = 1 ] && [ $clean = 1 ] && [ "$nomount" = bind-paths ] || refused "$1 without --containall --cleanenv --no-mount bind-paths"; }
+echo "INFO:    Converting SIF file to temporary sandbox..." >&2
+
+case "$*" in
+  "cp -R --preserve=mode,timestamps /home/runner/. /mnt/out/")
+    runner_flags "the runner's files copied"
+    out=${at[/mnt/out]:-}; [ -n "$out" ] || refused "no bind at /mnt/out"
+    [ -d "$A/tree/home/runner" ] || refused "no runner tree under $A/tree (the test puts one there)"
+    cp -R "$A/tree/home/runner/." "$out/" && printf '%s\n' "$version" > "$out/bin/VERSION" && chmod 755 "$out/bin/Runner.Listener" || exit 1
+    exit 0;;
+  "/home/runner/bin/Runner.Listener "*)
+    runner_flags "the runner run"
+    [ -n "$hsrc" ] || refused "the runner run without --home"
+    [ "$pwd_" = /home/runner ] || refused "the runner run without --pwd /home/runner"
+    [ -n "${at[/tmp]:-}" ] || refused "the runner run without a /tmp bind"
+    [ -x "$hsrc/bin/Runner.Listener" ] || refused "no Runner.Listener in $hsrc"
+    shift
+    envs=(HOME="$hsrc" PATH="$PATH" ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 SHIM_APPTAINER="$A" SHIM_SLEEPS="${SHIM_SLEEPS:-}" HPCW_RUNNER_CLOCK="${HPCW_RUNNER_CLOCK:-}")
+    for v in $(compgen -e); do case "$v" in APPTAINERENV_*) envs+=("${v#APPTAINERENV_}=${!v}");; esac; done
+    envs+=(${given[@]+"${given[@]}"})
+    cd "$hsrc" || exit 1
+    # the runner run is handed over, so a TERM reaches it; its --version returns, and the clean-up follows
+    [ "${1:-}" = run ] && exec env -i "${envs[@]}" "$hsrc/bin/Runner.Listener" "$@"
+    env -i "${envs[@]}" "$hsrc/bin/Runner.Listener" "$@"; rc=$?
+    echo "INFO:    Cleaning up image..." >&2
+    exit $rc;;
+  *) refused "exec of '$*' in the container";;
+esac

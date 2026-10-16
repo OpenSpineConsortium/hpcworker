@@ -137,6 +137,18 @@ name and identifier carry no university name.
   chain of short Slurm jobs (`tools/grid_access_watch.sbatch`, every 15 minutes, one successor each,
   `--dependency=singleton`, `--unwatch` stops it) that applies the lists on a compute node with
   `--here`; `tools/grid_access_task.ps1` stays for a lab lead with WSL.
+- **A GitHub Actions runner on the grid is a chain of Slurm jobs the account starts itself**
+  (greg, 2026-10-16, in the Symphony project: GitHub Actions on the grid through Beethoven, results
+  and logs back). `tools/grid_runner.sh` serves GitHub's own self-hosted runner inside its own image
+  (`ghcr.io/actions/actions-runner`, a SIF; `--containall --cleanenv --no-mount bind-paths`, no home,
+  no volume, no environment) for a private or internal repository only, registered one GitHub job
+  at a time with a just-in-time credential the account's own `gh` mints into mode-0600 files on the
+  node's disk; GitHub holds nothing of the grid's, and the container nothing of GitHub's beyond that
+  one job's credential, which leaves with the job (the `gh` sign-in stays in the home, which the
+  container never sees). No step reaches the scheduler, the home or the lab volume, since a job
+  queued as the account could read all it holds, the Claude login among them: no Claude credential
+  is anywhere near a workflow's job, and the runner runs the repository's steps and nothing else
+  (`README.md`, "A GitHub Actions runner on the grid"; `docs/OPEN_QUESTIONS.md`).
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
   2026-09-28 at 22:34 local the student's whole `~/.ashley` folder on the grid was deleted while a
   Remote Control session spawned from the phone was open, and the Claude login inside it was lost;
@@ -210,7 +222,10 @@ name and identifier carry no university name.
   `deploy_shared.sh` (publishes the framework to a site's shared copy over ssh, from the laptop; on
   the login node only tar, chmod, setfacl and one link; older versions are kept), `grid_access.sh`
   (the approved list and the readers on the volume's root) with `grid_access_watch.sbatch` (its chain
-  of jobs on the cluster) and `grid_access_task.ps1` (its task on a PC).
+  of jobs on the cluster) and `grid_access_task.ps1` (its task on a PC), `grid_runner.sh` with
+  `grid_runner.sbatch` and `grid_runner_install.sbatch` (a GitHub Actions runner as a chain of Slurm
+  jobs; `tools/tests/test_grid_runner.sh` holds it against stand-ins, as `tools/tests/test_grid_ci.sh`
+  holds the CI lane).
 
 ## Building and testing
 

@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# sbatch, squeue, sacct and scancel for tools/tests/test_grid_ci.sh: a scheduler that runs nothing. The
-# test links this file under those four names first on PATH. Every call is appended to
-# $SHIM_SLURM/calls (the name and its arguments, one line), and to $SHIM_SLURM/leaks when GITHUB_TOKEN or
-# GH_TOKEN reached it. sbatch refuses what would reach a real cluster by mistake: a script or a -D
-# outside $SHIM_SLURM_ROOT (the test's temporary folder), an argument naming /rs/, and a script with no
-# `#SBATCH --time=` line (every job has a wall time); each refusal is also written to $SHIM_SLURM/refused.
-# Each job is a folder $SHIM_SLURM/jobs/<id>/ with
-# one file per field (name, state, dir, out, begin, dependency, partition, qos, args one per line, and
-# script, a copy taken at submission as Slurm keeps one); the test moves a job on by writing its state
-# and its log (at the path in out). A file $SHIM_SLURM/finish/<name> (the job name without a trailing
+# sbatch, squeue, sacct and scancel for tools/tests/test_grid_ci.sh and tools/tests/test_grid_runner.sh:
+# a scheduler that runs nothing. The test links this file under those four names first on PATH. Every
+# call is appended to $SHIM_SLURM/calls (the name and its arguments, one line), and to $SHIM_SLURM/leaks
+# when GITHUB_TOKEN or GH_TOKEN reached it. sbatch refuses what would reach a real cluster by mistake: a
+# script or a -D outside $SHIM_SLURM_ROOT (the test's temporary folder), an argument naming /rs/, a
+# script with no `#SBATCH --time=` line (every job has a wall time), and an --output whose folder is not
+# there (the real one takes such a job, which then never starts); each refusal is also written to
+# $SHIM_SLURM/refused. Each job is a folder $SHIM_SLURM/jobs/<id>/ with one file per field (name, state,
+# dir, out, begin, dependency, partition, qos, time, cpus, mem, gres, args one per line, and script, a copy
+# taken at submission as Slurm keeps one); an option on the command line outranks the script's #SBATCH
+# line, as it does for sbatch; the name, the time and the output fall back to those lines, while the
+# partition and the qos stay what the command line carried (empty: no override given); the test moves a
+# job on by writing its state and its log (at the path in out), and names its node by writing node. A file $SHIM_SLURM/finish/<name> (the job name without a trailing
 # _<12 hex>) finishes a job at once: its first line is the state, the rest the log. While
 # $SHIM_SLURM/refuse exists sbatch refuses with its text; while $SHIM_SLURM/refuse-<name> exists it
 # refuses only a job of that name. While $SHIM_SLURM/warn exists sbatch also writes its text to stderr
 # when it takes a job, as sbatch's own warnings and a site's submit plugin do. While $SHIM_SLURM/sqwarn
 # exists squeue writes its text to stderr before it answers (a site's notice, a setting it complains of),
 # and while $SHIM_SLURM/sqout exists it writes that text to its output first (an answer that is not the
-# job list asked for). sacct refuses a -j list that is not job numbers, as the real one does.
+# job list asked for); while $SHIM_SLURM/sqdown exists squeue fails with its text (a controller that
+# does not answer); squeue's %M is always 0:01 and %N the job's node, or nothing. sacct refuses a -j
+# list that is not job numbers, as the real one does.
 set -uo pipefail
 S=${SHIM_SLURM:?SHIM_SLURM is not set}
 ROOT=${SHIM_SLURM_ROOT:?SHIM_SLURM_ROOT is not set}
@@ -30,7 +35,7 @@ refused() { printf '%s: refused by the test shim: %s\n' "$me" "$*" | tee -a "$S/
 case " $* " in *" /rs/"*|*"=/rs/"*) refused "a real cluster path in $*";; esac
 
 if [ "$me" = sbatch ]; then
-  parsable=0 dir=$(pwd) name="" part="" qos="" begin="" dep="" script=""
+  parsable=0 dir=$(pwd) name="" part="" qos="" begin="" dep="" script="" out="" time="" cpus="" mem="" gres=""
   while [ $# -gt 0 ]; do case "$1" in
     --parsable) parsable=1; shift;;
     -D|--chdir) dir=$2; shift 2;; --chdir=*) dir=${1#*=}; shift;;
@@ -39,6 +44,11 @@ if [ "$me" = sbatch ]; then
     -q|--qos) qos=$2; shift 2;; --qos=*) qos=${1#*=}; shift;;
     --begin) begin=$2; shift 2;; --begin=*) begin=${1#*=}; shift;;
     -d|--dependency) dep=$2; shift 2;; --dependency=*) dep=${1#*=}; shift;;
+    -o|--output) out=$2; shift 2;; --output=*) out=${1#*=}; shift;;
+    -t|--time) time=$2; shift 2;; --time=*) time=${1#*=}; shift;;
+    -c|--cpus-per-task) cpus=$2; shift 2;; --cpus-per-task=*) cpus=${1#*=}; shift;;
+    --mem) mem=$2; shift 2;; --mem=*) mem=${1#*=}; shift;;
+    --gres) gres=$2; shift 2;; --gres=*) gres=${1#*=}; shift;;
     -*) echo "sbatch: unsupported option $1 (test shim)" >&2; exit 2;;
     *) script=$1; shift; break;;
   esac; done
@@ -48,13 +58,18 @@ if [ "$me" = sbatch ]; then
   grep -q '^#SBATCH --time=' "$script" || refused "$script has no wall time"
   [ -e "$S/refuse" ] && { echo "sbatch: error: $(cat "$S/refuse")" >&2; exit 1; }
   [ -n "$name" ] || name=$(sed -n 's/^#SBATCH --job-name=//p' "$script" | head -1)
+  [ -n "$time" ] || time=$(sed -n 's/^#SBATCH --time=//p' "$script" | head -1)
   key=$(printf '%s' "$name" | sed 's/_[0-9a-f]\{12\}$//')
   [ -e "$S/refuse-$key" ] && { echo "sbatch: error: $(cat "$S/refuse-$key")" >&2; exit 1; }
+  [ -n "$out" ] || out=$(sed -n 's/^#SBATCH --output=//p' "$script" | head -1); out=${out:-slurm-%j.out}
+  case "$out" in /*) ;; *) out="$dir/$out";; esac
+  under "$(dirname "$out")" || refused "the --output folder $(dirname "$out") is not there, or outside $ROOT"
   id=$(( $(cat "$S/counter" 2>/dev/null || echo 1000) + 1 )); echo "$id" > "$S/counter"
-  out=$(sed -n 's/^#SBATCH --output=//p' "$script" | head -1); out=${out:-slurm-%j.out}; out="$dir/${out//%j/$id}"
+  out=${out//%j/$id}
   J="$S/jobs/$id"; mkdir -p "$J"
   printf '%s\n' "$name" > "$J/name"; echo PENDING > "$J/state"; printf '%s\n' "$dir" > "$J/dir"; printf '%s\n' "$out" > "$J/out"
   printf '%s\n' "$part" > "$J/partition"; printf '%s\n' "$qos" > "$J/qos"; printf '%s\n' "$begin" > "$J/begin"; printf '%s\n' "$dep" > "$J/dependency"
+  printf '%s\n' "$time" > "$J/time"; printf '%s\n' "$cpus" > "$J/cpus"; printf '%s\n' "$mem" > "$J/mem"; printf '%s\n' "$gres" > "$J/gres"
   : > "$J/args"; for a in "$@"; do printf '%s\n' "$a" >> "$J/args"; done
   cp "$script" "$J/script"
   if [ -f "$S/finish/$key" ]; then head -1 "$S/finish/$key" > "$J/state"; tail -n +2 "$S/finish/$key" > "$out"; fi
@@ -64,6 +79,7 @@ if [ "$me" = sbatch ]; then
 fi
 
 if [ "$me" = squeue ]; then
+  [ -e "$S/sqdown" ] && { echo "squeue: error: $(cat "$S/sqdown")" >&2; exit 1; }
   [ -e "$S/sqwarn" ] && cat "$S/sqwarn" >&2
   [ -e "$S/sqout" ] && cat "$S/sqout"
   names="" states="" fmt="%i"
@@ -79,7 +95,7 @@ if [ "$me" = squeue ]; then
     if [ -n "$states" ]; then case ",$states," in *",$st,"*) ;; *) continue;; esac
     else case "$st" in PENDING|RUNNING|CONFIGURING|COMPLETING|SUSPENDED) ;; *) continue;; esac; fi
     [ -z "$names" ] || case ",$names," in *",$nm,"*) ;; *) continue;; esac
-    line=${fmt//%i/$J}; line=${line//%T/$st}; line=${line//%j/$nm}; printf '%s\n' "$line"
+    line=${fmt//%i/$J}; line=${line//%T/$st}; line=${line//%j/$nm}; line=${line//%M/0:01}; line=${line//%N/$(fld "$J" node)}; printf '%s\n' "$line"
   done
   exit 0
 fi
