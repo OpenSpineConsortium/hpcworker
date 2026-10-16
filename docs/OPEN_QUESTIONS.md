@@ -165,14 +165,14 @@ under that account and no other. Everything below is designed and tested against
 ## A GitHub Actions runner on the grid (decided 2026-10-16)
 
 greg, 2026-10-16, in the Symphony project: GitHub Actions should run on the grid through Beethoven
-and send their results and logs back. GitHub's runners cannot reach the grid (the VPN and the
-one-time code stand between), and no credential of the grid's may sit at GitHub nor one of
-GitHub's on the grid beyond a job's own (`CLAUDE.md`), so the connection points the way the CI
-lane's does: `tools/grid_runner.sh` serves GitHub's own self-hosted runner as a chain of Slurm jobs
-that polls GitHub over outbound HTTPS, registered for one job at a time with a just-in-time
-credential that the account's `gh` sign-in mints as the registration starts and that GitHub
-discards once the job has run (`README.md`, "A GitHub Actions runner on the grid"). The runner is
-a .NET 8 application built for RHEL 8 and later, so it runs inside GitHub's own image
+and send their results and logs back. GitHub's runners cannot sign in to the grid (the portal sits
+behind the VPN, and ssh asks a one-time code beside the password), and no credential of the grid's
+may sit at GitHub nor one of GitHub's on the grid beyond a job's own (`CLAUDE.md`), so the
+connection points the way the CI lane's does: `tools/grid_runner.sh` serves GitHub's own self-hosted
+runner as a chain of Slurm jobs that polls GitHub over outbound HTTPS, registered for one job at a
+time with a just-in-time credential that the account's `gh` sign-in mints as the registration starts
+and that GitHub discards once the job has run (`README.md`, "A GitHub Actions runner on the grid").
+The runner is a .NET 8 application built for RHEL 8 and later, so it runs inside GitHub's own image
 (`ghcr.io/actions/actions-runner`) as a SIF, with `--containall --cleanenv --no-mount bind-paths`:
 no home, no lab volume, no environment, the runner's files on the node's own disk. Everything below
 is designed and tested against stand-ins (`tools/tests/test_grid_runner.sh`); none of it has run on

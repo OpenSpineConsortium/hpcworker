@@ -1,7 +1,8 @@
 #!/bin/bash
 # A GitHub Actions runner on the grid: run ON the cluster (the portal's shell), never by GitHub.
-# GitHub's runners cannot reach the grid (the VPN and a one-time code stand between), and no
-# token of the grid's or GitHub's ever enters a repository, a job file or an argv (CLAUDE.md), so
+# GitHub's runners cannot sign in to the grid (the portal sits behind the VPN, and ssh asks a
+# one-time code beside the password), and no token of the grid's or GitHub's ever enters a
+# repository, a job file or an argv (CLAUDE.md), so
 # the connection points the other way, as the CI lane's does: GitHub's own self-hosted runner runs
 # as a Slurm job on a compute node and polls GitHub over outbound HTTPS. A workflow job that names
 # the runner's labels (`runs-on: [self-hosted, grid]`) then runs on that node, and GitHub keeps
