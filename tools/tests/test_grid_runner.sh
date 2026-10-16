@@ -7,8 +7,8 @@
 # deletion, as files), sbatch, squeue and scancel are tests/shim/slurm (a scheduler that runs
 # nothing and refuses a path outside the test's folder or a job with no wall time), apptainer is
 # tests/shim/apptainer (a runtime that pulls a stand-in image and runs the runner's stand-in,
-# tests/shim/runner-listener, in the folder the job bound as /home/runner, with an empty
-# environment), sleep is tests/shim/nosleep (it records the wait and returns) and a job's clock is a
+# tests/shim/runner-listener, in the folder the job bound as /home/runner, with the environment the
+# image and --env give a container), sleep is tests/shim/nosleep (it records the wait and returns) and a job's clock is a
 # file, which the runner stand-in moves as its plan says. A job "runs" when the test runs its copied
 # script the way Slurm would (its -D folder, its arguments, SLURM_JOB_ID and the start time); its
 # node-local temp is the real /tmp/$USER/hpcw_runner_<id>, gone when the job ends. GITHUB_TOKEN and
@@ -38,37 +38,16 @@ mkdir -p "$T/banned"
 for b in python python2 python3 pip node make md5sum rsync conda gcc R; do
   printf '#!/bin/sh\necho "%s $*" >> "%s/banned.calls"\nexit 97\n' "$b" "$T" > "$T/banned/$b"; chmod 755 "$T/banned/$b"
 done
-# getent for hpcw_slurm_in_container (the --slurm binds): the host's slurm and munge users and the person
-cat > "$T/bin/getent" <<'EOF'
-#!/usr/bin/env bash
-db=$1; shift; rc=2
-for n in "$@"; do case "$db:$n" in
-  passwd:slurm) echo 'slurm:x:200:200:Slurm:/var/lib/slurm:/sbin/nologin'; rc=0;;
-  passwd:munge) echo 'munge:x:201:201:Munge:/var/run/munge:/sbin/nologin'; rc=0;;
-  passwd:*) [ "$n" = "$USER" ] && { echo "$USER:x:1000:1000::/home/$USER:/bin/bash"; rc=0; };;
-  group:slurm) echo 'slurm:x:200:'; rc=0;;
-  group:munge) echo 'munge:x:201:'; rc=0;;
-  group:*) echo "$n:x:1000:"; rc=0;;
-esac; done
-exit $rc
-EOF
-chmod 755 "$T/bin/getent"
 export PATH="$T/bin:$PATH" SHIM_SLURM="$T/slurm" SHIM_SLURM_ROOT="$T" SHIM_GH="$T/gh" SHIM_SLEEPS="$T/sleeps" SHIM_APPTAINER="$T/apptainer"
 export HPCW_RUNNER_DIR="$T/runner"   # never the lab volume's default
 export HPCW_RUNNER_CLOCK="$T/clock"
 unset HPCW_RUNNER_PARTITION HPCW_RUNNER_QOS SLURM_JOB_ID SLURM_JOB_START_TIME SLURM_JOB_END_TIME TMPDIR
 export GITHUB_TOKEN=ghp_testtoken_must_not_leak GH_TOKEN=gho_testtoken_must_not_leak
-mkdir -p "$T/slurm" "$T/gh" "$T/apptainer/tree/home/runner/bin" "$T/apptainer/tree/etc"
+mkdir -p "$T/slurm" "$T/gh" "$T/apptainer/tree/home/runner/bin"
 : > "$T/slurm/calls"; : > "$T/gh/calls"; : > "$T/sleeps"; : > "$T/apptainer/calls"
 echo "sbatch: Warning: this job may be preempted and requeued" > "$T/slurm/warn"
 cp "$SHIMS/runner-listener" "$T/apptainer/tree/home/runner/bin/Runner.Listener" && chmod 755 "$T/apptainer/tree/home/runner/bin/Runner.Listener"
-printf 'root:x:0:0:root:/root:/bin/bash\nrunner:x:1001:1001::/home/runner:/bin/bash\n' > "$T/apptainer/tree/etc/passwd"
-printf 'root:x:0:\nrunner:x:1001:\n' > "$T/apptainer/tree/etc/group"
 echo 1000000 > "$T/clock"
-# the host's Slurm client, for the --slurm binds (what hpcw_slurm_in_container looks for)
-HR="$T/hostroot"; mkdir -p "$HR/usr/bin" "$HR/usr/lib64/slurm" "$HR/etc/slurm" "$HR/var/run/munge"
-for c in sbatch squeue scancel sacct sinfo; do printf '#!/bin/sh\nexit 0\n' > "$HR/usr/bin/$c"; chmod 755 "$HR/usr/bin/$c"; done
-echo lib > "$HR/usr/lib64/libmunge.so.2"; echo 'SlurmUser=slurm' > "$HR/etc/slurm/slurm.conf"
 
 R="$T/runner"; IMG="$R/image"
 GH_REPO=OpenSpineConsortium/symphony-template
@@ -111,7 +90,8 @@ n_jit() { grep -c 'generate-jitconfig' "$T/gh/calls"; }
 deleted() { cat "$T/gh/deleted" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 status_field() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$CH/status.json" "$1" 2>/dev/null; }
 clear_runs() { rm -f "$T/apptainer/runs" "$T/gh/deleted"; : > "$T/sleeps"; }
-fresh() { rm -f "$CH/STOP"; clear_runs; }   # a chain a person started again, as far as a job can tell
+fresh() { rm -f "$CH/STOP" "$CH/failures"; clear_runs; }   # a chain a person started again, as far as a job can tell
+note_starts() { case "$(status_field note)" in "$1"*) return 0;; esac; return 1; }
 minted() { printf '%s\n' "$OUT" | sed -n "s/.*registered runner $1 (id \([0-9]*\),.*/\1/p" | head -1; }
 no_leak() { # nothing of either marker anywhere a person or a later job could read it
   [ ! -e "$T/gh/leaks" ] && [ ! -e "$T/slurm/leaks" ] && [ ! -e "$T/apptainer/leaks" ] \
@@ -137,6 +117,7 @@ gr --start --repo "$GH_REPO" --hours 2 --margin 120; t "--margin is under the wa
 gr --start --repo "$GH_REPO" --mem 8GB; t "--mem is as sbatch takes it" has 'bad --mem'
 gr --start --repo "$GH_REPO" --gres 'gpu;1'; t "--gres is checked" has 'bad --gres'
 gr --bogus; t "an unknown option is refused" has 'unknown option --bogus'
+gr --start --repo "$GH_REPO" --slurm; t "no option hands a step the scheduler" has 'unknown option --slurm'
 gr --start --repo "$GH_REPO" --site; t "an option without its value is refused" has 'needs a value'
 gr --help; t "--help prints the header" rc_is 0; t "  with the four modes" has -- '--install.*--start.*--stop.*--status'; t "  and none of the code" lacks 'set -uo pipefail'
 gr --pull; t "--pull runs only inside the install job" has 'inside the install job'
@@ -160,7 +141,7 @@ t "  on the partition and qos given" bash -c "[ '$(J "$I1" partition)' = secp ] 
 t "  from the runner folder" [ "$(J "$I1" dir)" = "$R" ]
 t "  with its log under image/" [ "$(J "$I1" out)" = "$IMG/install-$I1.log" ]
 t "  with the version and the runner folder as its arguments" [ "$(J "$I1" args | tr '\n' ' ')" = "--pull --version 2.330.0 --runner-dir $R " ]
-t "  the runner folder holds the chain's own copies" bash -c "[ -x '$R/bin/grid_runner.sh' ] && [ -x '$R/bin/grid_runner.sbatch' ] && [ -x '$R/bin/grid_runner_install.sbatch' ] && [ -f '$R/bin/common.sh' ]"
+t "  the runner folder holds the chain's own copies, and nothing of the framework" bash -c "[ -x '$R/bin/grid_runner.sh' ] && [ -x '$R/bin/grid_runner.sbatch' ] && [ -x '$R/bin/grid_runner_install.sbatch' ] && [ ! -e '$R/bin/common.sh' ]"
 t "  the job is the copied file" [ "$(J "$I1" script | head -1)" = "$(head -1 "$R/bin/grid_runner_install.sbatch")" ]
 touch "$T/apptainer/offline"
 run_job "$I1"
@@ -172,8 +153,8 @@ set_state "$I1" PENDING; run_job "$I1"
 t "a requeued install pulls again" rc_is 0; t "  and installs the version named" has 'installed: runner 2.330.0'
 t "  the image is placed and current names it" bash -c "[ -s '$IMG/actions-runner-2.330.0.sif' ] && [ \"\$(cat '$IMG/current')\" = 2.330.0 ]"
 t "  the pull ran on the node's own disk" grep -q "^apptainer pull /tmp/$USER/hpcw_runner_$I1/image.sif docker://ghcr.io/actions/actions-runner:2.330.0$" "$T/apptainer/calls"
-t "  the runner's version was asked inside the image with the chain's flags" grep -q "^apptainer exec --containall --cleanenv --no-mount bind-paths --pwd /home/runner --home /tmp/$USER/hpcw_runner_$I1/home:/home/runner -B /tmp/$USER/hpcw_runner_$I1/tmp:/tmp /tmp/$USER/hpcw_runner_$I1/image.sif /home/runner/bin/Runner.Listener --version$" "$T/apptainer/calls"
-t "  and the job says so" has 'the runner answers inside the image: version 2.330.0'
+t "  the runner's version was asked inside the image with the chain's flags, its trace on stdout off" grep -q "^apptainer exec --containall --cleanenv --no-mount bind-paths --env ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false --pwd /home/runner --home /tmp/$USER/hpcw_runner_$I1/home:/home/runner -B /tmp/$USER/hpcw_runner_$I1/tmp:/tmp /tmp/$USER/hpcw_runner_$I1/image.sif /home/runner/bin/Runner.Listener --version$" "$T/apptainer/calls"
+t "  and the job says so, though Apptainer's own lines come after the version" has 'the runner answers inside the image: version 2.330.0'
 gr --install --site wayne
 t "--install with a site takes the runtime from its profile" rc_is 0
 I2=$(newest '^hpcw_runner_install$')
@@ -192,7 +173,7 @@ t "  and nothing was submitted" [ "$(count "^$NAME$")" = 0 ]
 rm -f "$T/gh/visibility"; touch "$T/gh/offline"
 gr --start --repo "$GH_REPO"; t "gh without a network refuses the start" has 'gh could not read'
 rm -f "$T/gh/offline"
-gr --start --repo "$GH_REPO" --site wayne --hours 2 --margin 30 --cpus 4 --mem 16G --gres gpu:1 --labels gpu --slurm
+gr --start --repo "$GH_REPO" --site wayne --hours 2 --margin 30 --cpus 4 --mem 16G --gres gpu:1 --labels gpu
 t "--start submits the chain's first job" rc_is 0; t "  and names it" has 'runner chain for OpenSpineConsortium/symphony-template: job 1003'
 t "  and says the labels a workflow names" has 'runs-on: \[self-hosted, grid, wayne, gpu\]'
 t "  and the margin a job must end within" has 'end within 30 minutes'
@@ -201,29 +182,32 @@ t "  the job is a singleton of the chain's name" [ "$(J "$C1" dependency)" = sin
 t "  with the wall time, the size and the GPU asked" bash -c "[ '$(J "$C1" time)' = 2:00:00 ] && [ '$(J "$C1" cpus)' = 4 ] && [ '$(J "$C1" mem)' = 16G ] && [ '$(J "$C1" gres)' = gpu:1 ]"
 t "  on the site's worker queue, which the job file never names" bash -c "[ '$(J "$C1" partition)' = '$DEF_PART' ] && [ '$(J "$C1" qos)' = '$DEF_QOS' ] && ! grep -q '^#SBATCH --\(partition\|qos\)' '$T/slurm/jobs/$C1/script'"
 t "  from the runner folder, logging under the chain's folder" bash -c "[ '$(J "$C1" dir)' = '$R' ] && [ '$(J "$C1" out)' = '$CH/runner-$C1.log' ]"
-t "  with everything a job needs on its command line" [ "$(J "$C1" args | tr '\n' ' ')" = "--serve --repo $GH_REPO --runner-dir $R --site wayne --runtime-bin $WAYNE_BIN --runtime-module $WAYNE_MOD --hours 2 --margin 30 --labels gpu --slurm --cpus 4 --mem 16G --gres gpu:1 --partition $DEF_PART --qos $DEF_QOS " ]
-t "  the chain's config says what was asked" bash -c "grep -qx 'labels=grid,wayne,gpu' '$CH/config' && grep -qx 'hours=2' '$CH/config' && grep -qx 'margin=30' '$CH/config' && grep -qx 'slurm=1' '$CH/config' && grep -qx 'version=2.338.0' '$CH/config'"
+t "  with everything a job needs on its command line" [ "$(J "$C1" args | tr '\n' ' ')" = "--serve --repo $GH_REPO --runner-dir $R --site wayne --runtime-bin $WAYNE_BIN --runtime-module $WAYNE_MOD --hours 2 --margin 30 --labels gpu --cpus 4 --mem 16G --gres gpu:1 --partition $DEF_PART --qos $DEF_QOS " ]
+t "  the chain's config says what was asked" bash -c "grep -qx 'labels=grid,wayne,gpu' '$CH/config' && grep -qx 'hours=2' '$CH/config' && grep -qx 'margin=30' '$CH/config' && grep -qx 'version=2.338.0' '$CH/config'"
 gr --start --repo "$GH_REPO"; t "a second chain for the repository is refused while one is queued" has "already queued or running \(job $C1 PENDING\)"
 t "  and nothing was submitted" [ "$(count "^$NAME$")" = 1 ]
 
 echo "== a chain's job: two GitHub jobs, then STOP"
 echo "$CH" > "$T/apptainer/chain"
 plan done done stop
-run_job "$C1" HPCW_HOST_ROOT="$HR"
+# a person's shell or the site's module may set Apptainer's own binds and variables for the container;
+# the job hands none of them on (the stand-in refuses an exec that would bind them)
+run_job "$C1" APPTAINER_BIND="$HOME:/mnt/home" SINGULARITY_BINDPATH="$HOME" APPTAINERENV_FROM_THE_SHELL=1
 t "the job ends well" rc_is 0; t "  and says whose it is" has "== runner job $C1 for $GH_REPO"
 C2=$(newest "^$NAME$")
 t "it queued its successor first" bash -c "[ '$C2' != '$C1' ] && [ '$(J "$C2" dependency)' = 'afterany:$C1,singleton' ]"
 t "  with the same arguments, size and wall time" bash -c "[ \"\$(cat '$T/slurm/jobs/$C2/args')\" = \"\$(cat '$T/slurm/jobs/$C1/args')\" ] && [ '$(J "$C2" time)' = 2:00:00 ] && [ '$(J "$C2" gres)' = gpu:1 ] && [ '$(J "$C2" partition)' = '$DEF_PART' ] && [ '$(J "$C2" qos)' = '$DEF_QOS' ]"
 t "  and wrote it down" [ "$(cat "$CH/next")" = "$C1 $C2" ]
 t "the wall time and the margin are read from the start time and --hours" has 'wall time ends 1970-01-12T15:46:40Z; the last registration is made before 1970-01-12T15:16:40Z \(30 minutes of margin\)'
-t "the host's Slurm client was bound into the container" has "the host's Slurm client is in the container"
+t "the container was given the node's GPU, which --gres asked for" has "image 2.338.0, with the node's GPU"
 t "three registrations were minted, one at a time" [ "$(n_jit)" = 3 ]
 t "  named after the site, the job and their turn" [ "$(jit_requests | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | tr '\n' ' ')" = "grid-wayne-$C1-1 grid-wayne-$C1-2 grid-wayne-$C1-3 " ]
 t "  with the chain's labels" [ "$(jit_requests | grep -c '"labels":\["grid","wayne","gpu"\]')" = 3 ]
 t "  and the work folder" [ "$(jit_requests | grep -c '"work_folder":"_work"')" = 3 ]
 t "the runner ran three times on files of mode 0600" [ "$(runs | grep -c "^run grid-wayne-$C1-[123] files ok ")" = 3 ]
-t "  seeing nothing of the job's environment but the Slurm client's path" [ "$(runs | grep -c ' env=PREPEND_PATH=/opt/hpcw/slurm/bin$')" = 3 ]
-t "  in a container with the chain's flags, the Slurm binds and the node's own temp" grep -q "^apptainer exec --containall --cleanenv --no-mount bind-paths --pwd /home/runner --home /tmp/$USER/hpcw_runner_$C1/home:/home/runner -B /tmp/$USER/hpcw_runner_$C1/tmp:/tmp -B $HR/usr/bin:/opt/host/bin:ro .* -B $HR/etc/slurm:/etc/slurm:ro .* -B /dev/shm/$USER/hpcw_runner_$C1/slurm/bin:/opt/hpcw/slurm/bin:ro $IMG/actions-runner-2.338.0.sif /home/runner/bin/Runner.Listener run$" "$T/apptainer/calls"
+t "  seeing nothing of the job's or the shell's environment, its trace on stdout off" [ "$(runs | grep -c ' env=ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false$')" = 3 ]
+t "  in a container with the chain's flags, the GPU and the node's own temp, and no other bind" grep -q "^apptainer exec --containall --cleanenv --no-mount bind-paths --nv --env ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false --pwd /home/runner --home /tmp/$USER/hpcw_runner_$C1/home:/home/runner -B /tmp/$USER/hpcw_runner_$C1/tmp:/tmp $IMG/actions-runner-2.338.0.sif /home/runner/bin/Runner.Listener run$" "$T/apptainer/calls"
+t "  so the runner's trace stays out of the chain's log" lacks 'INFO Runner\]'
 t "two GitHub jobs ran" all "runner grid-wayne-$C1-1 ended after its job \(1 done in this job\)" "runner grid-wayne-$C1-2 ended after its job \(2 done in this job\)"
 t "the third runner, idle when STOP was written, was ended" has "ending the idle runner grid-wayne-$C1-3 \(STOP is set\)"
 t "  and its registration deleted, the others GitHub discarded itself" [ "$(deleted)" = 102 ]
@@ -231,7 +215,7 @@ t "  so no registration is left on record" [ ! -e "$CH/registered" ]
 t "the job's last word is the count" bash -c "[ '$(status_field state)' = ending ] && [ '$(status_field jobs_done)' = 2 ] && [ '$(status_field job)' = '$C1' ] && [ '$(status_field runner)' = '' ]"
 t "  and its log says so" has "== job $C1 ends: 2 GitHub jobs ran"
 t "the job looked at the runner once a minute and at an ending one every five seconds, never faster" bash -c "[ -s '$T/sleeps' ] && ! grep -vxE '60|5' '$T/sleeps' >/dev/null"
-t "the node-local temp and the Slurm folder are gone with the job" node_tmp_gone "$C1"
+t "the node-local temp is gone with the job" node_tmp_gone "$C1"
 t "no token and no registration left the job" no_leak
 clear_runs
 run_job "$C2"
@@ -278,7 +262,7 @@ run_job "$C6"
 t "an idle runner is ended at the margin" has "ending the idle runner grid-wayne-$C6-1 \(the margin is reached\)"
 t "  and its registration deleted" bash -c "[ -n '$(minted "grid-wayne-$C6-1")' ] && [ '$(deleted)' = '$(minted "grid-wayne-$C6-1")' ]"
 t "  with no GitHub job counted" [ "$(status_field jobs_done)" = 0 ]
-t "  without the Slurm binds when --slurm was not asked" [ "$(runs | grep -c "^run grid-wayne-$C6-1 files ok env=-$")" = 1 ]
+t "  without the GPU, which no --gres asked for" grep -q "^apptainer exec --containall --cleanenv --no-mount bind-paths --env ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false --pwd /home/runner --home /tmp/$USER/hpcw_runner_$C6/home:/home/runner .*/home/runner/bin/Runner.Listener run$" "$T/apptainer/calls"
 echo 1000000 > "$T/clock"; clear_runs
 C7=$(newest "^$NAME$"); plan "busy-clock=$((1000000 + 8 * 3600 - 3600))"
 run_job "$C7"
@@ -292,26 +276,40 @@ t "a runner that asks to be started again is" has 'the runner asked to be starte
 t "  on the same registration" [ "$(runs | grep -c "^run grid-wayne-$C8-1 files ok")" = 2 ]
 t "  keeping its logs for a person" bash -c "ls '$CH/diag-$C8-1/'Runner_*.log >/dev/null 2>&1"
 t "  and the GitHub job then ran" [ "$(status_field jobs_done)" = 1 ]
-fresh; C9=$(newest "^$NAME$"); plan update done stop
+fresh; C9=$(newest "^$NAME$"); plan update
 run_job "$C9"
-t "a runner that updated itself is started again" has 'the runner updated itself'
-t "  and the GitHub job then ran" [ "$(status_field jobs_done)" = 1 ]
+t "a runner that asks for a newer version stops the chain" has 'STOP written: the runner asks for a newer version than the image.s 2.338.0'
+t "  saying what a person does" bash -c "grep -q 'grid_runner.sh --install, then --start' '$CH/STOP' && [ '$(status_field state)' = stopped ]"
+t "  its registration deleted and no GitHub job counted" bash -c "[ '$(deleted | wc -w)' = 1 ] && [ '$(status_field jobs_done)' = 0 ]"
+t "  and its logs kept for a person" bash -c "ls '$CH/diag-$C9-1/'Runner_*.log >/dev/null 2>&1"
+fresh; C10=$(newest "^$NAME$"); plan gone stop
+run_job "$C10"
+t "a runner that ends with no job run is not counted" has "runner grid-wayne-$C10-1 ended with no job run"
+t "  its registration deleted, a minute before the next" bash -c "[ '$(deleted | wc -w)' = 2 ] && grep -qx 60 '$T/sleeps'"
+t "  and the next registration serves" bash -c "[ '$(status_field jobs_done)' = 0 ] && [ '$(status_field state)' = ending ]"
+t "  finding none of the first one's files" [ ! -s "$T/gh/jit/over" ]
 fresh; C10=$(newest "^$NAME$"); plan term term term term
 run_job "$C10"
-t "four failures in a row end the job" has 'three failures in a row: this job ends'
+t "four failures in a row end the job" has 'four failures in a row: this job ends'
 t "  each registration deleted" [ "$(deleted | wc -w)" = 4 ]
-t "  and the last word says failed, and why" bash -c "[ '$(status_field state)' = failed ] && [ '$(status_field note)' = '0 GitHub jobs ran in this job; the runner failed three times in a row' ]"
-fresh; C11=$(newest "^$NAME$"); touch "$T/gh/refuse-jit"
+t "  and the last word says failed, and why" bash -c "[ '$(status_field state)' = failed ] && [ '$(status_field note)' = 'the runner failed four times in a row (1 of 3 jobs in a row that could not serve; the third writes STOP)' ]"
+clear_runs; C11=$(newest "^$NAME$"); touch "$T/gh/refuse-jit"
 run_job "$C11"
-t "GitHub refusing every registration ends the job" has 'GitHub refused three registrations in a row'
-t "  and the last word says so" bash -c "[ '$(status_field state)' = failed ] && [ '$(status_field note)' = '0 GitHub jobs ran in this job; GitHub refused three registrations in a row' ]"
+t "GitHub refusing every registration ends the job" has 'GitHub refused four registrations in a row'
+t "  and the last word says so" bash -c "[ '$(status_field state)' = failed ] && [ '$(status_field note)' = 'GitHub refused four registrations in a row (2 of 3 jobs in a row that could not serve; the third writes STOP)' ]"
 t "  after a minute between tries" [ "$(grep -cx 60 "$T/sleeps")" -ge 3 ]
 t "  with no runner run" [ -z "$(runs)" ]
-rm -f "$T/gh/refuse-jit"
+clear_runs; C11=$(newest "^$NAME$")
+run_job "$C11"
+t "the third job in a row that cannot serve writes STOP, with why" bash -c "grep -q '3 jobs in a row could not serve, the last: GitHub refused four registrations in a row' '$CH/STOP' && [ '$(status_field state)' = stopped ]"
+rm -f "$T/gh/refuse-jit"; clear_runs; C11=$(newest "^$NAME$"); n=$(count "^$NAME$"); j=$(n_jit)
+run_job "$C11"
+t "  so the chain's queued successor ends on it" bash -c "[ '$RC' = 0 ] && [ '$(count "^$NAME$")' = '$n' ] && [ '$(n_jit)' = '$j' ]"
 
 echo "== what a job finds when it starts"
-fresh; C12=$(newest "^$NAME$"); echo "77 grid-wayne-0-1" > "$CH/registered"; plan stop; : > "$T/gh/calls"
+fresh; echo 2 > "$CH/failures"; C12=$(newest "^$NAME$"); echo "77 grid-wayne-0-1" > "$CH/registered"; plan stop; : > "$T/gh/calls"
 run_job "$C12"
+t "a job that serves clears the count of jobs that could not" [ ! -e "$CH/failures" ]
 t "a registration an earlier job left behind is deleted" [ "$(head -1 "$T/gh/deleted" 2>/dev/null)" = 77 ]
 t "  before any registration is made" [ "$(grep -n 'runners/77\|generate-jitconfig' "$T/gh/calls" | head -1 | grep -c 'runners/77')" = 1 ]
 t "  and the job goes on to register" has "registered runner grid-wayne-$C12-1"
@@ -322,9 +320,14 @@ rm -f "$T/gh/delete-404"
 echo public > "$T/gh/visibility"; fresh; C14=$(newest "^$NAME$"); plan stop
 run_job "$C14"
 t "a repository gone public stops the chain in the job" rc_is 1; t "  saying why" has 'refused: OpenSpineConsortium/symphony-template is public'
-t "  STOP written and the last word refused" bash -c "[ -f '$CH/STOP' ] && [ '$(status_field state)' = refused ]"
+t "  STOP written with why, and the last word stopped" bash -c "grep -q 'the repository is public' '$CH/STOP' && [ '$(status_field state)' = stopped ]"
 t "  with nothing registered" [ -z "$(runs)" ]
-rm -f "$T/gh/visibility"
+rm -f "$T/gh/visibility"; touch "$T/gh/offline"; fresh; C14=$(newest "^$NAME$"); plan stop
+run_job "$C14"
+t "gh that cannot answer in a job is a job that could not serve" bash -c "[ '$RC' = 1 ] && [ '$(cat "$CH/failures")' = 1 ]"
+t "  never taken for a public repository" bash -c "[ ! -e '$CH/STOP' ] && [ '$(status_field state)' = failed ]"
+t "  saying why" note_starts "gh could not read the repository's visibility (1 of 3 jobs in a row"
+rm -f "$T/gh/offline"
 gr --start --repo "$GH_REPO" --site wayne; t "the chain's queued successor keeps --start refused until it is stopped" has 'already queued or running'
 gr --stop --repo "$GH_REPO" --now; gr --start --repo "$GH_REPO" --site wayne; t "stopped, the chain starts again" rc_is 0
 C15=$(newest "^$NAME$")
@@ -343,6 +346,12 @@ t "  and says so" has "next job: $C17, queued by an earlier run of this job"
 echo "$C16" > "$CH/next.submitting"; rm -f "$CH/next"; set_state "$C16" PENDING; rm -f "$CH/STOP"; plan stop; clear_runs
 run_job "$C16"
 t "a job run again while it was submitting finds its successor in the queue" bash -c "[ '$(count "^$NAME$")' = '$n' ] && [ \"\$(cat '$CH/next')\" = '$C16 $C17' ] && [ ! -e '$CH/next.submitting' ]"
+echo "$C16" > "$CH/next.submitting"; rm -f "$CH/next"; set_state "$C16" PENDING; rm -f "$CH/STOP"; plan stop; clear_runs
+echo "slurm_load_jobs error: Socket timed out on send/recv operation" > "$T/slurm/sqdown"
+run_job "$C16"
+t "a job run again that cannot ask squeue queues no second successor" bash -c "[ '$(count "^$NAME$")' = '$n' ] && [ -e '$CH/next.submitting' ]"
+t "  and says the chain ends" all 'squeue did not say whether an earlier run of this job queued the next one' 'no successor could be queued'
+rm -f "$T/slurm/sqdown" "$CH/next.submitting"
 echo "the partition is closed" > "$T/slurm/refuse-$NAME"; set_state "$C17" PENDING; rm -f "$CH/STOP"; plan stop; clear_runs
 run_job "$C17"
 t "a job that cannot queue its successor still serves" has "registered runner grid-wayne-$C17-1"
@@ -354,6 +363,7 @@ echo "== the end"
 t "every job the test submitted had a wall time and ran from the runner folder" bash -c "[ ! -e '$T/slurm/refused' ]"
 t "no stand-in was asked for what it does not know" bash -c "[ ! -e '$T/apptainer/refused' ]"
 t "no token and no registration left any job" no_leak
+t "no registration was minted over an earlier one's files" bash -c "[ ! -s '$T/gh/jit/over' ]"
 OUT=$(cat "$T/banned.calls" 2>/dev/null); t "no person's command started a program a login node may ban" [ ! -s "$T/banned.calls" ]
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

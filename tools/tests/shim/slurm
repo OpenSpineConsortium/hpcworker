@@ -18,7 +18,8 @@
 # when it takes a job, as sbatch's own warnings and a site's submit plugin do. While $SHIM_SLURM/sqwarn
 # exists squeue writes its text to stderr before it answers (a site's notice, a setting it complains of),
 # and while $SHIM_SLURM/sqout exists it writes that text to its output first (an answer that is not the
-# job list asked for); squeue's %M is always 0:01 and %N the job's node, or nothing. sacct refuses a -j
+# job list asked for); while $SHIM_SLURM/sqdown exists squeue fails with its text (a controller that
+# does not answer); squeue's %M is always 0:01 and %N the job's node, or nothing. sacct refuses a -j
 # list that is not job numbers, as the real one does.
 set -uo pipefail
 S=${SHIM_SLURM:?SHIM_SLURM is not set}
@@ -78,6 +79,7 @@ if [ "$me" = sbatch ]; then
 fi
 
 if [ "$me" = squeue ]; then
+  [ -e "$S/sqdown" ] && { echo "squeue: error: $(cat "$S/sqdown")" >&2; exit 1; }
   [ -e "$S/sqwarn" ] && cat "$S/sqwarn" >&2
   [ -e "$S/sqout" ] && cat "$S/sqout"
   names="" states="" fmt="%i"

@@ -3,7 +3,8 @@
 # carries it, run by tests/shim/apptainer in the folder the job bound as /home/runner, with an
 # empty environment.
 #   Runner.Listener --version
-#       prints the version bin/VERSION names (the image's runner)
+#       prints the version bin/VERSION names (the image's runner), and then, as the runner does while
+#       ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT is true (the runner image sets it), its closing trace line
 #   Runner.Listener run
 #       one registration. The three files .runner, .credentials and .credentials_rsaparams must be
 #       beside bin/, each mode 0600, or the run is BAD; the line
@@ -13,6 +14,7 @@
 #       means done):
 #         done               a job ran: the worker's log is written to _diag/, the registration's
 #                            files go, exit 0 (an ephemeral runner ends after its one job)
+#         gone               exit 0 with no job run, as when the registration is gone
 #         stop               the runner idles until it is ended, after writing STOP into the chain
 #                            folder $SHIM_APPTAINER/chain names, as a person's --stop would
 #         clock=SECONDS      the runner idles, after moving the test's clock ($HPCW_RUNNER_CLOCK)
@@ -27,9 +29,10 @@ set -uo pipefail
 A=${SHIM_APPTAINER:?SHIM_APPTAINER is not set}
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)   # the folder bound as /home/runner
+trace() { case "${ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT:-}" in 1|true|True|TRUE) printf '[2026-10-16 00:00:00Z INFO Runner] %s\n' "$*";; esac; }
 case "${1:-}" in
-  --version) cat "$here/VERSION"; exit 0;;
-  run) ;;
+  --version) cat "$here/VERSION"; trace "Runner execution has finished with return code 0"; exit 0;;
+  run) trace "Runner is starting";;
   *) echo "Runner.Listener: unknown command ${1:-} (test shim)" >&2; exit 2;;
 esac
 ok=ok
@@ -50,6 +53,7 @@ idle() { local i; for i in $(seq 1 2400); do realsleep 0.05; done; echo "Runner.
 sleeps() { grep -c . "${SHIM_SLEEPS:-/dev/null}" 2>/dev/null || echo 0; }
 case "$plan" in
   done) worker_log; rm -f "$root/.runner" "$root/.credentials" "$root/.credentials_rsaparams"; exit 0;;
+  gone) exit 0;;
   stop) date -u +%FT%TZ > "$(cat "$A/chain")/STOP" || exit 1; idle;;
   clock=*) printf '%s\n' "${plan#clock=}" > "$HPCW_RUNNER_CLOCK" || exit 1; idle;;
   busy-clock=*)

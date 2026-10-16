@@ -8,23 +8,26 @@
 #       writes a stand-in SIF at DEST that holds the runner version the tag names (latest: the one
 #       in $SHIM_APPTAINER/latest, else 2.338.0); fails as a pull does without a network while
 #       $SHIM_APPTAINER/offline exists, and refuses any other image
-#   apptainer exec [--containall] [--cleanenv] [--no-mount bind-paths] [--pwd P] [--home SRC:DST]
-#                  [-B SRC:DST[:ro]]... IMAGE CMD...
+#   apptainer exec [--containall] [--cleanenv] [--no-mount bind-paths] [--nv] [--env K=V]...
+#                  [--pwd P] [--home SRC:DST] [-B SRC:DST[:ro]]... IMAGE CMD...
 #       IMAGE is a stand-in SIF. Every bind source, and the home, must exist and lie under
 #       $SHIM_SLURM_ROOT (the test's folder) or this job's own node-local temp (/tmp/$USER/hpcw_runner_*
-#       or /dev/shm/$USER/hpcw_runner_*): never the home, the volume or a system folder. Three
-#       commands are known:
+#       or /dev/shm/$USER/hpcw_runner_*): never the home, the volume or a system folder. A bind or a
+#       home the environment would add (APPTAINER_BIND, APPTAINER_BINDPATH, APPTAINER_HOME and their
+#       SINGULARITY_ names), which the real one honours, is refused. As an Apptainer that cannot mount
+#       a SIF on the node does, it says on stderr that it unpacks the image first, and for a command it
+#       does not hand over to, that it cleans up after. Two commands are known:
 #         cp -R --preserve=mode,timestamps /home/runner/. /mnt/out/
 #             the runner's files out of the image: $SHIM_APPTAINER/tree/home/runner (the test puts
 #             tests/shim/runner-listener there as bin/Runner.Listener) copied into the bind at
 #             /mnt/out, with bin/VERSION naming the version the SIF holds
 #         /home/runner/bin/Runner.Listener ARGS...
 #             the copy in the --home source, run with the environment --cleanenv gives a container:
-#             HOME, PATH and what APPTAINERENV_* names, plus the test's own SHIM_* and the clock
-#         cat /etc/passwd, cat /etc/group
-#             the image's own, from $SHIM_APPTAINER/tree/etc
+#             HOME, PATH, the image's own ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 (the one variable of
+#             the runner image's that a job must override), what APPTAINERENV_* names and --env
+#             gives, in that order, each later one winning, plus the test's own SHIM_* and the clock
 #       The runner's two calls must carry --containall, --cleanenv and --no-mount bind-paths (the
-#       flags every job uses); hpcw_slurm_in_container's cat carries none of them.
+#       flags every job uses).
 set -uo pipefail
 A=${SHIM_APPTAINER:?SHIM_APPTAINER is not set}
 ROOT=${SHIM_SLURM_ROOT:?SHIM_SLURM_ROOT is not set}
@@ -64,7 +67,10 @@ case "${1:-}" in
   *) echo "apptainer: unknown command ${1:-} (test shim)" >&2; exit 2;;
 esac
 
-shift; contain=0 clean=0 nomount="" home="" pwd_="" binds=() image=""
+for v in APPTAINER_BIND APPTAINER_BINDPATH APPTAINER_HOME SINGULARITY_BIND SINGULARITY_BINDPATH SINGULARITY_HOME; do
+  [ -n "${!v:-}" ] && refused "exec with $v=${!v} in the environment, which would bind it into the container"
+done
+shift; contain=0 clean=0 nomount="" home="" pwd_="" binds=() image="" given=()
 while [ $# -gt 0 ]; do case "$1" in
   -C|--containall) contain=1; shift;; -e|--cleanenv) clean=1; shift;;
   --no-mount) nomount=$2; shift 2;; --no-mount=*) nomount=${1#*=}; shift;;
@@ -72,6 +78,7 @@ while [ $# -gt 0 ]; do case "$1" in
   -H|--home) home=$2; shift 2;; --home=*) home=${1#*=}; shift;;
   -B|--bind) binds+=("$2"); shift 2;; --bind=*) binds+=("${1#*=}"); shift;;
   --nv) shift;;
+  --env) given+=("$2"); shift 2;; --env=*) given+=("${1#*=}"); shift;;
   -*) refused "exec option $1";;
   *) image=$1; shift; break;;
 esac; done
@@ -92,6 +99,7 @@ if [ -n "$home" ]; then
   [ "$hdst" = /home/runner ] || refused "the home is bound at $hdst, not /home/runner"
 fi
 runner_flags() { [ $contain = 1 ] && [ $clean = 1 ] && [ "$nomount" = bind-paths ] || refused "$1 without --containall --cleanenv --no-mount bind-paths"; }
+echo "INFO:    Converting SIF file to temporary sandbox..." >&2
 
 case "$*" in
   "cp -R --preserve=mode,timestamps /home/runner/. /mnt/out/")
@@ -107,11 +115,14 @@ case "$*" in
     [ -n "${at[/tmp]:-}" ] || refused "the runner run without a /tmp bind"
     [ -x "$hsrc/bin/Runner.Listener" ] || refused "no Runner.Listener in $hsrc"
     shift
-    envs=(HOME="$hsrc" PATH="$PATH" SHIM_APPTAINER="$A" SHIM_SLEEPS="${SHIM_SLEEPS:-}" HPCW_RUNNER_CLOCK="${HPCW_RUNNER_CLOCK:-}")
+    envs=(HOME="$hsrc" PATH="$PATH" ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 SHIM_APPTAINER="$A" SHIM_SLEEPS="${SHIM_SLEEPS:-}" HPCW_RUNNER_CLOCK="${HPCW_RUNNER_CLOCK:-}")
     for v in $(compgen -e); do case "$v" in APPTAINERENV_*) envs+=("${v#APPTAINERENV_}=${!v}");; esac; done
+    envs+=(${given[@]+"${given[@]}"})
     cd "$hsrc" || exit 1
-    exec env -i "${envs[@]}" "$hsrc/bin/Runner.Listener" "$@";;
-  "cat /etc/passwd"|"cat /etc/group")
-    cat "$A/tree$2"; exit $?;;
+    # the runner run is handed over, so a TERM reaches it; its --version returns, and the clean-up follows
+    [ "${1:-}" = run ] && exec env -i "${envs[@]}" "$hsrc/bin/Runner.Listener" "$@"
+    env -i "${envs[@]}" "$hsrc/bin/Runner.Listener" "$@"; rc=$?
+    echo "INFO:    Cleaning up image..." >&2
+    exit $rc;;
   *) refused "exec of '$*' in the container";;
 esac

@@ -143,10 +143,12 @@ name and identifier carry no university name.
   (`ghcr.io/actions/actions-runner`, a SIF; `--containall --cleanenv --no-mount bind-paths`, no home,
   no volume, no environment) for a private or internal repository only, registered one GitHub job
   at a time with a just-in-time credential the account's own `gh` mints into mode-0600 files on the
-  node's disk; GitHub holds nothing of the grid's and the grid nothing of GitHub's beyond that one
-  job's credential, which leaves with the job. No Claude credential is anywhere near it: the runner
-  runs the repository's steps and nothing else (`README.md`, "A GitHub Actions runner on the grid";
-  `docs/OPEN_QUESTIONS.md`).
+  node's disk; GitHub holds nothing of the grid's, and the container nothing of GitHub's beyond that
+  one job's credential, which leaves with the job (the `gh` sign-in stays in the home, which the
+  container never sees). No step reaches the scheduler, the home or the lab volume, since a job
+  queued as the account could read all it holds, the Claude login among them: no Claude credential
+  is anywhere near a workflow's job, and the runner runs the repository's steps and nothing else
+  (`README.md`, "A GitHub Actions runner on the grid"; `docs/OPEN_QUESTIONS.md`).
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
   2026-09-28 at 22:34 local the student's whole `~/.ashley` folder on the grid was deleted while a
   Remote Control session spawned from the phone was open, and the Claude login inside it was lost;

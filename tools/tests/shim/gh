@@ -14,7 +14,9 @@
 #       is appended to $SHIM_GH/jit/requests, one line; the answer is GitHub's shape, a runner id
 #       counted from 100 and encoded_jit_config carrying .runner, .credentials and
 #       .credentials_rsaparams (with a marker that must never leave the job's node-local temp);
-#       refused (403) while $SHIM_GH/refuse-jit exists
+#       refused (403) while $SHIM_GH/refuse-jit exists. The request comes from the job's node-local
+#       temp, whose home/ is the runner's folder: any of the three files an earlier registration
+#       left there is named in $SHIM_GH/jit/over, since a new registration must find none
 #   gh api -X DELETE repos/O/N/actions/runners/ID --silent
 #       appends ID to $SHIM_GH/deleted; 404 while $SHIM_GH/delete-404 exists
 # While $SHIM_GH/offline exists every call fails as gh does without a network. Anything else is refused.
@@ -62,6 +64,9 @@ if [[ "$ep" =~ ^repos/([^/]+/[^/]+)/actions/runners/generate-jitconfig$ ]]; then
   [ -e "$G/refuse-jit" ] && { echo "gh: HTTP 403: Resource not accessible by personal access token (https://api.github.com/$ep)" >&2; exit 1; }
   mkdir -p "$G/jit"
   { tr -d '\n' < "$input"; echo; } >> "$G/jit/requests"
+  for f in .runner .credentials .credentials_rsaparams; do
+    [ -e "$(dirname "$input")/home/$f" ] && echo "$(dirname "$input")/home/$f" >> "$G/jit/over"
+  done
   python3 - "$input" "$G/jit" "${BASH_REMATCH[1]}" <<'PY'
 import base64, json, os, sys
 with open(sys.argv[1]) as f:

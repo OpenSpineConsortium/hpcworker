@@ -8,13 +8,14 @@
 # the runner's labels (`runs-on: [self-hosted, grid]`) then runs on that node, and GitHub keeps
 # its log and its artifacts as for any job. The runner is registered for one job at a time with a
 # just-in-time credential that the account's own `gh` sign-in mints as the registration starts
-# and that GitHub discards once the job has run: GitHub holds nothing of the grid's, and the grid
-# holds nothing of GitHub's beyond that one-job credential, three mode-0600 files on the node's
-# own disk that leave with the job.
+# and that GitHub discards once the job has run: GitHub holds nothing of the grid's, and the
+# container holds nothing of GitHub's beyond that one-job credential, three mode-0600 files on the
+# node's own disk that leave with the job. The gh sign-in itself stays in the account's home, which
+# the container never sees.
 #
 #   tools/grid_runner.sh --install --site S [--version 2.338.0]
 #   tools/grid_runner.sh --start --repo OWNER/NAME --site S [--labels a,b] [--hours 8] [--margin 60]
-#                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q] [--slurm]
+#                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q]
 #   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--now]
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME]
 #
@@ -43,20 +44,28 @@
 # partition_cpu_batch and qos_batch, or --partition and --qos; --cpus, --mem and --gres size it),
 # requeueable, and each job first queues its one successor (--dependency=afterany:<its own id>,
 # singleton), so the runner is back after a wall time or a preemption with nobody at the keyboard.
-# In the job: the repository's visibility is read again; the runner's files are copied out of the
-# image onto the node's disk; then, until --margin minutes before the wall time, one registration
-# at a time: `gh api` mints a just-in-time runner
+# In the job: the repository's visibility is read again (a public one writes STOP); the runner's
+# files are copied out of the image onto the node's disk; then, until --margin minutes before the
+# wall time, one registration at a time: `gh api` mints a just-in-time runner
 # (name grid-<site>-<job>-<n>; labels grid, the site's name and --labels, beside the self-hosted,
 # linux and x64 GitHub adds) into a 0600 file on the node's disk, the three files it carries are
 # written 0600 into the runner's folder, that file goes, and the runner listens for one job. A job
-# that completes ends the runner (GitHub removes the registration itself), the work folder goes,
-# and the next registration follows. A runner still idle at the margin, or once STOP is written,
-# is ended and its registration deleted; one running a job finishes it first. A job the wall time
-# cuts off fails on GitHub ("the runner has lost communication"), so the margin is the longest job
-# the chain should take, and a workflow's timeout-minutes stays under it. The job asks nothing of
-# the scheduler: it reads STOP and its own clock once a minute. With --slurm the host's Slurm
-# client is bound into the container as the worker's is (lib/adapters/common.sh
-# hpcw_slurm_in_container), so a step may queue a job of its own with sbatch.
+# that completes ends the runner (GitHub removes the registration itself), the work folder and the
+# registration's files go, and the next registration follows. A runner still idle at the margin,
+# or once STOP is written, is ended and its registration deleted; one running a job finishes it
+# first. A job the wall time cuts off fails on GitHub ("the runner has lost communication"), so the
+# margin is the longest job the chain should take, and a workflow's timeout-minutes stays under
+# it. The job asks nothing of the scheduler: it reads STOP and its own clock once a minute. A chain
+# never spins on a failure: the third job in a row that cannot serve (gh unanswered, no runtime or
+# image on the node, GitHub refusing registrations, the runner failing) writes STOP with the
+# reason, and so does a runner that asks for a newer version than the image holds, which each
+# actions/runner release brings (the container cannot update it; --install, then --start).
+#
+# A step gets no way to the scheduler, the account's home or the lab volume: a job queued as the
+# account could read all the account holds, the gh sign-in and the Claude login among them, so the
+# host's Slurm client is never bound in, and none of the person's or the module's Apptainer
+# settings (APPTAINER_BIND and the like) reaches the container. With --gres naming a GPU the
+# container is given the node's GPU (--nv).
 #
 # --stop writes <chain dir>/STOP, which every job reads before each registration, and cancels the
 # queued successor (one squeue, one scancel); a job running a GitHub job finishes it first, an idle
@@ -73,7 +82,7 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'grid_runner: %s\n' "$*" >&2; exit 1; }
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
 
-MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" SLURM=0 NOW=0
+MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0
 RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN=""
 while [ $# -gt 0 ]; do case "$1" in
   --install) MODE=install; shift;; --start) MODE=start; shift;; --stop) MODE=stop; shift;; --status) MODE=status; shift;;
@@ -82,7 +91,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --hours) need "$@"; HOURS="$2"; shift 2;; --margin) need "$@"; MARGIN="$2"; shift 2;;
   --cpus) need "$@"; CPUS="$2"; shift 2;; --mem) need "$@"; MEM="$2"; shift 2;; --gres) need "$@"; GRES="$2"; shift 2;;
   --partition) need "$@"; HPCW_RUNNER_PARTITION="$2"; shift 2;; --qos) need "$@"; HPCW_RUNNER_QOS="$2"; shift 2;;
-  --slurm) SLURM=1; shift;; --now) NOW=1; shift;;
+  --now) NOW=1; shift;;
   # the jobs' own: what --install hands the install job and --start hands the first job of a chain, and each job its successor
   --pull) MODE=pull; shift;; --serve) MODE=serve; shift;; --runner-dir) need "$@"; HPCW_RUNNER_DIR="$2"; shift 2;;
   --runtime-bin) need "$@"; RUNTIME_BIN_GIVEN="$2"; shift 2;; --runtime-module) need "$@"; RUNTIME_MODULE_GIVEN="$2"; shift 2;;
@@ -108,7 +117,7 @@ PY=""; case "$MODE" in pull|serve) PY=$(command -v python3 || echo /usr/bin/pyth
 
 # the site profile, for a person's command on the login node, read with the framework's own awk
 # reader and handed to the jobs as options (--runner-dir, --runtime-bin, --runtime-module,
-# --partition, --qos), so a job needs nothing of the framework beside common.sh
+# --partition, --qos), so a job needs nothing of the framework
 FW="$HERE/../framework" STATE_DIR=""
 prof_get() { # KEY: one value of the site profile, $HOME and $USER expanded
   ( LIB="$FW/lib" PROFILES="$FW/profiles"; . "$FW/lib/profile_sh.sh" && hpcw_prof_awk get "$FW/profiles/$SITE.json" "$1" )
@@ -165,7 +174,6 @@ job_args() {
   [ -n "$RUNTIME_MODULE_GIVEN" ] && SITE_ARGS+=(--runtime-module "$RUNTIME_MODULE_GIVEN")
   JOB_ARGS=(--repo "$REPO" "${SITE_ARGS[@]}" --hours "$HOURS" --margin "$MARGIN")
   [ -n "$LABELS" ] && JOB_ARGS+=(--labels "$LABELS")
-  [ $SLURM = 1 ] && JOB_ARGS+=(--slurm)
   [ -n "$CPUS" ] && JOB_ARGS+=(--cpus "$CPUS")
   [ -n "$MEM" ] && JOB_ARGS+=(--mem "$MEM")
   [ -n "$GRES" ] && JOB_ARGS+=(--gres "$GRES")
@@ -188,16 +196,13 @@ job_id() { # OUT: the job number in sbatch --parsable's answer, read from among 
 # the chain's own copy of what it runs, in <runner dir>/bin: a checkout that changes under a queued job
 # cannot break it, and a person's --start or --install refreshes it, only when every file parses
 COPIED=(grid_runner.sh grid_runner.sbatch grid_runner_install.sbatch)
-install_bin() { # DIR: the tools folder to copy from; common.sh comes from the framework beside it
-  local f src
+install_bin() { # DIR: the tools folder to copy from
+  local f
   for f in "${COPIED[@]}"; do bash -n "$1/$f" 2>/dev/null || { say "$1/$f is missing or does not parse"; return 1; }; done
-  src="$1/../framework/lib/adapters/common.sh"
-  bash -n "$src" 2>/dev/null || { say "$src is missing or does not parse"; return 1; }
   mkdir -p "$ROOT/bin" || return 1
   for f in "${COPIED[@]}"; do
     cp "$1/$f" "$ROOT/bin/.$f.new" && chmod 755 "$ROOT/bin/.$f.new" && mv -f "$ROOT/bin/.$f.new" "$ROOT/bin/$f" || { say "could not copy $f into $ROOT/bin"; return 1; }
   done
-  cp "$src" "$ROOT/bin/.common.sh.new" && chmod 644 "$ROOT/bin/.common.sh.new" && mv -f "$ROOT/bin/.common.sh.new" "$ROOT/bin/common.sh" || { say "could not copy common.sh into $ROOT/bin"; return 1; }
 }
 
 visibility() { # -> private | internal | public, or 1 with gh's own words (a warning of gh's beside the answer is passed over)
@@ -207,8 +212,8 @@ visibility() { # -> private | internal | public, or 1 with gh's own words (a war
   [ -n "$v" ] || { say "gh answered something else than a visibility for $REPO: $(printf '%s\n' "$out" | tail -1)" >&2; return 1; }
   printf '%s' "$v"
 }
-refuse_public() { # 0 when the repository may have a runner
-  local v; v=$(visibility) || return 1
+refuse_public() { # 0 when the repository may have a runner, 1 when it is public, 2 when gh could not say
+  local v; v=$(visibility) || return 2
   [ "$v" != public ] || { say "refused: $REPO is public. A self-hosted runner serves a private or internal repository only (GitHub's own advice: a public repository's forks could run their pull requests on the grid)"; return 1; }
   return 0
 }
@@ -239,9 +244,9 @@ chain_start() {
   q=$(SQ -h -u "$USER" -n "$JOB_NAME" -o '%i %T' 2>&1) || die "squeue did not answer: $q"
   [ -z "$q" ] || die "a chain for $REPO is already queued or running (job $(printf '%s' "$q" | tr '\n' ' ' | sed 's/ *$//')); tools/grid_runner.sh --stop --repo $REPO ends it"
   install_bin "$HERE" || die "nothing started"
-  rm -f "$CHAIN/STOP" "$CHAIN/next" "$CHAIN/next.submitting"
+  rm -f "$CHAIN/STOP" "$CHAIN/next" "$CHAIN/next.submitting" "$CHAIN/failures"
   job_args
-  { printf 'repo=%s\nversion=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nslurm=%s\nstarted=%s\n' "$REPO" "$v" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$SLURM" "$(date -u +%FT%TZ)"
+  { printf 'repo=%s\nversion=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nstarted=%s\n' "$REPO" "$v" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$(date -u +%FT%TZ)"
     printf 'sbatch=%s\n' "${SB_FLAGS[*]}"; } > "$CHAIN/config" || die "cannot write $CHAIN/config"
   out=$(SB --parsable --job-name "$JOB_NAME" --dependency=singleton "${SB_FLAGS[@]}" -D "$ROOT" --output "$CHAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${JOB_ARGS[@]}" 2>&1) \
     || die "sbatch refused the chain's first job: $out"
@@ -310,18 +315,24 @@ chain_status() {
 
 # ---- inside a job ----------------------------------------------------------------------------------
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
-NT="" IPC=""
+NT=""
 node_tmp() { # the node's own disk, never the volume's $TMPDIR (CephFS at Wayne State); removed on exit whatever way the job ends
-  NT="/tmp/$USER/hpcw_runner_$SLURM_JOB_ID"; IPC="/dev/shm/$USER/hpcw_runner_$SLURM_JOB_ID"
+  NT="/tmp/$USER/hpcw_runner_$SLURM_JOB_ID"
   mkdir -p "$NT/tmp" "$NT/cache" && chmod 700 "$NT" || { log "cannot create $NT"; return 1; }
   trap 'cleanup_tmp' EXIT
-  export TMPDIR="$NT/tmp" APPTAINER_TMPDIR="$NT/tmp" SINGULARITY_TMPDIR="$NT/tmp" APPTAINER_CACHEDIR="$NT/cache" SINGULARITY_CACHEDIR="$NT/cache"
+  export TMPDIR="$NT/tmp"
+  # the job starts in the runner folder on the volume; Apptainer never mounts the working folder
+  # under --containall, and from here it would be the node's own temp were it ever to
+  cd "$NT" || return 1
 }
-cleanup_tmp() { # only this job's own folders, by their names, as hpcw_rm_own_tmp does
-  local p
-  for p in "$NT" "$IPC"; do
-    case "$p" in */hpcw_runner_[0-9]*) [ -d "$p" ] && rm -rf "$p";; esac
-  done
+runtime_env() { # after the module: Apptainer's own settings from the person's shell or the module (a
+  # bind, a home, a variable handed into the container) go, and only the temp and cache stay
+  local v
+  for v in $(compgen -e); do case "$v" in APPTAINER_*|SINGULARITY_*|APPTAINERENV_*|SINGULARITYENV_*) unset "$v";; esac; done
+  export APPTAINER_TMPDIR="$NT/tmp" SINGULARITY_TMPDIR="$NT/tmp" APPTAINER_CACHEDIR="$NT/cache" SINGULARITY_CACHEDIR="$NT/cache"
+}
+cleanup_tmp() { # only this job's own folder, by its name, as hpcw_rm_own_tmp does
+  case "$NT" in */hpcw_runner_[0-9]*) [ -d "$NT" ] && rm -rf "$NT";; esac
 }
 load_runtime() { # the given path, else the module, else PATH
   RUNTIME_BIN="$RUNTIME_BIN_GIVEN"
@@ -335,14 +346,15 @@ load_runtime() { # the given path, else the module, else PATH
   [ -n "$RUNTIME_BIN" ] && [ -x "$RUNTIME_BIN" ] || { log "no apptainer on $(hostname -s) (--runtime-bin ${RUNTIME_BIN_GIVEN:-none}, --runtime-module ${RUNTIME_MODULE_GIVEN:-none})"; return 1; }
 }
 # the container as every job runs it: no home, no lab volume, none of the environment, none of the
-# site's own binds; the runner's folder on the node's disk as /home/runner and a node-local /tmp
-RCMD=()
-runner_cmd() { # IMAGE HOME [-B ...] -- CMD...: RCMD is the command line
+# site's own binds; the runner's folder on the node's disk as /home/runner and a node-local /tmp.
+# The image sets ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1, which would pour the runner's whole trace
+# into the chain's log on the volume; it is turned off, and _diag on the node keeps the trace. With
+# --gres naming a GPU, --nv gives the container the node's GPU.
+RCMD=() NV=(); case "$GRES" in *gpu*) NV=(--nv);; esac
+runner_cmd() { # IMAGE HOME CMD...: RCMD is the command line
   local image="$1" home="$2"; shift 2
-  RCMD=("$RUNTIME_BIN" exec --containall --cleanenv --no-mount bind-paths --pwd /home/runner --home "$home:/home/runner" -B "$NT/tmp:/tmp")
-  while [ $# -gt 0 ] && [ "$1" != -- ]; do RCMD+=("$1"); shift; done
-  [ "${1:-}" = -- ] && shift
-  RCMD+=("$image" "$@")
+  RCMD=("$RUNTIME_BIN" exec --containall --cleanenv --no-mount bind-paths ${NV[@]+"${NV[@]}"} --env ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false
+    --pwd /home/runner --home "$home:/home/runner" -B "$NT/tmp:/tmp" "$image" "$@")
 }
 runner_tree() { # IMAGE DEST: the runner's files copied out of the image onto the node's disk (the image is read-only, and the runner writes beside its own files)
   mkdir -p "$2" && chmod 700 "$2" || return 1
@@ -357,14 +369,18 @@ pull() { # the install job: the image, the runner's files out of it, its --versi
   log "== install job $SLURM_JOB_ID on $(hostname -s), kernel $(uname -r)"
   node_tmp || exit 1
   load_runtime || exit 2
+  runtime_env
   log "runtime: $RUNTIME_BIN ($("$RUNTIME_BIN" --version 2>&1 | head -1))"
   log "pulling docker://$IMAGE_REF:$VERSION (temp and cache on $NT)"
   "$RUNTIME_BIN" pull "$NT/image.sif" "docker://$IMAGE_REF:$VERSION" > "$NT/pull.log" 2>&1 \
     || { tail -5 "$NT/pull.log"; log "STOP: the pull failed (registry egress from this node, or no such version)"; exit 3; }
   runner_tree "$NT/image.sif" "$NT/home" || { log "STOP: could not copy the runner's files out of the image"; exit 4; }
-  runner_cmd "$NT/image.sif" "$NT/home" -- /home/runner/bin/Runner.Listener --version
-  out=$("${RCMD[@]}" 2>&1); v=$(printf '%s\n' "$out" | tail -1 | tr -d '[:space:]')
-  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf '%s\n' "$out" | tail -5; log "STOP: the runner did not answer its version inside the image"; exit 5; }
+  runner_cmd "$NT/image.sif" "$NT/home" /home/runner/bin/Runner.Listener --version
+  # the version is the line that is a version alone: Apptainer may print INFO lines around the
+  # command's own output (a SIF unpacked into a sandbox where the node cannot mount it), and a
+  # runner tracing to stdout prints after it
+  out=$("${RCMD[@]}" 2>&1); v=$(printf '%s\n' "$out" | tr -d '\r' | grep -xE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
+  [ -n "$v" ] || { printf '%s\n' "$out" | tail -5; log "STOP: the runner did not answer its version inside the image"; exit 5; }
   log "the runner answers inside the image: version $v"
   mkdir -p "$IMAGES" || { log "STOP: cannot create $IMAGES"; exit 6; }
   part="$IMAGES/actions-runner-$v.sif.part"
@@ -401,8 +417,11 @@ successor() { # this job's one successor, queued once even when this job is run 
     log "next job: $(cut -d' ' -f2 "$CHAIN/next"), queued by an earlier run of this job"; return 0
   fi
   if [ "$(cat "$CHAIN/next.submitting" 2>/dev/null)" = "$SLURM_JOB_ID" ]; then
-    # an earlier run of this same job stopped while it submitted: one squeue says whether that got through
-    id=$(SQ -h -u "$USER" -n "$JOB_NAME" -t PENDING -o '%i' 2>/dev/null | grep -vx "$SLURM_JOB_ID" | head -1)
+    # an earlier run of this same job stopped while it submitted: one squeue says whether that got
+    # through, and with no answer none is queued, since a second successor would run the chain twice
+    id=$(SQ -h -u "$USER" -n "$JOB_NAME" -t PENDING -o '%i' 2>/dev/null) \
+      || { log "squeue did not say whether an earlier run of this job queued the next one; none is queued"; return 1; }
+    id=$(printf '%s\n' "$id" | grep -vx "$SLURM_JOB_ID" | head -1)
     if [ -n "$id" ]; then
       printf '%s %s\n' "$SLURM_JOB_ID" "$id" > "$CHAIN/next" && rm -f "$CHAIN/next.submitting"
       log "next job: $id, queued by an earlier run of this job"; return 0
@@ -416,7 +435,7 @@ successor() { # this job's one successor, queued once even when this job is run 
   log "next job: $id, after this one ends"
 }
 
-HOME_DIR="" IMAGE="" EXTRA=()   # the runner's folder on the node's disk (/home/runner inside), the SIF, the Slurm binds
+HOME_DIR="" IMAGE=""   # the runner's folder on the node's disk (/home/runner inside), the SIF
 mint() { # N: one just-in-time registration; its three files 0600 in the runner's folder, nothing on a command line
   local n=$1 req="$NT/jit-request.json" resp="$NT/jit-response.json" labels l
   RUNNER_NAME="grid-${SITE:-$(hostname -s)}-$SLURM_JOB_ID-$n"
@@ -454,7 +473,7 @@ unregister() { # ID: a registration GitHub has not discarded itself (the runner 
     || log "note: could not delete runner registration $1 (gone already?): $(printf '%s' "$out" | tail -1)"
   rm -f "$CHAIN/registered"
 }
-busy() { # a GitHub job is running: the runner's worker has written its log (an ended job ends the runner itself, so the file means a job in flight)
+busy() { # a GitHub job is running, or once the runner has ended, ran: the runner's worker has written its log (an ended job ends the runner itself, so while it runs the file means a job in flight)
   local f; for f in "$HOME_DIR"/_diag/Worker_*.log; do [ -e "$f" ] && return 0; done; return 1
 }
 LPID="" RC=0 KILLED=0
@@ -464,7 +483,7 @@ end_listener() { # the runner is ended; a job on it would fail, so this is calle
   kill -KILL "$LPID" 2>/dev/null; return 0
 }
 run_listener() { # one run of the runner on the registration in place, looked at once a minute -> RC, KILLED
-  runner_cmd "$IMAGE" "$HOME_DIR" ${EXTRA[@]+"${EXTRA[@]}"} -- /home/runner/bin/Runner.Listener run
+  runner_cmd "$IMAGE" "$HOME_DIR" /home/runner/bin/Runner.Listener run
   "${RCMD[@]}" & LPID=$!
   KILLED=0
   while kill -0 "$LPID" 2>/dev/null; do
@@ -488,7 +507,25 @@ keep_diag() { # N: the runner's own logs kept beside the chain's log when a run 
   mkdir -p "$d" && cp "$HOME_DIR"/_diag/*.log "$d/" 2>/dev/null && log "the runner's logs are kept in $d"
   return 0
 }
-fresh_work() { rm -rf "$HOME_DIR/_work" "$HOME_DIR/_diag"; }
+fresh_work() { # the node-local folder as the next registration needs it: no work, no logs, no credential
+  rm -rf "$HOME_DIR/_work" "$HOME_DIR/_diag"; rm -f "$HOME_DIR/.runner" "$HOME_DIR/.credentials" "$HOME_DIR/.credentials_rsaparams"
+}
+
+# A chain never spins on a failure: each job that cannot serve counts one in <chain dir>/failures, a
+# job that serves (a GitHub job run, or a runner listening until the margin) clears it, and the third
+# in a row writes STOP with the reason, which the queued successor reads and ends on.
+stop_chain() { # REASON: STOP written by the chain itself, with why, for --status and a person
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" > "$CHAIN/STOP"
+  status_write stopped "$1; STOP written, and tools/grid_runner.sh --start starts the chain again"
+  log "STOP written: $1"
+}
+chain_failed() { # REASON
+  local n; n=$(cat "$CHAIN/failures" 2>/dev/null); [[ "$n" =~ ^[0-9]{1,6}$ ]] || n=0
+  n=$((n + 1)); printf '%s\n' "$n" > "$CHAIN/failures"
+  if [ "$n" -ge 3 ]; then stop_chain "$n jobs in a row could not serve, the last: $1"
+  else status_write failed "$1 ($n of 3 jobs in a row that could not serve; the third writes STOP)"; fi
+}
+chain_served() { rm -f "$CHAIN/failures"; }
 
 serve() {
   local n=0 fails=0 chained=1 leftover ended=0 end_state=ending end_note=""
@@ -504,27 +541,21 @@ serve() {
   DEADLINE=$(( $(end_time) - MARGIN * 60 ))
   log "wall time ends $(iso "$(end_time)"); the last registration is made before $(iso "$DEADLINE") ($MARGIN minutes of margin)"
   status_write starting
-  refuse_public || { date -u +%FT%TZ > "$CHAIN/STOP"; status_write refused "the repository is public; STOP written"; log "STOP written: no job of this chain registers a runner until the repository is private again and --start is run"; return 1; }
+  refuse_public; case $? in
+    0) ;;
+    1) stop_chain "the repository is public, and a runner serves a private or internal one only"; return 1;;
+    *) chain_failed "gh could not read the repository's visibility"; return 1;;
+  esac
   # a registration an earlier job left behind (a preemption, a wall time with the runner idle): GitHub keeps it listed, offline
   leftover=$(cut -d' ' -f1 "$CHAIN/registered" 2>/dev/null); [[ "$leftover" =~ ^[0-9]+$ ]] && unregister "$leftover"
-  node_tmp || { status_write failed "no node-local temp"; return 1; }
-  load_runtime || { status_write failed "no apptainer on this node"; return 2; }
+  node_tmp || { chain_failed "no node-local temp on $(hostname -s)"; return 1; }
+  load_runtime || { chain_failed "no apptainer on $(hostname -s)"; return 2; }
+  runtime_env
   IMAGE="$IMAGES/actions-runner-$IMAGE_VERSION.sif"
-  [ -s "$IMAGE" ] || { log "no runner image at $IMAGE (tools/grid_runner.sh --install)"; status_write failed "no runner image"; return 3; }
+  [ -s "$IMAGE" ] || { log "no runner image at $IMAGE (tools/grid_runner.sh --install)"; chain_failed "no runner image"; return 3; }
   HOME_DIR="$NT/home"
-  runner_tree "$IMAGE" "$HOME_DIR" || { log "could not copy the runner's files out of $IMAGE"; status_write failed "the image could not be read"; return 4; }
-  if [ $SLURM = 1 ]; then
-    # shellcheck disable=SC1090
-    source "$ROOT/bin/common.sh" || { log "no $ROOT/bin/common.sh"; status_write failed "no common.sh"; return 5; }
-    export RUNTIME=apptainer RUNTIME_BIN HPCW_NODE_TMP="$NT"
-    mkdir -p "$IPC" && chmod 700 "$IPC"
-    if HPCW_HOST_TMPDIR="${HPCW_HOST_TMPDIR:-}" hpcw_slurm_in_container "$IPC/slurm" "$IMAGE" sif; then
-      log "$HPCW_SLURM_NOTE"
-      # shellcheck disable=SC2206
-      EXTRA=($HPCW_SLURM_BINDS); export APPTAINERENV_PREPEND_PATH="$HPCW_SLURM_INSIDE" SINGULARITYENV_PREPEND_PATH="$HPCW_SLURM_INSIDE"
-    else log "the Slurm client is not bound: $HPCW_SLURM_NOTE"; fi
-  fi
-  log "the runner's files are on $(hostname -s):$HOME_DIR; image $IMAGE_VERSION"
+  runner_tree "$IMAGE" "$HOME_DIR" || { log "could not copy the runner's files out of $IMAGE"; chain_failed "the image could not be read"; return 4; }
+  log "the runner's files are on $(hostname -s):$HOME_DIR; image $IMAGE_VERSION$([ ${#NV[@]} = 0 ] || echo ", with the node's GPU")"
   while [ $ended = 0 ]; do
     if over; then
       log "$([ -e "$CHAIN/STOP" ] && echo "STOP is set" || echo "no time for another job before the wall time ($MARGIN minutes of margin)"): this job ends"; break
@@ -532,31 +563,45 @@ serve() {
     n=$((n + 1))
     if ! mint "$n"; then
       fails=$((fails + 1))
-      [ $fails -le 3 ] || { log "GitHub refused three registrations in a row: this job ends"; end_state=failed end_note="GitHub refused three registrations in a row"; break; }
+      [ $fails -le 3 ] || { log "GitHub refused four registrations in a row: this job ends"; end_state=failed end_note="GitHub refused four registrations in a row"; break; }
       status_write idle "registration refused; trying again"; sleep 60; continue
     fi
     status_write idle
     # the registration is run until it ends for good: a retryable error, or an update GitHub required, runs it again
     while :; do
       run_listener
-      if [ $KILLED = 1 ]; then unregister "$RUNNER_ID"; fresh_work; ended=1; break; fi
+      if [ $KILLED = 1 ]; then unregister "$RUNNER_ID"; fresh_work; chain_served; ended=1; break; fi
+      # an exit 0 with no worker's log ran no job: the registration gone, or the runner ended from outside
+      [ "$RC" = 0 ] && ! busy && RC=nojob
       case "$RC" in
-        0) JOBS_DONE=$((JOBS_DONE + 1)); fails=0; log "runner $RUNNER_NAME ended after its job ($JOBS_DONE done in this job)"; rm -f "$CHAIN/registered"; fresh_work; status_write idle; break;;
-        2|3|4)
-          fails=$((fails + 1)); keep_diag "$n"
-          [ "$RC" = 2 ] && log "the runner asked to be started again (a retryable error)"
-          [ "$RC" = 2 ] || log "the runner updated itself (GitHub required a newer version); tools/grid_runner.sh --install takes the new image"
-          [ $fails -le 3 ] || { log "three times in a row: this job ends"; unregister "$RUNNER_ID"; fresh_work; end_state=failed end_note="the runner failed three times in a row"; ended=1; break; }
+        0) JOBS_DONE=$((JOBS_DONE + 1)); fails=0; chain_served; log "runner $RUNNER_NAME ended after its job ($JOBS_DONE done in this job)"; rm -f "$CHAIN/registered"; fresh_work; status_write idle; break;;
+        2)
+          fails=$((fails + 1)); keep_diag "$n"; log "the runner asked to be started again (a retryable error)"
+          [ $fails -le 3 ] || { log "four times in a row: this job ends"; unregister "$RUNNER_ID"; fresh_work; end_state=failed end_note="the runner failed four times in a row"; ended=1; break; }
           sleep 5
           if over; then unregister "$RUNNER_ID"; fresh_work; ended=1; break; fi;;
+        3|4)
+          # GitHub sends a runner older than the newest release to update itself before it takes a job;
+          # the update cannot replace files from the image's copy or outlive the container, so every
+          # registration would ask again until the image is newer
+          keep_diag "$n"; unregister "$RUNNER_ID"; fresh_work
+          stop_chain "the runner asks for a newer version than the image's $IMAGE_VERSION: tools/grid_runner.sh --install, then --start"
+          end_state=stopped; ended=1; break;;
         *)
-          fails=$((fails + 1)); log "the runner ended with code $RC"; keep_diag "$n"; unregister "$RUNNER_ID"; fresh_work
-          [ $fails -le 3 ] || { log "three failures in a row: this job ends"; end_state=failed end_note="the runner failed three times in a row"; ended=1; break; }
+          fails=$((fails + 1)); keep_diag "$n"; unregister "$RUNNER_ID"; fresh_work
+          if [ "$RC" = nojob ]; then log "runner $RUNNER_NAME ended with no job run (its registration gone, or the runner ended from outside)"
+          else log "the runner ended with code $RC"; fi
+          [ $fails -le 3 ] || { log "four failures in a row: this job ends"; end_state=failed end_note="the runner failed four times in a row"; ended=1; break; }
           sleep 60; break;;
       esac
     done
   done
-  RUNNER_NAME=""; status_write "$end_state" "$JOBS_DONE GitHub jobs ran in this job${end_note:+; $end_note}"
+  RUNNER_NAME=""
+  case "$end_state" in
+    failed) chain_failed "$end_note";;
+    stopped) ;;
+    *) status_write "$end_state" "$JOBS_DONE GitHub jobs ran in this job";;
+  esac
   log "== job $SLURM_JOB_ID ends: $JOBS_DONE GitHub jobs ran${end_note:+; $end_note}$([ $chained = 0 ] && echo "; no successor could be queued, so the chain ends here: tools/grid_runner.sh --start --repo $REPO starts it again")"
   [ $chained = 1 ]
 }
