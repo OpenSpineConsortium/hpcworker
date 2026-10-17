@@ -34,7 +34,9 @@ jobs:
         run: bash tools/tests/test_grid_access.sh
       - name: the grid's CI lane and its watcher (tools/grid_ci.sh; GitHub, the scheduler and gh stood in for)
         run: bash tools/tests/test_grid_ci.sh
-
+      - name: the grid's Actions runner (tools/grid_runner.sh; Slurm, gh, Apptainer and the runner stood in for)
+        run: bash tools/tests/test_grid_runner.sh
+        
   suite-centos7:
     # the login node's own stack: CentOS 7, python 3.6.8, bash 4.2.46, util-linux 2.23. The
     # checkout runs on the host (node20 actions cannot run inside centos:7), and the suite runs
