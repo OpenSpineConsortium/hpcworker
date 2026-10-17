@@ -2,7 +2,7 @@
 # The ssh gate of the grid's GitHub runner: the forced command of one restricted line in the account's
 # ~/.ssh/authorized_keys, which `tools/grid_runner.sh --gate-key` writes and `--gate-off` takes out.
 # A workflow on GitHub's own machine holds the line's private key in an environment secret and signs
-# in with it alone (a key alone signs in to grid.wayne.edu from outside the VPN: the owner's test of
+# in with it alone (a key alone signs in to the grid from outside the VPN: the owner's test of
 # 2026-10-17), so a run can start the runner chain only when a job needs it, read the chain's state into
 # its log, and end it, in place of a chain kept waiting in Slurm's queue. The password is nowhere.
 #
