@@ -302,7 +302,7 @@ so a job that names the runner's labels (`runs-on: [self-hosted, grid, wayne]`) 
 keeps its log and its artifacts as for any job, and no Actions minutes are spent. A public repository
 is refused, as GitHub advises: its forks' pull requests could run their code on the grid. The
 connection points the same way as the CI lane's, from the grid out: nothing of the grid's reaches
-GitHub, and nothing of GitHub's reaches a workflow's job beyond its one-job credential (the account's
+GitHub but the ssh gate's key and what its `status` prints (below), and nothing of GitHub's reaches a workflow's job beyond its one-job credential (the account's
 `gh` sign-in, which mints it, stays in the home, which the container never sees). Every command names the
 site, `--site wayne`, whose profile gives the runtime, the worker queue (`partition_cpu_batch` and
 `qos_batch`; `--partition` and `--qos` override them) and the runner's folder beside the account's
@@ -339,7 +339,8 @@ each call is a line in the chain's `gate.log`. The gate never queues a job of it
 run a workflow's code as the account outside the container; it refuses to run, and `--gate-key` to
 write the line, while others may change the clone it runs from (`tools/grid_gate.sh --check-copy`).
 `--gate-off` takes the line out. The key's private half is the workflow's environment secret; the
-password is nowhere. Tested against stand-ins in `tools/tests/test_grid_gate.sh`, which
+password is nowhere. On a login node whose umask is 002, `chmod -R go-w tools framework` in the clone
+after each `git pull`, or the gate refuses until it is done. Tested against stand-ins in `tools/tests/test_grid_gate.sh`, which
 `test_grid_runner.sh` runs.
 
 **Site pages.** The website generates its own pages, the Beethoven ones included: run

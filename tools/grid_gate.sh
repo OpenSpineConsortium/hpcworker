@@ -30,8 +30,14 @@
 # line, while any of the clone's tools/, framework/lib/ or framework/profiles/, or any of their files,
 # belongs to someone else or may be written by group or others, or a folder from / down to the clone
 # may be changed by others and is not sticky (framework/README.md, "The browser's key", the same rule).
+# The runner's folder, its bin/ and image/ and the chain's folder are held to the same rule, since a
+# start queues bin/'s scripts and the gate writes its files in the chain's folder. A folder above that
+# belongs to another account and only it may write is accepted, as browser-key's check accepts it.
+# On a login node whose umask is 002, git writes what a pull changes group-writable: after each pull,
+# chmod -R go-w tools framework in the clone, or the gate refuses until it is done.
 #
-#   tools/grid_gate.sh --check-copy    read only: one line per such finding, then "ok" (0) or "refused" (8)
+#   tools/grid_gate.sh --check-copy [RUNNER_DIR [OWNER-NAME]]
+#                     read only: one line per such finding, then "ok" (0) or "refused" (8)
 set -uo pipefail
 LC_ALL=C; export LC_ALL
 HERE=$(cd "$(dirname "$0")" && pwd -P) || { echo "HPCW-GRID-GATE refused copy"; exit 126; }
@@ -42,18 +48,44 @@ ME=$(id -u)
 # ---- the copy the line points at -------------------------------------------------------------------
 dir_ok() { # DIR -> 0 when only its owner may add, rename or remove entries in it, or it is sticky (a folder above
   # the clone may be the site's or root's: its mode is what decides, as browser-key's check judges it)
-  local m; m=$(stat -c %a "$1" 2>/dev/null) || return 1
+  local m; m=$(stat -L -c %a "$1" 2>/dev/null) || return 1   # a link is judged by the folder it names
   [ $(( 8#$m & 8#1000 )) != 0 ] || [ $(( 8#$m & 8#022 )) = 0 ]
 }
-copy_problems() { # one line per thing others than this account may change; nothing when there is none
-  local p="" c rest="${CLONE#/}" f
+above_problems() { # PATH: "above <dir>" for each existing folder from / down to PATH, PATH left out, that others may change
+  local p="" c rest="${1#/}"
   dir_ok / || echo "above /"
   while [ -n "$rest" ]; do
     c="${rest%%/*}"; if [ "${rest#*/}" != "$rest" ]; then rest="${rest#*/}"; else rest=""; fi
     p="$p/$c"
-    [ "$p" = "$CLONE" ] && break
+    [ "$p" = "$1" ] && break
+    [ -e "$p" ] || break
     dir_ok "$p" || echo "above $p"
   done
+}
+own_problems() { # PATH...: "runner <path>" for each that exists and is a link, someone else's, or writable by group or others
+  local f
+  for f in "$@"; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    if [ -L "$f" ]; then echo "runner $f (a link)"; continue; fi
+    find "$f" -maxdepth 0 \( ! -user "$ME" -o -perm -g+w -o -perm -o+w \) -print 2>/dev/null | sed 's/^/runner /'
+  done
+}
+# The runner's folder is judged as the clone is: its bin/ holds the scripts --start copies there and
+# queues, and the chain's folder holds the gate's own files, so whoever could change either could have
+# a start queue their code as the account, or have the gate write through a link they planted.
+runner_problems() { # RUNNER_DIR [CHAIN_NAME]
+  local r="$1" f
+  above_problems "$r"
+  # the folders a link along the way leads through are judged too, from the physical path
+  [ -d "$r" ] && f=$(cd "$r" 2>/dev/null && pwd -P) && [ "$f" != "$r" ] && above_problems "$f"
+  own_problems "$r" "$r/bin" "$r/image"
+  [ -d "$r/bin" ] && [ ! -L "$r/bin" ] && for f in "$r"/bin/*; do own_problems "$f"; done
+  [ -z "${2:-}" ] || own_problems "$r/$2" "$r/$2/gate.log" "$r/$2/gate.log.1" "$r/$2/gate.last" "$r/$2/STOP"
+  return 0
+}
+copy_problems() { # one line per thing others than this account may change; nothing when there is none
+  local f
+  above_problems "$CLONE"
   # inside the clone nothing is sticky-excused: every folder and file here is this account's own, written by it alone
   local d
   for d in "$CLONE" "$CLONE/tools" "$CLONE/framework" "$CLONE/framework/lib" "$CLONE/framework/profiles"; do
@@ -68,8 +100,8 @@ copy_problems() { # one line per thing others than this account may change; noth
   find "$CLONE/tools" "$CLONE/framework/lib" "$CLONE/framework/profiles" -mindepth 1 -type l -print 2>/dev/null | sed 's/^/copy (a link) /'
   return 0
 }
-if [ "${1:-}" = --check-copy ]; then
-  out=$(copy_problems)
+if [ "${1:-}" = --check-copy ]; then   # --check-copy [RUNNER_DIR [CHAIN_NAME]]
+  out=$(copy_problems; [ -z "${2:-}" ] || runner_problems "$2" "${3:-}")
   if [ -n "$out" ]; then printf '%s\n' "$out"; echo "refused: chmod go-w on each, by its owner (a folder above the clone may be sticky instead, chmod +t)"; exit 8; fi
   echo "ok $CLONE"; exit 0
 fi
@@ -93,8 +125,12 @@ done
 # ---- the client's word ------------------------------------------------------------------------------
 CHAIN="$RUNNER_DIR/${REPO//\//-}"
 FROM=${SSH_CONNECTION:-}; FROM=${FROM%% *}; [[ "$FROM" =~ ^[0-9A-Fa-f.:]{1,45}$ ]] || FROM=unknown
-note() { # WORD HOW: the call's one line in gate.log, where the chain's folder can be written
-  [ -d "$CHAIN" ] && printf '%s %s from %s: %s\n' "$(date -u +%FT%TZ)" "$1" "$FROM" "$2" >> "$CHAIN/gate.log" 2>/dev/null
+LOG_MAX=1048576   # bytes of gate.log before it is turned over to gate.log.1, so a key used in a loop cannot fill the volume
+note() { # WORD HOW: the call's one line in gate.log, where the chain's folder is there and the log is no link
+  local l="$CHAIN/gate.log" n
+  [ -d "$CHAIN" ] && [ ! -L "$CHAIN" ] && [ ! -L "$l" ] || return 0
+  n=$(stat -c %s "$l" 2>/dev/null) && [ "$n" -gt $LOG_MAX ] && [ ! -L "$l.1" ] && mv -f "$l" "$l.1" 2>/dev/null
+  printf '%s %s from %s: %s\n' "$(date -u +%FT%TZ)" "$1" "$FROM" "$2" >> "$l" 2>/dev/null
   return 0
 }
 refuse() { # CODE SENTENCE
@@ -105,9 +141,9 @@ if [ -z "${SSH_ORIGINAL_COMMAND+set}" ]; then
 fi
 WORD=$SSH_ORIGINAL_COMMAND
 case "$WORD" in start|status|stop) ;; *) refuse word "one of start, status or stop, and nothing else";; esac
-problems=$(copy_problems)
-[ -z "$problems" ] || refuse copy "others may change the clone the key runs from ($(printf '%s' "$problems" | head -1)); tools/grid_gate.sh --check-copy lists all"
-mkdir -p "$CHAIN" 2>/dev/null && [ -d "$CHAIN" ] && [ ! -L "$CHAIN" ] || refuse folder "the chain's folder $CHAIN cannot be made"
+problems=$(copy_problems; runner_problems "$RUNNER_DIR" "${REPO//\//-}")
+[ -z "$problems" ] || refuse copy "others may change the clone or the runner's folder the key runs from ($(printf '%s' "$problems" | head -1)); tools/grid_gate.sh --check-copy $RUNNER_DIR ${REPO//\//-} lists all"
+( umask 077; mkdir -p "$CHAIN" ) 2>/dev/null && [ -d "$CHAIN" ] && [ ! -L "$CHAIN" ] || refuse folder "the chain's folder $CHAIN cannot be made"
 
 # ---- one call a minute ------------------------------------------------------------------------------
 LOCK="$CHAIN/gate.lock"
@@ -122,8 +158,8 @@ if [ $(( now - last )) -lt $FLOOR ] && [ $(( now - last )) -ge 0 ]; then
   rmdir "$LOCK" 2>/dev/null
   note "$WORD" "limit"; echo "HPCW-GRID-GATE limit: one call a minute; try again in $(( FLOOR - (now - last) )) seconds"; exit 123
 fi
-printf '%s\n' "$now" > "$CHAIN/gate.last.new" && mv -f "$CHAIN/gate.last.new" "$CHAIN/gate.last" \
-  || { rmdir "$LOCK" 2>/dev/null; refuse folder "cannot write $CHAIN/gate.last"; }
+tmp=$(mktemp "$CHAIN/.gate.last.XXXXXX" 2>/dev/null) && printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$CHAIN/gate.last" \
+  || { rm -f "${tmp:-}"; rmdir "$LOCK" 2>/dev/null; refuse folder "cannot write $CHAIN/gate.last"; }
 rmdir "$LOCK" 2>/dev/null
 
 # ---- the one command ----------------------------------------------------------------------------------
@@ -139,10 +175,19 @@ case "$WORD" in
   status) ARGS=(--status "${ARGS[@]}");;
   stop) ARGS=(--stop "${ARGS[@]}");;
 esac
-out=$(env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u CDPATH -u GLOBIGNORE -u PROMPT_COMMAND -u GITHUB_TOKEN -u GH_TOKEN \
-  HPCW_GATE=1 /bin/bash "$HERE/grid_runner.sh" "${ARGS[@]}" < /dev/null 2>&1); rc=$?
+# grid_runner.sh starts with an environment of the gate's choosing: none of the client's (LANG and LC_*
+# that sshd accepts, SSH_*), nothing a token or a shell start-up file could ride in on, and nothing that
+# sbatch --export=ALL would carry into the chain's jobs beside what a person's command has
+KEEP=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" PATH="$PATH" LC_ALL=C HPCW_GATE=1)
+for v in SLURM_CONF GH_CONFIG_DIR XDG_CONFIG_HOME; do [ -n "${!v:-}" ] && KEEP+=("$v=${!v}"); done
+out=$(env -i "${KEEP[@]}" /bin/bash "$HERE/grid_runner.sh" "${ARGS[@]}" < /dev/null 2>&1); rc=$?
 printf '%s\n' "$out"
 if [ "$WORD" = start ] && [ $rc != 0 ] && printf '%s\n' "$out" | grep -q 'is already queued or running (job'; then
+  # a chain told to stop keeps its running job until the GitHub job on it ends, and registers nothing
+  # more: that is no started chain, and a workflow waiting on it would wait a day
+  if [ -e "$CHAIN/STOP" ]; then
+    note start "stopping"; echo "HPCW-GRID-GATE start failed: the chain is stopping (STOP is set) and its last job still runs; start it again once that job has ended"; exit 75
+  fi
   note start "running already"; echo "HPCW-GRID-GATE running"; exit 0
 fi
 if [ $rc = 0 ]; then note "$WORD" "ok"; echo "HPCW-GRID-GATE $WORD ok"

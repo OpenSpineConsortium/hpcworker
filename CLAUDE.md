@@ -143,14 +143,15 @@ name and identifier carry no university name.
   (`ghcr.io/actions/actions-runner`, a SIF; `--containall --cleanenv --no-mount bind-paths`, no home,
   no volume, no environment) for a private or internal repository only, registered one GitHub job
   at a time with a just-in-time credential the account's own `gh` mints into mode-0600 files on the
-  node's disk; GitHub holds nothing of the grid's, and the container nothing of GitHub's beyond that
+  node's disk; GitHub holds nothing of the grid's but the ssh gate's key (below), and the container nothing of GitHub's beyond that
   one job's credential, which leaves with the job (the `gh` sign-in stays in the home, which the
   container never sees). No step reaches the scheduler, the home or the lab volume, since a job
   queued as the account could read all it holds, the Claude login among them: no Claude credential
   is anywhere near a workflow's job, and the runner runs the repository's steps and nothing else
   (`README.md`, "A GitHub Actions runner on the grid"; `docs/OPEN_QUESTIONS.md`). The one thing of
   the grid's GitHub holds is the ssh gate's key (greg's decision on 2026-10-16, built once his test
-  of 2026-10-17 showed a key alone signs in from outside the VPN): an environment secret whose line
+  of 2026-10-17 showed a key alone signs in from outside the VPN; an ssh key for the grid, not a Claude
+  credential, which the no-API-key rule above is about): an environment secret whose line
   in `~/.ssh/authorized_keys` runs only `tools/grid_gate.sh`, which says start, status or stop for one
   repository's chain, once a minute, and never queues a job of its own, never a shell, never the
   password. `tools/grid_runner.sh --gate-key` writes the line and `--gate-off` takes it out, typed by

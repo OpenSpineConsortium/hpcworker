@@ -90,6 +90,10 @@
 # file work, gh, one squeue and one sbatch; nothing is deleted but the node's own temp. Every job
 # is submitted with GITHUB_TOKEN and GH_TOKEN removed from the environment sbatch hands it.
 set -uo pipefail
+# the runner's folders and files are the account's own to write: a login node's umask of 002 would
+# leave them group-writable on the lab volume, where a member of the group could change the scripts a
+# chain queues (and the ssh gate refuses to run beside such a folder)
+umask 022
 say() { printf '%s\n' "$*"; }
 die() { printf 'grid_runner: %s\n' "$*" >&2; exit 1; }
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
@@ -376,20 +380,25 @@ gate_lock() { # browser-key's own lock (framework/lib/browser_key.sh), so this a
   return 1
 }
 gate_unlock() { [ -n "$GATE_LOCK" ] && rmdir "$GATE_LOCK" 2>/dev/null; GATE_LOCK=""; return 0; }
-gate_write() { # [LINE] -> 0 written, 10 nothing to change, 1 could not (nothing changed). Every line of this
-  # repository's gate goes, LINE comes in at the end, and every other line stays as it was, in its place:
-  # a temporary file at 600 in ~/.ssh, then one rename
+gate_write() { # [LINE] -> 0 written, 10 nothing to change, 1 could not (nothing changed), 2 the key is on
+  # another line. Every line of this repository's gate goes, LINE comes in at the end, and every other
+  # line stays as it was, in its place: a temporary file at 600 in ~/.ssh, then one rename. GitHub's
+  # names are the same in any case, and an editor may have left a carriage return, so neither keeps an
+  # old gate line beside a new one.
   local line="${1:-}" sd="$HOME/.ssh" ak="$HOME/.ssh/authorized_keys" re tmp rc
-  re="^restrict,command=\"[^\"]*\" ssh-ed25519 [A-Za-z0-9+/]+={0,2} hpcw-grid-gate:${REPO//./\\.}\$"
+  re="^restrict,command=\"[^\"]*\" ssh-ed25519 [A-Za-z0-9+/]+={0,2} hpcw-grid-gate:${REPO//./\\.}"$'\r'"?\$"
+  # sshd takes the first line that holds a key: the gate's key on any other line (a plain one, another
+  # repository's gate) would let it do what that line does, so it is refused
+  if [ -n "$line" ] && [ -f "$ak" ] && [ -n "$(grep -a -F -- " $GATE_B64" "$ak" | grep -a -v -i -E -- "$re")" ]; then return 2; fi
   if [ -n "$line" ]; then
-    [ -f "$ak" ] && [ "$(grep -a -c -E -- "$re" "$ak")" = 1 ] && grep -a -q -x -F -- "$line" "$ak" && return 10
+    [ -f "$ak" ] && [ "$(grep -a -c -i -E -- "$re" "$ak")" = 1 ] && grep -a -q -x -F -- "$line" "$ak" && return 10
   else
-    { [ -f "$ak" ] && grep -a -q -E -- "$re" "$ak"; } || return 10
+    { [ -f "$ak" ] && grep -a -q -i -E -- "$re" "$ak"; } || return 10
   fi
   gate_lock || return 1
   tmp=$(mktemp "$sd/.authorized_keys.grid-gate.XXXXXX" 2>/dev/null) || { gate_unlock; return 1; }
   if [ -e "$ak" ]; then
-    grep -a -v -E -- "$re" "$ak" > "$tmp"; rc=$?   # grep ends every line it writes, a last one without its newline too
+    grep -a -v -i -E -- "$re" "$ak" > "$tmp"; rc=$?   # grep ends every line it writes, a last one without its newline too
     [ $rc -le 1 ] || { rm -f "$tmp"; gate_unlock; return 1; }   # 1: every line was ours
   fi
   if [ -n "$line" ]; then printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; gate_unlock; return 1; }; fi
@@ -407,7 +416,7 @@ gate_on() {
   [[ "$gate" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "the clone's path holds a character a key's line cannot carry safely: $gate. Nothing was changed."
   [[ "$ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "the runner's folder holds a character a key's line cannot carry safely: $ROOT. Nothing was changed."
   [ -x "$gate" ] || die "$gate is missing or not executable. Nothing was changed."
-  out=$(bash "$gate" --check-copy 2>&1) || die "others may change the clone the key would run from, so the key could be made to run anything as you:
+  out=$(bash "$gate" --check-copy "$ROOT" "${REPO//\//-}" 2>&1) || die "others may change the clone or the runner's folder the key would run from, so the key could be made to run anything as you:
 $out
 Nothing was changed."
   cmd="$gate${SITE:+ --site $SITE} --runner-dir $ROOT --repo $REPO${STARTOPTS[*]+ ${STARTOPTS[*]}}"
@@ -417,9 +426,10 @@ Nothing was changed."
   case $rc in
     0) say "the gate's key is in ~/.ssh/authorized_keys for $REPO (an earlier gate line for it replaced, every other line kept)";;
     10) say "the gate's key for $REPO was in ~/.ssh/authorized_keys already, as written";;
+    2) die "this key is on another line of ~/.ssh/authorized_keys already, which sshd would use first; make a new key for the gate (ssh-keygen -t ed25519 -f ~/.ssh/grid_gate) and use its .pub. Nothing was changed.";;
     *) die "~/.ssh/authorized_keys could not be written (another program held it?). Nothing was changed.";;
   esac
-  mkdir -p "$CHAIN" || say "note: $CHAIN could not be made, so the gate cannot keep its log until it is"
+  ( umask 077; mkdir -p "$CHAIN" ) || say "note: $CHAIN could not be made, so the gate cannot keep its log until it is"
   say "it can say start, status or stop for this chain and nothing else, once a minute; each call is a line in $CHAIN/gate.log"
   say "try it from outside the VPN: ssh -i <the private key> -o IdentitiesOnly=yes $USER@<the grid's host> status"
   say "tools/grid_runner.sh --gate-off --repo $REPO${SITE:+ --site $SITE} takes it out"

@@ -29,6 +29,8 @@ RD="$T/runner"; CH="$RD/OpenSpineConsortium-symphony-template"
 AK="$HOME/.ssh/authorized_keys"
 KEY1="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCj/iayuSj3Fidk+gybZFVkRGUgZuPSuVKeM+iqcGM2 greg@dispatch"   # throwaway public keys; no private half was kept
 KEY2="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGbJxR6PcThbt1zKO5gTJpw8l2X1yMHnD0yqrpQAQAAa"
+KEY3="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD"
+KEY4="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
 
 # the clone as a person keeps it: tools/ and the framework's reader and profiles
 C="$T/clone"
@@ -41,14 +43,19 @@ chmod 755 "$C/tools/grid_gate.sh"
 S="$T/stub"
 mkdir -p "$S/tools" "$S/framework/lib" "$S/framework/profiles"
 cp "$REPO/tools/grid_gate.sh" "$S/tools/"; chmod 755 "$S/tools/grid_gate.sh"
+# (the gate hands grid_runner.sh an environment of its own, so the stand-in reads its answer from files
+# beside it: stub.out and stub.rc)
 cat > "$S/tools/grid_runner.sh" <<'EOF'
 #!/bin/bash
-{ printf '%s\n' "$*"; printf 'HPCW_GATE=%s GH_TOKEN=%s BASH_ENV=%s\n' "${HPCW_GATE:-}" "${GH_TOKEN:-}" "${BASH_ENV:-}"; } >> "$STUB_CALLS"
+d=$(cd "$(dirname "$0")/.." && pwd)
+{ printf '%s\n' "$*"; printf 'HPCW_GATE=%s GH_TOKEN=%s BASH_ENV=%s LANG=%s SSH=%s\n' "${HPCW_GATE:-}" "${GH_TOKEN:-}" "${BASH_ENV:-}" "${LANG:-}" "${SSH_CONNECTION:-}${SSH_ORIGINAL_COMMAND:-}"; } >> "$d/stub.calls"
 [ -t 0 ] && echo "stdin is a terminal"
-printf '%s\n' "${STUB_OUT:-}"
-exit "${STUB_RC:-0}"
+cat "$d/stub.out" 2>/dev/null
+exit "$(cat "$d/stub.rc" 2>/dev/null || echo 0)"
 EOF
-export STUB_CALLS="$T/stub.calls"; : > "$STUB_CALLS"
+STUB_CALLS="$S/stub.calls"; : > "$STUB_CALLS"
+stub() { printf '%s\n' "$1" > "$S/stub.out"; echo "$2" > "$S/stub.rc"; }
+unstub() { rm -f "$S/stub.out" "$S/stub.rc"; }
 
 pass=0 fail=0 OUT="" RC=0
 ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
@@ -65,8 +72,8 @@ LINE_ARGS=(--site wayne --runner-dir "$RD" --repo "$GH_REPO" --hours 6 --gres gp
 gate() { # WORD|-unset [ARGS...]
   local w=$1; shift
   [ -n "${KEEP_CLOCK:-}" ] || rm -f "$CH/gate.last"
-  if [ "$w" = -unset ]; then OUT=$(env -u SSH_ORIGINAL_COMMAND SSH_CONNECTION="192.0.2.7 50000 10.0.0.1 22" GH_TOKEN=gho_marker BASH_ENV="$T/bash_env" bash "$S/tools/grid_gate.sh" "$@" < /dev/null 2>&1)
-  else OUT=$(env SSH_ORIGINAL_COMMAND="$w" SSH_CONNECTION="192.0.2.7 50000 10.0.0.1 22" GH_TOKEN=gho_marker BASH_ENV="$T/bash_env" bash "$S/tools/grid_gate.sh" "$@" < /dev/null 2>&1); fi
+  if [ "$w" = -unset ]; then OUT=$(env -u SSH_ORIGINAL_COMMAND SSH_CONNECTION="192.0.2.7 50000 10.0.0.1 22" GH_TOKEN=gho_marker BASH_ENV="$T/bash_env" LANG=xx_client bash "$S/tools/grid_gate.sh" "$@" < /dev/null 2>&1)
+  else OUT=$(env SSH_ORIGINAL_COMMAND="$w" SSH_CONNECTION="192.0.2.7 50000 10.0.0.1 22" GH_TOKEN=gho_marker BASH_ENV="$T/bash_env" LANG=xx_client bash "$S/tools/grid_gate.sh" "$@" < /dev/null 2>&1); fi
   RC=$?
 }
 printf 'echo BASH_ENV_WAS_READ >> "%s/bash_env.read"\n' "$T" > "$T/bash_env"
@@ -83,19 +90,23 @@ echo "== the words"
 gate status "${LINE_ARGS[@]}"
 t "status runs grid_runner.sh --status for the line's repository" bash -c "tail -2 '$STUB_CALLS' | head -1 | grep -qx -- '--status --repo $GH_REPO --runner-dir $RD --site wayne'"
 t "  and says it ended well" has '^HPCW-GRID-GATE status ok$'
-t "  with HPCW_GATE set, the client's GH_TOKEN and BASH_ENV gone, stdin no terminal" bash -c "tail -1 '$STUB_CALLS' | grep -qx 'HPCW_GATE=1 GH_TOKEN= BASH_ENV=' && ! grep -q 'terminal' <<< \"\$1\"" _ "$OUT"
+t "  with HPCW_GATE set, the client's GH_TOKEN, BASH_ENV, LANG and ssh variables gone, stdin no terminal" bash -c "tail -1 '$STUB_CALLS' | grep -qx 'HPCW_GATE=1 GH_TOKEN= BASH_ENV= LANG= SSH=' && ! grep -q 'terminal' <<< \"\$1\"" _ "$OUT"
 gate start "${LINE_ARGS[@]}"
 t "start runs --start with the line's size" bash -c "tail -2 '$STUB_CALLS' | head -1 | grep -qx -- '--start --repo $GH_REPO --runner-dir $RD --site wayne --hours 6 --gres gpu:1'"
 t "  and exits 0" rc_is 0
 gate stop "${LINE_ARGS[@]}"
 t "stop runs --stop, never --now" bash -c "tail -2 '$STUB_CALLS' | head -1 | grep -qx -- '--stop --repo $GH_REPO --runner-dir $RD --site wayne'"
-STUB_OUT="grid_runner: a chain for $GH_REPO is already queued or running (job 41 RUNNING); tools/grid_runner.sh --stop --repo $GH_REPO ends it" STUB_RC=1 gate start "${LINE_ARGS[@]}"
+stub "grid_runner: a chain for $GH_REPO is already queued or running (job 41 RUNNING); tools/grid_runner.sh --stop --repo $GH_REPO ends it" 1; gate start "${LINE_ARGS[@]}"
 t "start on a chain already running is no failure" rc_is 0
 t "  and says running" has '^HPCW-GRID-GATE running$'
-STUB_OUT="grid_runner: sbatch refused the chain's first job: no partition" STUB_RC=1 gate start "${LINE_ARGS[@]}"
+date > "$CH/STOP"; gate start "${LINE_ARGS[@]}"
+t "start on a chain that is stopping is a failure, not a chain started" bash -c "[ '$RC' = 75 ] && printf '%s' \"\$1\" | grep -q 'the chain is stopping'" _ "$OUT"
+rm -f "$CH/STOP"
+stub "grid_runner: sbatch refused the chain's first job: no partition" 1; gate start "${LINE_ARGS[@]}"
 t "start that fails passes the failure on" rc_is 1
 t "  with grid_runner's words" has 'sbatch refused'
 t "  and the gate's" has '^HPCW-GRID-GATE start failed 1$'
+unstub
 
 echo "== what the gate refuses"
 n=$(n_calls)
@@ -150,6 +161,25 @@ t "a folder above the clone others may write is refused" rc_is 126
 chmod +t "$T"; gate status "${LINE_ARGS[@]}"
 t "  unless it is sticky" rc_is 0
 chmod 700 "$T"
+chmod g+w "$RD"; gate status "${LINE_ARGS[@]}"
+t "a runner's folder the group may write is refused" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'runner $RD'" _ "$OUT"
+chmod g-w "$RD"; mkdir -p "$RD/bin"; touch "$RD/bin/grid_runner.sbatch"; chmod 666 "$RD/bin/grid_runner.sbatch"; gate status "${LINE_ARGS[@]}"
+t "a script in the runner's bin others may write is refused" rc_is 126
+chmod 644 "$RD/bin/grid_runner.sbatch"; chmod o+w "$CH"; gate status "${LINE_ARGS[@]}"
+t "a chain's folder others may write is refused" rc_is 126
+chmod o-w "$CH"; ln -s "$T/elsewhere" "$CH/gate.log.1"; gate status "${LINE_ARGS[@]}"
+t "a link planted among the chain's files is refused" bash -c "[ '$RC' = 126 ] && [ ! -e '$T/elsewhere' ]"
+unlink "$CH/gate.log.1"; mkdir -p "$T/real/r"; ln -s "$T/real" "$T/runlink"; chmod 777 "$T/real"; chmod -t "$T/real"
+gate status --runner-dir "$T/runlink/r" --repo "$GH_REPO"
+t "a folder others may change on the physical path behind a link is refused" rc_is 126
+chmod 755 "$T/real"; gate status --runner-dir "$T/runlink/r" --repo "$GH_REPO"
+t "  and the same path is taken once it is not" rc_is 0
+mkdir -p "$T/open/inner/r"; chmod 777 "$T/open"; chmod -t "$T/open"; ln -s "$T/open/inner" "$T/lnk2"
+gate status --runner-dir "$T/lnk2/r" --repo "$GH_REPO"
+t "a folder others may change above where a link leads, though not on the path as named, is refused" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'above $T/open'" _ "$OUT"
+chmod 755 "$T/open"
+head -c 1048600 /dev/zero | tr '\0' 'x' > "$CH/gate.log"; gate status "${LINE_ARGS[@]}"
+t "a gate.log over 1 MB is turned over to gate.log.1" bash -c "[ \"\$(stat -c %s '$CH/gate.log.1')\" -gt 1048576 ] && [ \"\$(wc -l < '$CH/gate.log')\" = 1 ]"
 OUT=$(bash "$S/tools/grid_gate.sh" --check-copy 2>&1); RC=$?
 t "--check-copy says ok for a clone only its owner may change" bash -c "[ '$RC' = 0 ] && printf '%s' \"\$1\" | grep -q '^ok '" _ "$OUT"
 chmod g+w "$S/tools/grid_runner.sh"; OUT=$(bash "$S/tools/grid_gate.sh" --check-copy 2>&1); RC=$?
@@ -171,9 +201,9 @@ t "  the file 600" [ "$(stat -c %a "$AK")" = 600 ]
 t "  and the chain's folder made for the log" [ -d "$CH" ]
 typed --gate-key "$KEY2" --repo "$GH_REPO" --site wayne --runner-dir "$RD"
 t "a second --gate-key replaces the first" bash -c "[ \"\$(grep -c 'hpcw-grid-gate:$GH_REPO\$' '$AK')\" = 1 ] && grep -q '${KEY2#* }' '$AK' && [ \"\$(wc -l < '$AK')\" = 4 ]"
-typed --gate-key "$KEY2" --repo OpenSpineConsortium/other --runner-dir "$RD"
+typed --gate-key "$KEY3" --repo OpenSpineConsortium/other --runner-dir "$RD"
 t "another repository's gate is a line of its own" bash -c "[ \"\$(grep -c 'hpcw-grid-gate:' '$AK')\" = 2 ] && grep -q 'command=\"$GATE --runner-dir $RD --repo OpenSpineConsortium/other\"' '$AK'"
-typed --gate-key "$KEY2" --repo OpenSpineConsortium/symphony-templateX --runner-dir "$RD"
+typed --gate-key "$KEY4" --repo OpenSpineConsortium/symphony-templateX --runner-dir "$RD"
 typed --gate-off --repo "$GH_REPO" --runner-dir "$RD"
 typed --gate-key "$KEY2" --repo "$GH_REPO" --site wayne --runner-dir "$RD"
 t "a repository whose name extends another's is not taken for it" bash -c "grep -q 'hpcw-grid-gate:$GH_REPO\$' '$AK' && grep -q 'hpcw-grid-gate:OpenSpineConsortium/symphony-templateX\$' '$AK'"
@@ -182,6 +212,8 @@ t "  and --gate-off of the longer name leaves the shorter's" bash -c "grep -q 'h
 OUT=$(cat "$AK"); OLD=$OUT
 typed --gate-key "$KEY2" --repo "$GH_REPO" --site wayne --runner-dir "$RD"
 t "the same line again changes nothing" bash -c "[ '$RC' = 0 ] && printf '%s' \"\$1\" | grep -q 'already'" _ "$OUT"
+typed --gate-key "$KEY2" --repo OpenSpineConsortium/other2 --runner-dir "$RD"
+t "the gate's key already on another repository's line is refused" bash -c "[ '$RC' != 0 ] && printf '%s' \"\$1\" | grep -q 'on another line' && [ \"\$(cat '$AK')\" = \"\$2\" ]" _ "$OUT" "$OLD"
 for k in "AAAAC3NzaC1lZDI1NTE5AAAAIBCj/iayuSj3Fidk+gybZFVkRGUgZuPSuVKeM+iqcGM2" "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ x" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCj/iayuSj3Fidk+gybZFVkRGUgZuPSuVKeM+iqcGM" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCj/iayuSj3Fidk+gybZFVkRGUgZuPSuVKeM+iqcGM2\" x" 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCj/iayuSj3Fidk+gyb"ZFVkRGUgZuPSuVKeM+iqcGM2' "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCj/iayuSj3Fidk+gybZFVkRGUgZuPSuVKeM+iqcGM2="; do
   typed --gate-key "$k" --repo "$GH_REPO" --runner-dir "$RD"
   t "not one whole ed25519 key is refused: ${k:0:40}..." bash -c "[ '$RC' != 0 ] && [ \"\$(cat '$AK')\" = \"\$1\" ]" _ "$OLD"
@@ -211,6 +243,11 @@ typed --gate-off --repo "$GH_REPO" --runner-dir "$RD"
 t "--gate-off takes the line out" bash -c "[ '$RC' = 0 ] && [ ! -s '$AK' ]"
 typed --gate-off --repo "$GH_REPO" --runner-dir "$RD"
 t "  and says so when there is none" has "no gate key for $GH_REPO"
+printf '%s\n' "${KEY1% *} plain" > "$AK"; chmod 600 "$AK"; typed --gate-key "$KEY1" --repo "$GH_REPO" --runner-dir "$RD"
+t "the gate's key already on a plain line, which sshd would use first, is refused" bash -c "[ '$RC' != 0 ] && [ \"\$(wc -l < '$AK')\" = 1 ]"
+: > "$AK"; typed --gate-key "$KEY1" --repo "$GH_REPO" --runner-dir "$RD"; sed -i 's/symphony-template$/symphony-template\r/' "$AK"
+typed --gate-key "$KEY2" --repo openspineconsortium/SYMPHONY-template --runner-dir "$RD"
+t "a gate line with a carriage return, and the name in another case, is replaced, not kept beside" bash -c "[ \"\$(grep -c hpcw-grid-gate '$AK')\" = 1 ] && grep -q '${KEY2#* }' '$AK'"
 cp "$T/ak.before" "$AK"; typed --gate-key "$KEY1" --repo "$GH_REPO" --runner-dir "$RD"; typed --gate-off --repo "$GH_REPO" --runner-dir "$RD"
 t "--gate-off keeps every other line" bash -c "diff '$AK' <(cat '$T/ak.before'; echo) >/dev/null"
 t "no temporary file is left in ~/.ssh" bash -c "[ -z \"\$(ls -A '$HOME/.ssh' | grep -v '^authorized_keys\$')\" ]"
