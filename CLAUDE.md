@@ -148,7 +148,13 @@ name and identifier carry no university name.
   container never sees). No step reaches the scheduler, the home or the lab volume, since a job
   queued as the account could read all it holds, the Claude login among them: no Claude credential
   is anywhere near a workflow's job, and the runner runs the repository's steps and nothing else
-  (`README.md`, "A GitHub Actions runner on the grid"; `docs/OPEN_QUESTIONS.md`).
+  (`README.md`, "A GitHub Actions runner on the grid"; `docs/OPEN_QUESTIONS.md`). The one thing of
+  the grid's GitHub holds is the ssh gate's key (greg's decision on 2026-10-16, built once his test
+  of 2026-10-17 showed a key alone signs in from outside the VPN): an environment secret whose line
+  in `~/.ssh/authorized_keys` runs only `tools/grid_gate.sh`, which says start, status or stop for one
+  repository's chain, once a minute, and never queues a job of its own, never a shell, never the
+  password. `tools/grid_runner.sh --gate-key` writes the line and `--gate-off` takes it out, typed by
+  a person at a terminal only.
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
   2026-09-28 at 22:34 local the student's whole `~/.ashley` folder on the grid was deleted while a
   Remote Control session spawned from the phone was open, and the Claude login inside it was lost;

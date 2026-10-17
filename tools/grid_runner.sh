@@ -18,6 +18,8 @@
 #                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q]
 #   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--now]
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME]
+#   tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA... [comment]' --repo OWNER/NAME --site S [the --start options]
+#   tools/grid_runner.sh --gate-off --repo OWNER/NAME --site S
 #
 # --site S names the site profile, framework/profiles/S.json, read with the framework's own awk
 # reader (lib/profile_sh.sh), since a login node's banner may ban python3 and nothing here starts it
@@ -72,6 +74,16 @@
 # one ends within a minute. --now cancels the running job too, and the GitHub job on it fails.
 # --status is file work (<chain dir>/status.json, which the job writes, read with awk) and one squeue.
 #
+# --gate-key writes one line into ~/.ssh/authorized_keys, replacing this repository's earlier one and
+# touching no other: restrict,command="<this clone>/tools/grid_gate.sh --site S --runner-dir D --repo
+# OWNER/NAME [the --start options given here]" ssh-ed25519 <key> hpcw-grid-gate:OWNER/NAME. A workflow on
+# GitHub's own machine that holds the key's private half can then say start, status or stop for this one
+# chain, and nothing else (tools/grid_gate.sh says what each does and what it refuses). The key is an
+# ed25519 public key, pasted as one argument. --gate-off takes the line out. Both change how the account
+# signs in, so they run only for a person typing them at a terminal: never under Claude Code or another
+# agent, never in a job, never through a forced command; and --gate-key refuses while others may change
+# the clone the line points at (tools/grid_gate.sh --check-copy).
+#
 # Nothing of Beethoven's runs in a workflow's job and no Claude credential is anywhere near one:
 # the runner runs the repository's steps and nothing else. The credential never touches a command
 # line (gh writes it to a file, the file is read into the runner's folder); the login node sees
@@ -83,14 +95,18 @@ die() { printf 'grid_runner: %s\n' "$*" >&2; exit 1; }
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
 
 MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0
-RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN=""
+RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=()
 while [ $# -gt 0 ]; do case "$1" in
   --install) MODE=install; shift;; --start) MODE=start; shift;; --stop) MODE=stop; shift;; --status) MODE=status; shift;;
   --repo) need "$@"; REPO="$2"; shift 2;; --version) need "$@"; VERSION="$2"; shift 2;;
-  --site) need "$@"; SITE="$2"; shift 2;; --labels) need "$@"; LABELS="$2"; shift 2;;
-  --hours) need "$@"; HOURS="$2"; shift 2;; --margin) need "$@"; MARGIN="$2"; shift 2;;
-  --cpus) need "$@"; CPUS="$2"; shift 2;; --mem) need "$@"; MEM="$2"; shift 2;; --gres) need "$@"; GRES="$2"; shift 2;;
-  --partition) need "$@"; HPCW_RUNNER_PARTITION="$2"; shift 2;; --qos) need "$@"; HPCW_RUNNER_QOS="$2"; shift 2;;
+  --site) need "$@"; SITE="$2"; shift 2;;
+  # the options that size a chain, kept as given too: --gate-key writes them into the gate's line
+  --labels|--hours|--margin|--cpus|--mem|--gres|--partition|--qos) need "$@"; STARTOPTS+=("$1" "$2")
+    case "$1" in
+      --labels) LABELS="$2";; --hours) HOURS="$2";; --margin) MARGIN="$2";; --cpus) CPUS="$2";; --mem) MEM="$2";; --gres) GRES="$2";;
+      --partition) HPCW_RUNNER_PARTITION="$2";; --qos) HPCW_RUNNER_QOS="$2";;
+    esac; shift 2;;
+  --gate-key) need "$@"; MODE=gatekey; GATE_KEY="$2"; shift 2;; --gate-off) MODE=gateoff; shift;;
   --now) NOW=1; shift;;
   # the jobs' own: what --install hands the install job and --start hands the first job of a chain, and each job its successor
   --pull) MODE=pull; shift;; --serve) MODE=serve; shift;; --runner-dir) need "$@"; HPCW_RUNNER_DIR="$2"; shift 2;;
@@ -108,7 +124,7 @@ case ",$LABELS," in *,self-hosted,*|*,linux,*|*,x64,*|*,grid,*) die "--labels: s
 [ -z "$CPUS" ] || [[ "$CPUS" =~ ^[0-9]+$ ]] || die "bad --cpus $CPUS"
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
-case "$MODE" in start|stop|serve) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
+case "$MODE" in start|stop|serve|gatekey|gateoff) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
 USER=${USER:-$(id -un)}; export USER   # the profile reader expands $USER in the lab volume's path
 HERE=$(cd "$(dirname "$0")" && pwd) || die "cannot find the folder of $0"
 # python3 only inside a job, on a compute node (the registration's files are decoded there); a login
@@ -132,7 +148,7 @@ site_profile() {
   [ -n "${HPCW_RUNNER_QOS:-}" ] || HPCW_RUNNER_QOS=$(prof_get qos_batch) || die "profile $f unreadable"
   STATE_DIR=$(prof_get shared_state_dir) || die "profile $f unreadable"
 }
-case "$MODE" in install|start|stop|status) [ -z "$SITE" ] || site_profile;; esac
+case "$MODE" in install|start|stop|status|gatekey|gateoff) [ -z "$SITE" ] || site_profile;; esac
 [[ "${HPCW_RUNNER_PARTITION:-}${HPCW_RUNNER_QOS:-}" =~ ^[A-Za-z0-9._,-]*$ ]] || die "bad --partition or --qos"
 [[ "$RUNTIME_BIN_GIVEN$RUNTIME_MODULE_GIVEN" =~ ^[A-Za-z0-9._/-]*$ ]] || die "bad --runtime-bin or --runtime-module"
 if [ -z "${HPCW_RUNNER_DIR:-}" ]; then
@@ -311,6 +327,111 @@ chain_status() {
     else say "  no job has written status.json yet"; fi
   done
   return 0
+}
+
+# ---- the ssh gate's key (tools/grid_gate.sh) ---------------------------------------------------------
+GATE_ED_PREFIX=AAAAC3NzaC1lZDI1NTE5AAAAI   # "ssh-ed25519", then the length of a 32-byte key
+gate_person() { # a person typing in the grid's shell: a terminal, no agent's marker, not in a job, not through a forced command
+  [ -t 0 ] || return 1
+  [ -z "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}${BEETHOVEN_REQUEST_ID:-}${BEETHOVEN_WORKER:-}${ASHLEY_REQUEST_ID:-}${ASHLEY_WORKER:-}${ASHLEY_JOB:-}${HPCW_AGENT:-}${AI_AGENT:-}" ] || return 1
+  [ -z "${SLURM_JOB_ID:-}${PBS_JOBID:-}${LSB_JOBID:-}" ] || return 1
+  [ -z "${HPCW_GATE:-}" ] && [ -z "${SSH_ORIGINAL_COMMAND+set}" ]
+}
+GATE_B64=""
+gate_key_parse() { # WORDS -> GATE_B64; 1 when they are not one whole ed25519 public key (a comment after it is ignored: the line carries its own)
+  local n; set -f; set -- $1; set +f
+  [ $# -ge 2 ] && [ "$1" = ssh-ed25519 ] || return 1
+  GATE_B64="$2"
+  # what goes into the line is the base64 alphabet alone, whatever a site's base64 -d would forgive
+  [[ "$GATE_B64" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+  case "$GATE_B64" in "$GATE_ED_PREFIX"*) ;; *) return 1;; esac
+  # a key cut short or padded wrong makes base64 -d fail, which fails the pipe (pipefail)
+  n=$(printf '%s' "$GATE_B64" | base64 -d 2>/dev/null | wc -c) || return 1
+  [ "${n//[[:space:]]/}" = 51 ]
+}
+gate_private() { # PATH -> 0 when it is this account's (or root's) and neither group nor others may write to it
+  local m o; m=$(stat -c %a "$1" 2>/dev/null) && o=$(stat -c %u "$1" 2>/dev/null) || return 1
+  { [ "$o" = "$(id -u)" ] || [ "$o" = 0 ]; } && [ $(( 8#$m & 8#022 )) = 0 ]
+}
+gate_ak_check() { # sshd's StrictModes ignores every key under a home, ~/.ssh or authorized_keys others may write; a link is not followed
+  local h="${HOME%/}" sd="$HOME/.ssh" ak="$HOME/.ssh/authorized_keys"
+  [ "$(id -u)" != 0 ] || die "this runs as your own account, never as root. Nothing was changed."
+  [ -n "$h" ] && [ -d "$h" ] && [ ! -L "$h" ] && gate_private "$h" || die "your home folder is missing, a link, or others may write to it (sshd would ignore the key: chmod go-w ~). Nothing was changed."
+  [ ! -L "$sd" ] || die "~/.ssh is a link. Nothing was changed."
+  [ -e "$sd" ] || ( umask 077; mkdir "$sd" ) || die "~/.ssh could not be made. Nothing was changed."
+  [ -d "$sd" ] && gate_private "$sd" || die "others may write to ~/.ssh, or it is not yours (chmod 700 ~/.ssh). Nothing was changed."
+  [ ! -L "$ak" ] || die "~/.ssh/authorized_keys is a link. Nothing was changed."
+  [ -e "$ak" ] || return 0
+  [ -f "$ak" ] && gate_private "$ak" || die "others may write to ~/.ssh/authorized_keys, or it is not yours (chmod 600 ~/.ssh/authorized_keys). Nothing was changed."
+  [ "$(tr -d '\000' < "$ak" | wc -c)" = "$(wc -c < "$ak")" ] || die "~/.ssh/authorized_keys holds a NUL byte. Nothing was changed."
+}
+GATE_LOCK=""
+gate_lock() { # browser-key's own lock (framework/lib/browser_key.sh), so this and Beethoven's key never rewrite the file at once
+  local l="$HOME/.ssh/.beethoven-browser.lock" i t
+  for i in 1 2 3 4 5 6; do
+    if mkdir "$l" 2>/dev/null; then GATE_LOCK="$l"; return 0; fi
+    t=$(stat -c %Y "$l" 2>/dev/null) && [ $(( $(date +%s) - t )) -gt 120 ] && { rmdir "$l" 2>/dev/null; continue; }
+    sleep 1
+  done
+  return 1
+}
+gate_unlock() { [ -n "$GATE_LOCK" ] && rmdir "$GATE_LOCK" 2>/dev/null; GATE_LOCK=""; return 0; }
+gate_write() { # [LINE] -> 0 written, 10 nothing to change, 1 could not (nothing changed). Every line of this
+  # repository's gate goes, LINE comes in at the end, and every other line stays as it was, in its place:
+  # a temporary file at 600 in ~/.ssh, then one rename
+  local line="${1:-}" sd="$HOME/.ssh" ak="$HOME/.ssh/authorized_keys" re tmp rc
+  re="^restrict,command=\"[^\"]*\" ssh-ed25519 [A-Za-z0-9+/]+={0,2} hpcw-grid-gate:${REPO//./\\.}\$"
+  if [ -n "$line" ]; then
+    [ -f "$ak" ] && [ "$(grep -a -c -E -- "$re" "$ak")" = 1 ] && grep -a -q -x -F -- "$line" "$ak" && return 10
+  else
+    { [ -f "$ak" ] && grep -a -q -E -- "$re" "$ak"; } || return 10
+  fi
+  gate_lock || return 1
+  tmp=$(mktemp "$sd/.authorized_keys.grid-gate.XXXXXX" 2>/dev/null) || { gate_unlock; return 1; }
+  if [ -e "$ak" ]; then
+    grep -a -v -E -- "$re" "$ak" > "$tmp"; rc=$?   # grep ends every line it writes, a last one without its newline too
+    [ $rc -le 1 ] || { rm -f "$tmp"; gate_unlock; return 1; }   # 1: every line was ours
+  fi
+  if [ -n "$line" ]; then printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; gate_unlock; return 1; }; fi
+  chmod 600 "$tmp" && mv -f "$tmp" "$ak" || { rm -f "$tmp"; gate_unlock; return 1; }
+  # where SELinux labels home folders, a file a program made needs sshd's label to be read
+  command -v restorecon >/dev/null 2>&1 && restorecon "$sd" "$ak" >/dev/null 2>&1
+  gate_unlock
+  return 0
+}
+gate_on() {
+  local gate out cmd line rc
+  gate_person || die "--gate-key changes how your account signs in, so it runs only when you type it at a terminal in the grid's shell: never under Claude Code or another program, in a job or through a forced command. Nothing was changed."
+  gate_key_parse "$GATE_KEY" || die "--gate-key takes one ed25519 public key as one argument, the whole line of the .pub file in quotes: 'ssh-ed25519 AAAA... comment'. Nothing was changed."
+  gate="$(cd "$HERE" && pwd -P)/grid_gate.sh"
+  [[ "$gate" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "the clone's path holds a character a key's line cannot carry safely: $gate. Nothing was changed."
+  [[ "$ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "the runner's folder holds a character a key's line cannot carry safely: $ROOT. Nothing was changed."
+  [ -x "$gate" ] || die "$gate is missing or not executable. Nothing was changed."
+  out=$(bash "$gate" --check-copy 2>&1) || die "others may change the clone the key would run from, so the key could be made to run anything as you:
+$out
+Nothing was changed."
+  cmd="$gate${SITE:+ --site $SITE} --runner-dir $ROOT --repo $REPO${STARTOPTS[*]+ ${STARTOPTS[*]}}"
+  line="restrict,command=\"$cmd\" ssh-ed25519 $GATE_B64 hpcw-grid-gate:$REPO"
+  gate_ak_check
+  gate_write "$line"; rc=$?
+  case $rc in
+    0) say "the gate's key is in ~/.ssh/authorized_keys for $REPO (an earlier gate line for it replaced, every other line kept)";;
+    10) say "the gate's key for $REPO was in ~/.ssh/authorized_keys already, as written";;
+    *) die "~/.ssh/authorized_keys could not be written (another program held it?). Nothing was changed.";;
+  esac
+  mkdir -p "$CHAIN" || say "note: $CHAIN could not be made, so the gate cannot keep its log until it is"
+  say "it can say start, status or stop for this chain and nothing else, once a minute; each call is a line in $CHAIN/gate.log"
+  say "try it from outside the VPN: ssh -i <the private key> -o IdentitiesOnly=yes $USER@<the grid's host> status"
+  say "tools/grid_runner.sh --gate-off --repo $REPO${SITE:+ --site $SITE} takes it out"
+}
+gate_off() {
+  gate_person || die "--gate-off changes how your account signs in, so it runs only when you type it at a terminal in the grid's shell. Nothing was changed."
+  gate_ak_check
+  gate_write; case $? in
+    0) say "the gate's key for $REPO is out of ~/.ssh/authorized_keys; every other line is kept";;
+    10) say "no gate key for $REPO was in ~/.ssh/authorized_keys";;
+    *) die "~/.ssh/authorized_keys could not be written (another program held it?). Nothing was changed.";;
+  esac
 }
 
 # ---- inside a job ----------------------------------------------------------------------------------
@@ -611,6 +732,8 @@ case "$MODE" in
   start) chain_start;;
   stop) chain_stop;;
   status) chain_status;;
+  gatekey) gate_on;;
+  gateoff) gate_off;;
   pull) pull;;
   serve) serve;;
 esac

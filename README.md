@@ -329,6 +329,18 @@ OWNER/NAME --site wayne` ends the chain once the job in flight is done, `--now` 
 --site wayne` shows the folder, the image and each chain. Everything is designed and tested against
 stand-ins (`tools/tests/test_grid_runner.sh`); what the grid has not yet shown is in
 `docs/OPEN_QUESTIONS.md`.
+The ssh gate lets a workflow on GitHub's own machine start, read and end that chain, so the chain need
+not wait in Slurm's queue: a key alone signs in to grid.wayne.edu from outside the VPN (greg's test of
+2026-10-17), and `bash tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA...' --repo OWNER/NAME --site
+wayne`, typed in the grid's shell, writes one line into `~/.ssh/authorized_keys` whose forced command is
+`tools/grid_gate.sh` with the repository, the site, the runner's folder and the chain's size fixed in
+it. The key's holder says one word, `start`, `status` or `stop`, at most once a minute, and nothing else;
+each call is a line in the chain's `gate.log`. The gate never queues a job of its own, since that would
+run a workflow's code as the account outside the container; it refuses to run, and `--gate-key` to
+write the line, while others may change the clone it runs from (`tools/grid_gate.sh --check-copy`).
+`--gate-off` takes the line out. The key's private half is the workflow's environment secret; the
+password is nowhere. Tested against stand-ins in `tools/tests/test_grid_gate.sh`, which
+`test_grid_runner.sh` runs.
 
 **Site pages.** The website generates its own pages, the Beethoven ones included: run
 `python -X utf8 tools/build_site.py` in `../openspineconsortium.github.io` after changing

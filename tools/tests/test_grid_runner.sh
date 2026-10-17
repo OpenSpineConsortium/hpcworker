@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for the grid's GitHub runner: tools/grid_runner.sh (--install, --start, --stop, --status,
-# the install job and a chain's jobs), tools/grid_runner.sbatch and tools/grid_runner_install.sbatch.
+# the install job and a chain's jobs), tools/grid_runner.sbatch and tools/grid_runner_install.sbatch,
+# and, at its end, tools/tests/test_grid_gate.sh for the ssh gate, so CI's one step runs both.
 # Linux only; nothing reaches GitHub, a registry, a scheduler or the grid. Everything happens in a
 # temporary folder under /tmp (the runner folder is HPCW_RUNNER_DIR there, never the lab volume):
 # gh is tests/shim/gh (the repository's visibility, the just-in-time registrations and their
@@ -365,5 +366,10 @@ t "no stand-in was asked for what it does not know" bash -c "[ ! -e '$T/apptaine
 t "no token and no registration left any job" no_leak
 t "no registration was minted over an earlier one's files" bash -c "[ ! -s '$T/gh/jit/over' ]"
 OUT=$(cat "$T/banned.calls" 2>/dev/null); t "no person's command started a program a login node may ban" [ ! -s "$T/banned.calls" ]
+
+echo "== the ssh gate: tools/tests/test_grid_gate.sh, in an environment of its own"
+OUT=$(env -i HOME=/tmp USER="$USER" PATH=/usr/local/bin:/usr/bin:/bin LANG=C bash "$REPO/tools/tests/test_grid_gate.sh" 2>&1); RC=$?
+printf '%s\n' "$OUT" | tail -1
+t "the ssh gate's tests pass" rc_is 0
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
