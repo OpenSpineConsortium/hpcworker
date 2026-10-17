@@ -160,6 +160,18 @@ rm -f "$S/tools/link"; chmod 777 "$T"; chmod -t "$T"; gate status "${LINE_ARGS[@
 t "a folder above the clone others may write is refused" rc_is 126
 chmod +t "$T"; gate status "${LINE_ARGS[@]}"
 t "  unless it is sticky" rc_is 0
+# a folder above that another account owns (the CephFS scaffold at Wayne State) is a note, as browser-key
+# judges it: a stat in front of the real one says another uid owns $T, which no test can make unprivileged
+mkdir -p "$T/fakebin"; REAL_STAT=$(command -v stat)
+printf '#!/bin/bash\nif [ "$1 $2 $3" = "-L -c %%u" ] && [ "$4" = %q ]; then echo 99999; exit 0; fi\nexec %q "$@"\n' "$T" "$REAL_STAT" > "$T/fakebin/stat"
+chmod 755 "$T/fakebin/stat"; chmod 777 "$T"; chmod -t "$T"
+PATH="$T/fakebin:$PATH" gate status "${LINE_ARGS[@]}"
+t "a folder above the clone that another account owns, though others may write it, refuses nothing" rc_is 0
+OUT=$(PATH="$T/fakebin:$PATH" bash "$S/tools/grid_gate.sh" --check-copy 2>&1); RC=$?
+t "  and --check-copy names it as a note for the university, then ok" bash -c "[ '$RC' = 0 ] && printf '%s' \"\$1\" | grep -q '^note for the university: $T (owner uid 99999)' && printf '%s' \"\$1\" | grep -q '^ok '" _ "$OUT"
+chmod g+w "$S/tools"; OUT=$(PATH="$T/fakebin:$PATH" bash "$S/tools/grid_gate.sh" --check-copy 2>&1); RC=$?
+t "  while one of the account's own beside it is still refused" bash -c "[ '$RC' = 8 ] && printf '%s' \"\$1\" | grep -q '^copy $S/tools'" _ "$OUT"
+chmod g-w "$S/tools"; rm -rf "$T/fakebin"
 chmod 700 "$T"
 chmod g+w "$RD"; gate status "${LINE_ARGS[@]}"
 t "a runner's folder the group may write is refused" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'runner $RD'" _ "$OUT"

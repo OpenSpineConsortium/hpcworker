@@ -419,6 +419,7 @@ gate_on() {
   out=$(bash "$gate" --check-copy "$ROOT" "${REPO//\//-}" 2>&1) || die "others may change the clone or the runner's folder the key would run from, so the key could be made to run anything as you:
 $out
 Nothing was changed."
+  case "$out" in *"note for the university"*) printf '%s\n' "$out" | grep '^note for the university';; esac
   cmd="$gate${SITE:+ --site $SITE} --runner-dir $ROOT --repo $REPO${STARTOPTS[*]+ ${STARTOPTS[*]}}"
   line="restrict,command=\"$cmd\" ssh-ed25519 $GATE_B64 hpcw-grid-gate:$REPO"
   gate_ak_check

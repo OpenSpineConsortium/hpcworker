@@ -177,8 +177,12 @@ Release pipeline and keys:
   names, at the size the line fixes, once a minute, and nothing else: no shell, no other word, no
   argument, no job of its own, no terminal or forwarding (`restrict`), never the password, which is
   nowhere. The gate refuses to run while others may change the clone it runs from, the runner's folder,
-  the scripts in its `bin/` that a start queues, or the chain's folder, or any folder above them (a
-  sticky one excepted), so nobody else can turn a start into their own code; it writes only its own
+  the scripts in its `bin/` that a start queues, or the chain's folder, or any folder of the account's
+  own above them (a sticky one excepted), so nobody else can turn a start into their own code. A folder
+  above that root or another account owns, such as Wayne State's CephFS scaffold folders, writable by
+  everyone, is reported as a note for the university and refuses nothing, as `browser-key check`
+  judges it (greg's decision, 2026-10-17): the lab's code and the runner already run from under those
+  folders, so the gate's key adds no exposure through them that the account does not already have. It writes only its own
   files in the chain's folder, never through a link; it hands `grid_runner.sh` an environment of its
   own, none of the client's; and its log, one line per call with the address, turns over at 1 MB.
   `tools/grid_runner.sh --gate-key` writes the line, refusing a key that is already on another line
