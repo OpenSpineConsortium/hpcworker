@@ -51,17 +51,29 @@ dir_ok() { # DIR -> 0 when only its owner may add, rename or remove entries in i
   local m; m=$(stat -L -c %a "$1" 2>/dev/null) || return 1   # a link is judged by the folder it names
   [ $(( 8#$m & 8#1000 )) != 0 ] || [ $(( 8#$m & 8#022 )) = 0 ]
 }
-above_problems() { # PATH: "above <dir>" for each existing folder from / down to PATH, PATH left out, that others may change
+# A folder above that someone else owns is "beyond": a note, never a refusal, as browser-key's check
+# judges it (framework/lib/browser_key.sh, 2026-10-02). At Wayne State the lab's volume sits under CephFS
+# scaffold folders, root's or another lab's and writable by everyone, that only the university can change;
+# the lab's shared code and this runner's chain run from under them with or without the gate, so refusing
+# the gate over them would protect nothing. A folder of this account's own that others may change is refused.
+above_one() { # DIR
+  local o
+  dir_ok "$1" && return 0
+  o=$(stat -L -c %u "$1" 2>/dev/null) || o="?"
+  if [ "$o" = "$ME" ]; then echo "above $1"; else echo "beyond $1 (owner uid $o)"; fi
+}
+above_problems() { # PATH: a line for each existing folder from / down to PATH, PATH left out, that others may change
   local p="" c rest="${1#/}"
-  dir_ok / || echo "above /"
+  above_one /
   while [ -n "$rest" ]; do
     c="${rest%%/*}"; if [ "${rest#*/}" != "$rest" ]; then rest="${rest#*/}"; else rest=""; fi
     p="$p/$c"
     [ "$p" = "$1" ] && break
     [ -e "$p" ] || break
-    dir_ok "$p" || echo "above $p"
+    above_one "$p"
   done
 }
+refusals() { grep -v '^beyond ' || true; }   # the findings that refuse: all but the notes
 own_problems() { # PATH...: "runner <path>" for each that exists and is a link, someone else's, or writable by group or others
   local f
   for f in "$@"; do
@@ -102,7 +114,8 @@ copy_problems() { # one line per thing others than this account may change; noth
 }
 if [ "${1:-}" = --check-copy ]; then   # --check-copy [RUNNER_DIR [CHAIN_NAME]]
   out=$(copy_problems; [ -z "${2:-}" ] || runner_problems "$2" "${3:-}")
-  if [ -n "$out" ]; then printf '%s\n' "$out"; echo "refused: chmod go-w on each, by its owner (a folder above the clone may be sticky instead, chmod +t)"; exit 8; fi
+  [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^beyond \(.*\)$/note for the university: \1 is writable by others and not sticky; it is not yours, so it refuses nothing (ask for chmod +t)/'
+  if [ -n "$(printf '%s\n' "$out" | refusals)" ]; then echo "refused: chmod go-w on each, by its owner (a folder above the clone may be sticky instead, chmod +t)"; exit 8; fi
   echo "ok $CLONE"; exit 0
 fi
 
@@ -141,7 +154,7 @@ if [ -z "${SSH_ORIGINAL_COMMAND+set}" ]; then
 fi
 WORD=$SSH_ORIGINAL_COMMAND
 case "$WORD" in start|status|stop) ;; *) refuse word "one of start, status or stop, and nothing else";; esac
-problems=$(copy_problems; runner_problems "$RUNNER_DIR" "${REPO//\//-}")
+problems=$( { copy_problems; runner_problems "$RUNNER_DIR" "${REPO//\//-}"; } | refusals)
 [ -z "$problems" ] || refuse copy "others may change the clone or the runner's folder the key runs from ($(printf '%s' "$problems" | head -1)); tools/grid_gate.sh --check-copy $RUNNER_DIR ${REPO//\//-} lists all"
 ( umask 077; mkdir -p "$CHAIN" ) 2>/dev/null && [ -d "$CHAIN" ] && [ ! -L "$CHAIN" ] || refuse folder "the chain's folder $CHAIN cannot be made"
 
