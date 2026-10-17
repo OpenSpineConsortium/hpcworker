@@ -302,7 +302,7 @@ so a job that names the runner's labels (`runs-on: [self-hosted, grid, wayne]`) 
 keeps its log and its artifacts as for any job, and no Actions minutes are spent. A public repository
 is refused, as GitHub advises: its forks' pull requests could run their code on the grid. The
 connection points the same way as the CI lane's, from the grid out: nothing of the grid's reaches
-GitHub, and nothing of GitHub's reaches a workflow's job beyond its one-job credential (the account's
+GitHub but the ssh gate's key and what its `status` prints (below), and nothing of GitHub's reaches a workflow's job beyond its one-job credential (the account's
 `gh` sign-in, which mints it, stays in the home, which the container never sees). Every command names the
 site, `--site wayne`, whose profile gives the runtime, the worker queue (`partition_cpu_batch` and
 `qos_batch`; `--partition` and `--qos` override them) and the runner's folder beside the account's
@@ -329,6 +329,19 @@ OWNER/NAME --site wayne` ends the chain once the job in flight is done, `--now` 
 --site wayne` shows the folder, the image and each chain. Everything is designed and tested against
 stand-ins (`tools/tests/test_grid_runner.sh`); what the grid has not yet shown is in
 `docs/OPEN_QUESTIONS.md`.
+The ssh gate lets a workflow on GitHub's own machine start, read and end that chain, so the chain need
+not wait in Slurm's queue: a key alone signs in to grid.wayne.edu from outside the VPN (greg's test of
+2026-10-17), and `bash tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA...' --repo OWNER/NAME --site
+wayne`, typed in the grid's shell, writes one line into `~/.ssh/authorized_keys` whose forced command is
+`tools/grid_gate.sh` with the repository, the site, the runner's folder and the chain's size fixed in
+it. The key's holder says one word, `start`, `status` or `stop`, at most once a minute, and nothing else;
+each call is a line in the chain's `gate.log`. The gate never queues a job of its own, since that would
+run a workflow's code as the account outside the container; it refuses to run, and `--gate-key` to
+write the line, while others may change the clone it runs from (`tools/grid_gate.sh --check-copy`).
+`--gate-off` takes the line out. The key's private half is the workflow's environment secret; the
+password is nowhere. On a login node whose umask is 002, `chmod -R go-w tools framework` in the clone
+after each `git pull`, or the gate refuses until it is done. Tested against stand-ins in `tools/tests/test_grid_gate.sh`, which
+`test_grid_runner.sh` runs.
 
 **Site pages.** The website generates its own pages, the Beethoven ones included: run
 `python -X utf8 tools/build_site.py` in `../openspineconsortium.github.io` after changing

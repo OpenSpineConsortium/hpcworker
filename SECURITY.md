@@ -170,6 +170,21 @@ Release pipeline and keys:
   the chain while another account owns, or may write, the vendor folder, the chain's folder or the
   scripts its jobs run. The chain's jobs are submitted with `GITHUB_TOKEN` and `GH_TOKEN` removed from their
   environment, and nothing they log holds the token.
+- **The grid runner's ssh gate** (`tools/grid_gate.sh`, 2026-10-17) is a way in from the internet: a
+  GitHub workflow holds the private half of an ed25519 key, as an environment secret, whose one line in
+  `~/.ssh/authorized_keys` is `restrict,command="<clone>/tools/grid_gate.sh ..."`. Assume that key can
+  leak. Its holder can say `start`, `status` or `stop` for the one repository's runner chain the line
+  names, at the size the line fixes, once a minute, and nothing else: no shell, no other word, no
+  argument, no job of its own, no terminal or forwarding (`restrict`), never the password, which is
+  nowhere. The gate refuses to run while others may change the clone it runs from, the runner's folder,
+  the scripts in its `bin/` that a start queues, or the chain's folder, or any folder above them (a
+  sticky one excepted), so nobody else can turn a start into their own code; it writes only its own
+  files in the chain's folder, never through a link; it hands `grid_runner.sh` an environment of its
+  own, none of the client's; and its log, one line per call with the address, turns over at 1 MB.
+  `tools/grid_runner.sh --gate-key` writes the line, refusing a key that is already on another line
+  (sshd would use that line first), and `--gate-off` takes it out; both run only for a person at a
+  terminal, never under an agent, in a job or through a forced command. The worst a leaked key does is
+  start, read or stop that chain until the line is taken out.
 
 ## Incident record
 
