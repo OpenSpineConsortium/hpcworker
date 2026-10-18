@@ -20,6 +20,7 @@
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME]
 #   tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA... [comment]' --repo OWNER/NAME --site S [the --start options]
 #   tools/grid_runner.sh --gate-off --repo OWNER/NAME --site S
+#   tools/grid_runner.sh --gate-setup --repo OWNER/NAME --site S [the --start options]
 #
 # --site S names the site profile, framework/profiles/S.json, read with the framework's own awk
 # reader (lib/profile_sh.sh), since a login node's banner may ban python3 and nothing here starts it
@@ -84,6 +85,19 @@
 # agent, never in a job, never through a forced command; and --gate-key refuses while others may change
 # the clone the line points at (tools/grid_gate.sh --check-copy).
 #
+# --gate-setup is the whole of the gate's setup in one command typed in the grid's shell, with nothing
+# run on the person's own computer: the account's gh (already signed in for the runner) must be an
+# admin of the repository, which must be private or internal and hold .github/workflows/grid-gate.yml.
+# It closes this clone to others (chmod -R go-w tools framework, the account's own files); makes the
+# environment grid, deployable from main alone, where it is missing (one that exists is kept as it is, and
+# refused while it may deploy from any branch or a pattern); makes a new ed25519 key in a 0700 folder in /dev/shm (else ~/.ssh);
+# writes its line as --gate-key does; sets the environment's variables GRID_ACCESS_ID (this account)
+# and GRID_HOST_KEY (the login node's host key whose fingerprint is the profile's ssh_host_key, the one
+# the site answers with from the internet, under the profile's ssh_host) and its secret GRID_GATE_KEY,
+# the private key read by gh from the file on its standard input; deletes the key; and starts
+# grid-gate.yml with status, the gate's first call from outside. The private key is never printed and
+# never on a command line, and leaves the grid with the folder, whatever way the command ends.
+#
 # Nothing of Beethoven's runs in a workflow's job and no Claude credential is anywhere near one:
 # the runner runs the repository's steps and nothing else. The credential never touches a command
 # line (gh writes it to a file, the file is read into the runner's folder); the login node sees
@@ -111,6 +125,7 @@ while [ $# -gt 0 ]; do case "$1" in
       --partition) HPCW_RUNNER_PARTITION="$2";; --qos) HPCW_RUNNER_QOS="$2";;
     esac; shift 2;;
   --gate-key) need "$@"; MODE=gatekey; GATE_KEY="$2"; shift 2;; --gate-off) MODE=gateoff; shift;;
+  --gate-setup) MODE=gatesetup; shift;;
   --now) NOW=1; shift;;
   # the jobs' own: what --install hands the install job and --start hands the first job of a chain, and each job its successor
   --pull) MODE=pull; shift;; --serve) MODE=serve; shift;; --runner-dir) need "$@"; HPCW_RUNNER_DIR="$2"; shift 2;;
@@ -128,7 +143,7 @@ case ",$LABELS," in *,self-hosted,*|*,linux,*|*,x64,*|*,grid,*) die "--labels: s
 [ -z "$CPUS" ] || [[ "$CPUS" =~ ^[0-9]+$ ]] || die "bad --cpus $CPUS"
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
-case "$MODE" in start|stop|serve|gatekey|gateoff) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
+case "$MODE" in start|stop|serve|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
 USER=${USER:-$(id -un)}; export USER   # the profile reader expands $USER in the lab volume's path
 HERE=$(cd "$(dirname "$0")" && pwd) || die "cannot find the folder of $0"
 # python3 only inside a job, on a compute node (the registration's files are decoded there); a login
@@ -152,7 +167,7 @@ site_profile() {
   [ -n "${HPCW_RUNNER_QOS:-}" ] || HPCW_RUNNER_QOS=$(prof_get qos_batch) || die "profile $f unreadable"
   STATE_DIR=$(prof_get shared_state_dir) || die "profile $f unreadable"
 }
-case "$MODE" in install|start|stop|status|gatekey|gateoff) [ -z "$SITE" ] || site_profile;; esac
+case "$MODE" in install|start|stop|status|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
 [[ "${HPCW_RUNNER_PARTITION:-}${HPCW_RUNNER_QOS:-}" =~ ^[A-Za-z0-9._,-]*$ ]] || die "bad --partition or --qos"
 [[ "$RUNTIME_BIN_GIVEN$RUNTIME_MODULE_GIVEN" =~ ^[A-Za-z0-9._/-]*$ ]] || die "bad --runtime-bin or --runtime-module"
 if [ -z "${HPCW_RUNNER_DIR:-}" ]; then
@@ -175,7 +190,8 @@ SB() { "${SB_ENV[@]}" "$SBATCH" "$@"; }
 SQ() { "${SB_ENV[@]}" "$SQUEUE" "$@"; }
 SC() { "${SB_ENV[@]}" "$SCANCEL" "$@"; }
 # a network call that hangs must not hold a job's minute (or a person's terminal) for ever
-net() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
+# (--gate-setup sets NET_FG: a person's Ctrl-C must reach gh, which a timeout's own process group would hide)
+net() { if command -v timeout >/dev/null 2>&1; then timeout ${NET_FG:+--foreground} 300 "$@"; else "$@"; fi; }
 
 ROOT="$HPCW_RUNNER_DIR"
 IMAGES="$ROOT/image"
@@ -432,6 +448,7 @@ Nothing was changed."
   esac
   ( umask 077; mkdir -p "$CHAIN" ) || say "note: $CHAIN could not be made, so the gate cannot keep its log until it is"
   say "it can say start, status or stop for this chain and nothing else, once a minute; each call is a line in $CHAIN/gate.log"
+  [ -n "${GATE_SETUP:-}" ] && return 0
   say "try it from outside the VPN: ssh -i <the private key> -o IdentitiesOnly=yes $USER@<the grid's host> status"
   say "tools/grid_runner.sh --gate-off --repo $REPO${SITE:+ --site $SITE} takes it out"
 }
@@ -443,6 +460,88 @@ gate_off() {
     10) say "no gate key for $REPO was in ~/.ssh/authorized_keys";;
     *) die "~/.ssh/authorized_keys could not be written (another program held it?). Nothing was changed.";;
   esac
+}
+
+GATE_ENV=grid
+gate_host_line() { # -> "<ssh_host> <type> <key>": the login node's host key whose fingerprint the profile
+  # recorded from the internet, so the line pins what GitHub's machine will be shown; 1 when none matches
+  local host want f fp
+  host=$(prof_get ssh_host) && want=$(prof_get ssh_host_key) || return 1
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] && [ -n "$want" ] || return 1
+  # (HPCW_HOST_KEY_DIR stands in for /etc/ssh in the tests, which cannot hold the grid's own key)
+  for f in "${HPCW_HOST_KEY_DIR:-/etc/ssh}"/ssh_host_*_key.pub; do
+    [ -r "$f" ] || continue
+    fp=$(ssh-keygen -lf "$f" 2>/dev/null | awk '{ print $2 }')
+    [ "$fp" = "$want" ] && { printf '%s %s\n' "$host" "$(cut -d' ' -f1,2 "$f")"; return 0; }
+  done
+  return 1
+}
+gate_environment() { # the environment grid, deployable from main; one that exists is never written over,
+  # since GitHub's PUT resets the protection rules a body leaves out, such as a reviewer the owner added
+  local path="repos/$REPO/environments/$GATE_ENV" out names
+  if ! out=$(GH api "$path" --jq .deployment_branch_policy.custom_branch_policies 2>&1); then
+    # only an answer of 404 means missing: a PUT after a lost answer would reset an existing one's rules
+    case "$out" in *"HTTP 404"*) ;; *) die "gh could not read the environment $GATE_ENV of $REPO ($(printf '%s\n' "$out" | tail -1)). Nothing was changed.";; esac
+    printf '%s' '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+      | GH api -X PUT "$path" --input - >/dev/null || return 1
+  elif [ "$out" != true ]; then
+    die "the environment $GATE_ENV of $REPO exists and may deploy from any branch: at https://github.com/$REPO/settings/environments open $GATE_ENV, choose \"Selected branches and tags\" with the rule main, and run this again. Nothing was changed."
+  fi
+  names=$(GH api --paginate "$path/deployment-branch-policies" --jq '.branch_policies[] | select(.type == "branch") | .name' 2>/dev/null) || return 1
+  case "$names" in *'*'*) die "the environment $GATE_ENV of $REPO deploys from branches a pattern names ($(printf '%s\n' "$names" | grep -F '*' | head -1)), so any branch that matches could use the key: at https://github.com/$REPO/settings/environments open $GATE_ENV and keep only the rule main, then run this again. Nothing was changed.";; esac
+  printf '%s\n' "$names" | grep -qx main || GH api -X POST "$path/deployment-branch-policies" -f name=main -f type=branch >/dev/null || return 1
+  names=$(printf '%s\n' "$names" | grep -vx main | tr '\n' ' ')
+  [ -z "${names// /}" ] || say "note: the environment $GATE_ENV also deploys from ${names% }, beside main"
+}
+GATE_DIR=""
+gate_forget() { [ -n "$GATE_DIR" ] && rm -rf -- "$GATE_DIR"; GATE_DIR=""; gate_unlock; return 0; }
+gate_key_dir() { # a 0700 folder for the key: in memory where /dev/shm is (a home's snapshots would keep a
+  # deleted key), else under ~/.ssh; a folder of the same name an earlier run left (kill -9, a closed
+  # window) goes first, the account's own only (HPCW_GATE_TMP stands in for /dev/shm in the tests)
+  local base="${HPCW_GATE_TMP:-/dev/shm}" d
+  [ -d "$base" ] && [ -w "$base" ] || base="$HOME/.ssh"
+  for d in "$base"/grid-gate."$USER".* "$HOME/.ssh"/grid-gate."$USER".*; do
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && rm -rf -- "$d"
+  done
+  ( umask 077; mktemp -d "$base/grid-gate.$USER.XXXXXX" )
+}
+gate_setup() {
+  local admin host_line clone n
+  gate_person || die "--gate-setup changes how your account signs in, so it runs only when you type it at a terminal in the grid's shell: never under Claude Code or another program, in a job or through a forced command. Nothing was changed."
+  NET_FG=1
+  [ -n "$SITE" ] || die "--gate-setup needs --site S, whose profile names the grid's host and its host key. Nothing was changed."
+  [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once). Nothing was changed."
+  command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is not on PATH. Nothing was changed."
+  GH variable --help >/dev/null 2>&1 || die "this gh is too old for Actions variables; update it (https://cli.github.com). Nothing was changed."
+  refuse_public || die "nothing was changed"
+  admin=$(GH api "repos/$REPO" --jq .permissions.admin 2>/dev/null)
+  [ "$admin" = true ] || die "the account gh is signed in as is not an admin of $REPO, which making an environment and its secret needs (gh auth status says which account). Nothing was changed."
+  GH api "repos/$REPO/contents/.github/workflows/grid-gate.yml?ref=main" --silent >/dev/null 2>&1 || die "$REPO has no .github/workflows/grid-gate.yml on main, the one branch the environment lets use the key; merge the template's copy first. Nothing was changed."
+  host_line=$(gate_host_line) || die "no host key of this login node has the fingerprint the profile recorded from the internet ($(prof_get ssh_host_key)), so the key GitHub's machine would be shown cannot be pinned from here. Nothing was changed."
+  gate_environment || die "GitHub refused the environment $GATE_ENV of $REPO. Nothing else was changed."
+  # the account's own clone, closed to others as the gate requires (a umask of 002 leaves git's files group-writable)
+  clone=$(cd "$HERE/.." && pwd -P) && chmod -R go-w "$clone/tools" "$clone/framework" || die "could not close the clone to others (chmod -R go-w tools framework in it). Nothing else was changed."
+  gate_ak_check
+  # the key's folder goes whatever way this ends: a refusal, Ctrl-C or a closed window
+  trap 'gate_forget' EXIT; trap 'exit 130' INT TERM HUP
+  GATE_DIR=$(gate_key_dir) || die "could not make a folder for the key. Nothing else was changed."
+  ssh-keygen -q -t ed25519 -N '' -C grid-gate -f "$GATE_DIR/key" </dev/null >/dev/null 2>&1 || die "ssh-keygen could not make the key. Nothing else was changed."
+  GATE_KEY=$(cat "$GATE_DIR/key.pub") GATE_SETUP=1 gate_on
+  GH variable set GRID_ACCESS_ID --env "$GATE_ENV" --repo "$REPO" --body "$USER" >/dev/null \
+    && GH variable set GRID_HOST_KEY --env "$GATE_ENV" --repo "$REPO" --body "$host_line" >/dev/null \
+    || die "GitHub refused the environment's variables; the grid's line now holds a key GitHub does not, so the gate is down until this runs again"
+  # the private key reaches gh on its standard input, read from the file; tried twice, since a key
+  # deleted here cannot be stored later and the grid already holds it
+  for n in 1 2; do GH secret set GRID_GATE_KEY --env "$GATE_ENV" --repo "$REPO" < "$GATE_DIR/key" >/dev/null && break; done \
+    || die "GitHub refused the secret GRID_GATE_KEY; the grid holds a key GitHub does not, so the gate is down until this runs again"
+  gate_forget; trap - EXIT INT TERM HUP
+  say "the gate is set up: its key is on this account's authorized_keys line for $REPO and in the environment $GATE_ENV's secret, and no copy is left here"
+  if GH workflow run grid-gate.yml --repo "$REPO" --ref main -f word=status >/dev/null 2>&1; then
+    say "grid-gate.yml is running with status, the gate's first call from outside: https://github.com/$REPO/actions/workflows/grid-gate.yml"
+  else
+    say "start grid-gate.yml with status yourself: https://github.com/$REPO/actions/workflows/grid-gate.yml, Run workflow"
+  fi
+  say "tools/grid_runner.sh --gate-off --repo $REPO --site $SITE takes the key off this account; the secret stays until it is deleted at https://github.com/$REPO/settings/environments"
 }
 
 # ---- inside a job ----------------------------------------------------------------------------------
@@ -745,6 +844,7 @@ case "$MODE" in
   status) chain_status;;
   gatekey) gate_on;;
   gateoff) gate_off;;
+  gatesetup) gate_setup;;
   pull) pull;;
   serve) serve;;
 esac
