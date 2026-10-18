@@ -187,7 +187,13 @@ Release pipeline and keys:
   own, none of the client's; and its log, one line per call with the address, turns over at 1 MB.
   `tools/grid_runner.sh --gate-key` writes the line, refusing a key that is already on another line
   (sshd would use that line first), and `--gate-off` takes it out; both run only for a person at a
-  terminal, never under an agent, in a job or through a forced command. The worst a leaked key does is
+  terminal, never under an agent, in a job or through a forced command. `--gate-setup` makes the key on
+  the login node and hands its private half to the account's own `gh` on standard input, never in an
+  argument, the output or a log; the key's folder (0700, in `/dev/shm` so no snapshot of the home keeps
+  it, else under `~/.ssh`) is deleted however the command ends but kill -9, and the next run clears what
+  that left, so after it the private half is only GitHub's environment secret. It keeps an environment
+  that exists as it is, since GitHub's PUT resets the rules a body leaves out (and makes one only on a
+  404, never after a lost answer), and refuses one that may deploy from any branch or a pattern. The worst a leaked key does is
   start, read or stop that chain until the line is taken out.
 
 ## Incident record

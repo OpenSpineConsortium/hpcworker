@@ -340,8 +340,15 @@ run a workflow's code as the account outside the container; it refuses to run, a
 write the line, while others may change the clone it runs from (`tools/grid_gate.sh --check-copy`).
 `--gate-off` takes the line out. The key's private half is the workflow's environment secret; the
 password is nowhere. On a login node whose umask is 002, `chmod -R go-w tools framework` in the clone
-after each `git pull`, or the gate refuses until it is done. Tested against stand-ins in `tools/tests/test_grid_gate.sh`, which
-`test_grid_runner.sh` runs.
+after each `git pull`, or the gate refuses until it is done. `bash tools/grid_runner.sh --gate-setup
+--repo OWNER/NAME --site wayne`, typed in the grid's shell with the account's `gh` signed in as an admin
+of the repository, does the whole setup in one command, with nothing run on the person's own computer:
+it closes the clone, makes the repository's environment `grid` deployable from main where it is
+missing, makes a new key in a folder of its own in `/dev/shm` (memory, so no snapshot of the home keeps it), writes its line as `--gate-key` does,
+sets the environment's variables `GRID_ACCESS_ID` and `GRID_HOST_KEY` (the login node's host key whose
+fingerprint the profile recorded from the internet) and its secret `GRID_GATE_KEY` through `gh`'s
+standard input, deletes the key, and starts `grid-gate.yml` with `status`. Tested against stand-ins in
+`tools/tests/test_grid_gate.sh`, which `test_grid_runner.sh` runs.
 
 **Site pages.** The website generates its own pages, the Beethoven ones included: run
 `python -X utf8 tools/build_site.py` in `../openspineconsortium.github.io` after changing

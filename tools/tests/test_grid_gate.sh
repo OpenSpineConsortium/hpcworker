@@ -272,5 +272,99 @@ rm -f "$CH/gate.last"
 OUT=$(env -i HOME="$HOME" USER="$USER" PATH="$T/fakebin:/usr/bin:/bin" SSH_ORIGINAL_COMMAND=status SSH_CONNECTION="192.0.2.9 1 2 22" bash -c "$CMD" 2>&1); RC=$?
 t "the forced command runs the real --status for the line's chain" bash -c "[ '$RC' = 0 ] && printf '%s' \"\$1\" | grep -q '^runner folder: $RD\$' && grep -q '^squeue ' '$T/sq.calls'" _ "$OUT"
 
+echo "== --gate-setup: the whole setup typed in the grid's shell, against a stand-in gh"
+# a stand-in site whose recorded host key is one made here, as the grid's own is in its profile
+HK="$T/hostkeys"; mkdir -p "$HK"
+ssh-keygen -q -t rsa -b 2048 -N '' -C '' -f "$HK/ssh_host_rsa_key" </dev/null >/dev/null 2>&1
+ssh-keygen -q -t ed25519 -N '' -C '' -f "$HK/ssh_host_ed25519_key" </dev/null >/dev/null 2>&1
+HKFP=$(ssh-keygen -lf "$HK/ssh_host_rsa_key.pub" | awk '{ print $2 }')
+sed -e "s|\"ssh_host_key\": \"[^\"]*\"|\"ssh_host_key\": \"$HKFP\"|" -e 's|"ssh_host": "[^"]*"|"ssh_host": "grid.example.edu"|' \
+  "$C/framework/profiles/wayne.json" > "$C/framework/profiles/testgrid.json"
+# gh as GitHub would answer an admin of a private repository; its state is files under $G
+G="$T/gh"; mkdir -p "$G/bin"
+cat > "$G/bin/gh" <<'GH'
+#!/bin/bash
+g=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$*" >> "$g/calls"
+r=OpenSpineConsortium/symphony-template e="repos/$r/environments/grid"
+case "$*" in
+  "variable --help") exit 0;;
+  "api repos/$r --jq .visibility") cat "$g/visibility";;
+  "api repos/$r --jq .permissions.admin") cat "$g/admin";;
+  "api repos/$r/contents/.github/workflows/grid-gate.yml?ref=main --silent") [ -f "$g/workflow" ];;
+  "api $e --jq .deployment_branch_policy.custom_branch_policies")
+    [ -f "$g/env-lost" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
+    [ -f "$g/env" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; cat "$g/env";;
+  "api -X PUT $e --input -") cat > "$g/env.put"; echo true > "$g/env";;
+  "api --paginate $e/deployment-branch-policies --jq .branch_policies[] | select(.type == \"branch\") | .name") cat "$g/policies" 2>/dev/null; true;;
+  "api -X POST $e/deployment-branch-policies -f name=main -f type=branch") echo main >> "$g/policies";;
+  "variable set "*) [ ! -f "$g/refuse-variable" ];;
+  "secret set GRID_GATE_KEY --env grid --repo $r") [ ! -f "$g/refuse-secret" ] && ( umask 077; cat > "$g/secret" );;
+  "workflow run grid-gate.yml --repo $r --ref main -f word=status") exit 0;;
+  *) echo "unexpected gh $*" >&2; exit 9;;
+esac
+GH
+chmod 755 "$G/bin/gh"
+gh_reset() { rm -f "$G"/calls "$G"/env "$G"/env.put "$G"/policies "$G"/secret "$G"/refuse-* "$G"/env-lost; echo private > "$G/visibility"; echo true > "$G/admin"; : > "$G/workflow"; }
+setup() { # ARGS...: --gate-setup typed at a terminal, with the stand-in gh and host keys
+  PATH="$G/bin:$PATH" HPCW_HOST_KEY_DIR="$HK" typed --gate-setup --repo "$GH_REPO" --site testgrid --runner-dir "$RD" "$@"
+}
+gh_wrote() { grep -E -- '^(api -X|variable set|secret set|workflow run)' "$G/calls" 2>/dev/null; }
+SHM="$T/shm"; mkdir -p "$SHM"; export HPCW_GATE_TMP="$SHM"
+no_key_left() { [ -z "$(ls -A "$HOME/.ssh" "$SHM" | grep '^grid-gate\.')" ]; }
+
+gh_reset; : > "$AK"; chmod 600 "$AK"; chmod -R g+w "$C/tools"
+setup --hours 6
+t "--gate-setup ends well" rc_is 0
+LINE=$(grep 'hpcw-grid-gate:' "$AK")
+t "  writes the gate's line, the chain's options in it" bash -c "printf '%s' \"\$1\" | grep -q -- '--site testgrid --runner-dir $RD --repo $GH_REPO --hours 6\" ssh-ed25519 '" _ "$LINE"
+t "  hands gh the private key whose public half is on that line" bash -c "[ -s '$G/secret' ] && k=\$(ssh-keygen -y -f '$G/secret' | cut -d' ' -f2) && printf '%s' \"\$1\" | grep -q -- \" \$k hpcw-grid-gate:\"" _ "$LINE"
+t "  on gh's standard input only, never in an argument or the output" bash -c "b=\$(sed -n 2p '$G/secret'); [ -n \"\$b\" ] && ! grep -qF -- \"\$b\" '$G/calls' && ! printf '%s' \"\$1\" | grep -qF -- \"\$b\" && ! printf '%s' \"\$1\" | grep -q 'PRIVATE KEY'" _ "$OUT"
+t "  leaves no copy of the key in ~/.ssh" no_key_left
+t "  makes the environment deployable from main alone" bash -c "grep -q '\"custom_branch_policies\":true' '$G/env.put' && [ \"\$(cat '$G/policies')\" = main ]"
+t "  sets GRID_ACCESS_ID to this account" grep -qx -- "variable set GRID_ACCESS_ID --env grid --repo $GH_REPO --body $USER" "$G/calls"
+t "  and GRID_HOST_KEY to the host key whose fingerprint the profile recorded" grep -qx -- "variable set GRID_HOST_KEY --env grid --repo $GH_REPO --body grid.example.edu $(cut -d' ' -f1,2 "$HK/ssh_host_rsa_key.pub")" "$G/calls"
+t "  starts grid-gate.yml with status" grep -qx -- "workflow run grid-gate.yml --repo $GH_REPO --ref main -f word=status" "$G/calls"
+t "  closes the clone to others" bash -c "[ -z \"\$(find '$C/tools' -perm -g+w)\" ]"
+FIRST=$(ssh-keygen -y -f "$G/secret" | cut -d' ' -f2)
+
+rm -f "$G/calls" "$G/env.put"; setup
+t "run again: a new key replaces the old on the line" bash -c "[ '$RC' = 0 ] && [ \"\$(grep -c hpcw-grid-gate: '$AK')\" = 1 ] && ! grep -q '$FIRST' '$AK'"
+t "  and the environment that exists is not written over" bash -c "[ ! -f '$G/env.put' ] && ! grep -q 'POST' '$G/calls'"
+
+cp "$AK" "$T/ak.setup"
+refused_clean() { [ "$RC" != 0 ] && [ "$RC" != none ] && cmp -s "$AK" "$T/ak.setup" && [ -z "$(gh_wrote)" ] && no_key_left; }
+gh_reset; echo public > "$G/visibility"; setup
+t "a public repository is refused, nothing changed" refused_clean
+gh_reset; echo false > "$G/admin"; setup
+t "an account that is no admin is refused, nothing changed" refused_clean
+gh_reset; rm -f "$G/workflow"; setup
+t "a repository without grid-gate.yml is refused, nothing changed" refused_clean
+gh_reset; echo false > "$G/env"; setup
+t "an environment that may deploy from any branch is refused, nothing changed" refused_clean
+t "  saying where to fix it" has "settings/environments"
+gh_reset; mv "$HK/ssh_host_rsa_key.pub" "$HK/rsa.away"; setup
+t "no host key with the recorded fingerprint is refused, nothing changed" refused_clean
+mv "$HK/rsa.away" "$HK/ssh_host_rsa_key.pub"
+gh_reset; touch "$G/env-lost"; setup
+t "an environment gh could not read is not made afresh over it" refused_clean
+gh_reset; echo true > "$G/env"; printf 'main\nrelease/*\n' > "$G/policies"; setup
+t "an environment that deploys from a pattern is refused, nothing changed" refused_clean
+gh_reset; touch "$G/refuse-variable"; setup
+t "refused variables fail the command, leave no key and store no secret" bash -c "[ '$RC' != 0 ] && [ ! -e '$G/secret' ] && [ -z \"\$(ls -A '$HOME/.ssh' '$SHM' | grep '^grid-gate\.')\" ]"
+t "  saying the gate is down until it runs again" has "gate is down"
+gh_reset; mkdir -m 700 "$SHM/grid-gate.$USER.left"; : > "$SHM/grid-gate.$USER.left/key"; setup
+t "a key folder an earlier run left behind is cleared" bash -c "[ '$RC' = 0 ] && [ ! -e '$SHM/grid-gate.$USER.left' ]"
+gh_reset; chmod g+w "$C/tools"; mkdir -p "$RD/OpenSpineConsortium-symphony-template"; chmod o+w "$RD"; setup
+t "a refusal inside the line's writing leaves no key behind" bash -c "[ '$RC' != 0 ] && [ -z \"\$(ls -A '$HOME/.ssh' '$SHM' | grep '^grid-gate\.')\" ] && [ ! -e '$G/secret' ]"
+chmod o-w "$RD"
+gh_reset; touch "$G/refuse-secret"; setup
+t "a refused secret fails the command and leaves no key behind" bash -c "[ '$RC' != 0 ] && [ -z \"\$(ls -A '$HOME/.ssh' '$SHM' | grep '^grid-gate\.')\" ] && ! grep -q 'workflow run' '$G/calls'"
+gh_reset
+OUT=$(cd "$C" && PATH="$G/bin:$PATH" HPCW_HOST_KEY_DIR="$HK" bash tools/grid_runner.sh --gate-setup --repo "$GH_REPO" --site testgrid --runner-dir "$RD" < /dev/null 2>&1); RC=$?
+t "--gate-setup not typed at a terminal is refused, nothing asked of gh" bash -c "[ '$RC' != 0 ] && [ ! -s '$G/calls' ]"
+gh_reset; setup_nosite() { PATH="$G/bin:$PATH" HPCW_HOST_KEY_DIR="$HK" typed --gate-setup --repo "$GH_REPO" --runner-dir "$RD"; }; setup_nosite
+t "--gate-setup without --site is refused" bash -c "[ '$RC' != 0 ] && [ ! -s '$G/calls' ]"
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
