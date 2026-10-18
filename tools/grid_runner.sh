@@ -507,7 +507,8 @@ gate_key_dir() { # a 0700 folder for the key: in memory where /dev/shm is (a hom
 }
 gate_setup() {
   local admin host_line clone n
-  gate_person || die "--gate-setup changes how your account signs in, so it runs only when you type it at a terminal in the grid's shell: never under Claude Code or another program, in a job or through a forced command. Nothing was changed."
+  # a person typing it, or pressing Beethoven's lab lead button, which types it into the portal's shell
+  gate_person || die "--gate-setup changes how your account signs in, so it runs only at a terminal in the grid's shell, typed by you or pressed in Beethoven's lab lead tools: never under Claude Code or another agent, in a job or through a forced command. Nothing was changed."
   NET_FG=1
   [ -n "$SITE" ] || die "--gate-setup needs --site S, whose profile names the grid's host and its host key. Nothing was changed."
   [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once). Nothing was changed."
