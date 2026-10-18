@@ -158,7 +158,10 @@ name and identifier carry no university name.
   a person at a terminal only; `--gate-setup` does the whole setup with the account's own `gh`, and
   besides being typed it may be pressed by a person in Beethoven's lab lead tools, which type it into
   the portal's shell (greg's choice of 2026-10-18, "Beethoven button": "i want this to be done by a
-  button click"), as cli.json's `grid-gate-setup` and `grid-gate-off` lines.
+  button click"), as cli.json's `grid-gate-setup` and `grid-gate-off` lines. Its git pull, ssh-keygen and
+  few `gh` calls run on the login node, where the portal's shell is, as typing it there does: an
+  exception to the one-scheduler-call rule of Grid etiquette, for a lab lead's one press, with no
+  container and nothing under the login node's `/tmp`.
 - **Nothing is deleted outside the framework's own run directories and node-local temp.** On
   2026-09-28 at 22:34 local the student's whole `~/.ashley` folder on the grid was deleted while a
   Remote Control session spawned from the phone was open, and the Claude login inside it was lost;
