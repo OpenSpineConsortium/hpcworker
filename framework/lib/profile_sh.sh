@@ -115,6 +115,7 @@ hpcw_render() { # TEMPLATE KEY=VALUE...
     PERMISSION_MODE "$pm" CAPACITY "$cap" HEARTBEAT_S "${HPCW_KV[HEARTBEAT_S]-30}" AUTH_EVERY_S "${HPCW_KV[AUTH_EVERY_S]-300}"
     LOGIN_RECHECK_S "${HPCW_KV[LOGIN_RECHECK_S]-60}" AUTH_RETRY_S "${HPCW_KV[AUTH_RETRY_S]-10}"
     RESUME_WINDOW_S "${HPCW_KV[RESUME_WINDOW_S]-14400}" LOGIN_ABANDON_S "${HPCW_KV[LOGIN_ABANDON_S]-$HPCW_M_LAS}"
+    REGISTER_TIMEOUT_S "${HPCW_KV[REGISTER_TIMEOUT_S]-600}"
     TITLE "$title" HPCW_HOME "$hh" HPCW_CODE "$code"
   )
   # profile.py header_lines(): the scheduler's directives (Slurm is the tested path; PBS and LSF are written from their documentation)

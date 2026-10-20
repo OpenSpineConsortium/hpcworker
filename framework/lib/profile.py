@@ -1064,6 +1064,9 @@ def mapping(prof, overrides=None):
         "RESUME_WINDOW_S": str(o.get("RESUME_WINDOW_S", 4 * 3600)),
         # framework 10: a job still waiting for the Claude sign-in this long stops itself and queues no successor
         "LOGIN_ABANDON_S": str(o.get("LOGIN_ABANDON_S", prof.get("login_abandon_s", 1200))),
+        # framework 19: a job whose Remote Control has printed no link this long restarts it once, and the second
+        # time stops, with Claude Code's last words as the error, and queues no successor
+        "REGISTER_TIMEOUT_S": str(o.get("REGISTER_TIMEOUT_S", 600)),
         # framework 10: the session title (status.json "title", Claude Code's --name)
         "TITLE": session_title(prof, run),
         "HPCW_HOME": hpcw_home,
