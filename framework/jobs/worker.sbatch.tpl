@@ -78,7 +78,7 @@ HPCW_NODE_TMP_PATTERN='@NODE_TMP@'; HPCW_NODE_TMP_VAR='@NODE_TMP_VAR@'; HPCW_TMP
 XDG_FIX=@XDG_FIX@; SCHED_IN_WORKER=@SCHED_IN_WORKER@
 PERMISSION_MODE='@PERMISSION_MODE@'; CAPACITY='@CAPACITY@'
 HEARTBEAT_S=@HEARTBEAT_S@; AUTH_EVERY_S=@AUTH_EVERY_S@; RESUME_WINDOW_S=@RESUME_WINDOW_S@; LOGIN_RECHECK_S=@LOGIN_RECHECK_S@; AUTH_RETRY_S=@AUTH_RETRY_S@
-TITLE='@TITLE@'; HOURS=@HOURS@; LOGIN_ABANDON_S=@LOGIN_ABANDON_S@
+TITLE='@TITLE@'; HOURS=@HOURS@; LOGIN_ABANDON_S=@LOGIN_ABANDON_S@; REGISTER_TIMEOUT_S=@REGISTER_TIMEOUT_S@
 export RUNTIME RUNTIME_BIN RUNTIME_MODULE HPCW_NODE_TMP_PATTERN HPCW_NODE_TMP_VAR HPCW_TMPDIR_IS_NODE_LOCAL
 ORIG_TMPDIR="${TMPDIR:-}"   # what a successor should inherit: not this node's per-job temp
 
@@ -117,7 +117,7 @@ CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 STATE=starting; MESSAGE=""; REQUESTED_NAME="$TITLE"; SESSION_NAME="$REQUESTED_NAME"; SESSION_URL=""; ENV_URL=""; ENV_ID=""; LINK_NOTED=""; LINK_SAID=""
 AUTH_JSON=null; RESTARTS=0; RESUMED=false; RESUME_TRIED=0; RC_ALIVE=false; USING_TMUX=false; RC_PID=0
 NEXT_JOB=""; CHAIN_NOTE=""; WS_TRUSTED=false; SCHED_INSIDE=false; SCHED_NOTE="off in the site profile"
-ONLINE_AT=""; ONLINE_LOGGED=0; STOP_REASON=""; NEED_LOGIN_SINCE=0; RC_STARTS=0
+ONLINE_AT=""; ONLINE_LOGGED=0; STOP_REASON=""; NEED_LOGIN_SINCE=0; RC_STARTS=0; REG_SINCE=0; REG_MISSES=0
 # trust for the workspace as Claude Code has it on record (the second of the two booleans read); the seed below may add it later
 hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
 consent_source() { # claude_config | marker | none : where the student's recorded answer was found
@@ -325,6 +325,7 @@ write_launcher() { # [extra args]: the command line claude gets, as a file; a wi
 start_rc() { # [extra args]
   RC_STARTS=$((RC_STARTS + 1))
   [ "$RC_STARTS" = 1 ] && hpcw_progress "$RUN_DIR" "Connecting to Claude"
+  [ "$REG_SINCE" -gt 0 ] || REG_SINCE=$(now_s)
   pretrust
   write_launcher "$@"
   # script -a: without it script empties rc.log and writes from its start, while RC_OFF still holds the old size,
@@ -444,6 +445,40 @@ login_abandon() {
   say "stopped: no Claude sign-in within ${LOGIN_ABANDON_S}s; the chain ended"
   exit 0
 }
+# framework 19, the registration watchdog. Remote Control that never prints a link left a chain renewing
+# itself for days with the panel at "Still connecting" and nothing said (go2432, 13 links of 8 h, found
+# 2026-10-20). Now a job whose Remote Control has printed no link REGISTER_TIMEOUT_S after it was first
+# started (the clock held while the job waits for the student's sign-in or consent, and while Claude Code
+# says it is connected, which the panel already shows) starts it again once; the second time it stops, cancels its successor and writes
+# the error with Claude Code's last words, so the panel can say what went wrong and offer a fresh start.
+register_due() {
+  [ "${REGISTER_TIMEOUT_S:-0}" -gt 0 ] && [ "$REG_SINCE" -gt 0 ] && [ -z "$ONLINE_AT" ] || return 1
+  # error too: an error Claude Code printed (no feature flags, an untrusted workspace) otherwise held the chain the same way
+  case "$STATE" in starting|running|error) ;; *) REG_SINCE=$(now_s); return 1;; esac
+  [ $(( $(now_s) - REG_SINCE )) -ge "$REGISTER_TIMEOUT_S" ]
+}
+register_missed() {
+  [ "$STOPPING" = 1 ] && return 0
+  local last span; last=$(last_line "$(clean_tail "$RC_OFF" | grep -v -E '^Script (started|done) ')")
+  if [ "$REGISTER_TIMEOUT_S" -ge 60 ]; then span="$(( (REGISTER_TIMEOUT_S + 59) / 60 )) minutes"; else span="$REGISTER_TIMEOUT_S seconds"; fi
+  REG_MISSES=$((REG_MISSES + 1))
+  if [ "$REG_MISSES" -lt 2 ]; then
+    say "Remote Control printed no link in ${REGISTER_TIMEOUT_S}s (last output: ${last:-none}); starting it again once"
+    # the clock starts again with the next start, not during its back-off
+    rc_stop; REG_SINCE=0; return 0
+  fi
+  STOPPING=1
+  rc_stop
+  end_chain
+  CHAIN_NOTE="chain ended: Remote Control printed no link in two tries of $REGISTER_TIMEOUT_S s"
+  local words="Remote Control did not connect to Claude on $NODE in two tries of $span each. Claude Code's last words: ${last:-none}"
+  [ "$STATE" = error ] && [ -n "$MESSAGE" ] && words="$MESSAGE. $words"
+  write_status error "$words"
+  hpcw_progress "$RUN_DIR" "Couldn't start: $words"
+  rm -f stop; touch stop.done
+  say "stopped: $words; the chain ended"
+  exit 0
+}
 trap on_term TERM INT
 
 # ---- 7. main loop: start, watch, answer from the recorded consent, record, heartbeat ---------------
@@ -532,6 +567,8 @@ while :; do
     # then waits as it does for no sign-in (and the sign-in wait's own clock may stop it)
     if [ "$SIGNIN" = other ]; then rc_stop; write_status need_login "$(login_words)"; say "signed in, but not with a Claude subscription: Remote Control stopped"; fi
   fi
+  # after this look at Claude Code's output, so a link printed since the last look counts first
+  if register_due; then register_missed; fi
   if [ $(( $(now_s) - LAST_BEAT )) -ge "$HEARTBEAT_S" ]; then write_status "$STATE" "$MESSAGE"; LAST_BEAT=$(now_s); fi
   sleep 5
 done

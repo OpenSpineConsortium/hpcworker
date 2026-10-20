@@ -57,6 +57,10 @@ case "$1 ${2:-}" in
           printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_ENV_URL"
           exec sleep 600;;
       esac
+    elif [ "${FAKE_RC_FORM:-}" = silent ]; then
+      # framework 19: Remote Control that starts and never registers (go2432's chain, 13 links of 8 h, 2026-10-20)
+      printf 'Starting Remote Control\r\n'
+      exec sleep 600
     elif [ "${FAKE_RC_FORM:-environment}" = session ]; then
       # framework 14: what 2.1.283 printed when it resumed an earlier session (job 40554211, 2026-10-03)
       printf 'Resuming session %s (43m ago)\r\n' "${FAKE_SESSION_URL##*/}"
@@ -442,6 +446,45 @@ class Job(unittest.TestCase):
                 proc.kill()
         s = self.status()
         self.assertEqual((s["state"], s["stop_reason"]), ("stopped", "login_abandoned"), out)
+
+    def test_remote_control_with_no_link_is_started_again_once_then_the_chain_ends(self):
+        # framework 19: no link in REGISTER_TIMEOUT_S, twice: the error with Claude Code's last words, the successor cancelled
+        open(self.logged_in, "w").close()
+        self.rc_form = "silent"
+        self.render(REGISTER_TIMEOUT_S="4")
+        self.queued_file()
+        proc = self.start_job()
+        out, _ = proc.communicate(timeout=120)
+        self.assertEqual(proc.returncode, 0, out)
+        s = self.status()
+        self.assertEqual(s["state"], "error", out)
+        self.assertIn("Remote Control did not connect to Claude", s["message"])
+        self.assertIn("Starting Remote Control", s["message"], "Claude Code's last words are in the error")
+        progress = self.progress()
+        self.assertEqual(progress[:3], ["Asked the grid for a computer", "Got a computer", "Connecting to Claude"])
+        self.assertTrue(progress[-1].startswith("Couldn't start: Remote Control did not connect to Claude"), progress)
+        self.assertNotIn("Renewing", progress)
+        self.assertEqual(out.count("starting it again once"), 1, out)
+        self.assertTrue(os.path.exists(os.path.join(self.rd, "stop.done")))
+        self.assertFalse(os.path.exists(os.path.join(self.rd, "next.id")), "no successor left queued")
+        self.assertIn("scancel 40501234", self.g.calls())
+
+    def test_a_registered_worker_is_never_stopped_by_the_watchdog(self):
+        open(self.logged_in, "w").close()
+        self.render(REGISTER_TIMEOUT_S="3")
+        self.queued_file()
+        proc = self.start_job()
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online", 90))
+            time.sleep(8)
+            self.assertEqual(self.status()["state"], "online")
+            self.assertIsNone(proc.poll())
+        finally:
+            open(os.path.join(self.rd, "stop"), "w").close()
+            try:
+                proc.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     def test_a_chain_successor_is_a_renewal(self):
         # the predecessor (4241) queued this job: its status.json names 4241, next.id names this job first; SubmitTime from the scheduler
