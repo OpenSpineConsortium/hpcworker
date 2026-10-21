@@ -4,7 +4,7 @@
  "summary": "status.json after a stop request",
  "file": "status.json",
  "json": {
-  "version": 26,
+  "version": 27,
   "site": "testsite",
   "run": "worker",
   "job": "4242",

@@ -1,4 +1,4 @@
-"""`hpcworker job` (framework 24, lib/jobs.sh), against the fake scheduler of fakegrid.py: a submit takes its
+"""`hpcworker job` (framework 25, 27; lib/jobs.sh), against the fake scheduler of fakegrid.py: a submit takes its
 partition, QoS, account and GPU request from the site profile by class, never from the caller; its output goes
 under the project's log folder with -D the folder named; --after becomes one --dependency; the job's id, name and
 log land in the project's ledger; a refusal says the scheduler's own words and writes nothing; status reads the
@@ -169,6 +169,89 @@ class JobTest(unittest.TestCase):
         rc, out, err = self.g.run("job cancel --project demo %s" % jid)
         self.assertEqual((rc, out.strip()), (0, "HPCW-JOB cancelled %s" % jid))
         self.assertIn("scancel %s" % jid, self.g.calls())
+
+    def write_script(self, text):
+        with open(self.script, "w", newline="\n") as fh:
+            fh.write(text)
+
+    def test_a_scripts_own_resources_stand_when_no_flag_names_them(self):
+        self.write_script("#!/bin/bash\n#SBATCH --time=2-00:00:00\n#SBATCH -c 16\n#SBATCH --mem-per-cpu=2G\necho hi\n#SBATCH --mem=1G\n")
+        self.assertEqual(self.submit()[0], 0)
+        call = self.sbatch_calls()[-1]
+        for gone in ("--time=", "--cpus-per-task=", "--mem="):
+            self.assertNotIn(gone, call)
+        # a flag still wins, and an #SBATCH line after the first command is not the header (Slurm reads none there)
+        self.write_script("#!/bin/bash\n#SBATCH --time=2-00:00:00\necho hi\n#SBATCH --mem=1G\n")
+        self.assertEqual(self.submit(extra="--time 0:30:00")[0], 0)
+        call = self.sbatch_calls()[-1]
+        self.assertIn("--time=0:30:00", call)
+        self.assertIn("--mem=4G", call)
+        self.assertIn("--cpus-per-task=1", call)
+
+    def test_placement_follows_the_deployments_profile_not_a_stale_account_copy(self):
+        import json
+        acct = os.path.join(self.g.hpcw, "profile.json")
+        with open(acct, encoding="utf-8") as fh:
+            p = json.load(fh)
+        # as an account installed before the site gained galhp and its GPU QoS, and before its batch pair
+        p.update(partitions_gpu=["gmsap", "gvohp"], qos_gpu="", partition_cpu_batch="", qos_batch="")
+        with open(acct, "w", encoding="utf-8") as fh:
+            json.dump(p, fh, indent=1)
+        self.assertEqual(self.submit(cls="gpu", name="train")[0], 0)
+        self.assertIn("--partition=gmsap,gvohp,galhp --qos=gpu", self.sbatch_calls()[-1])
+        self.assertEqual(self.submit(cls="batch", name="long")[0], 0)
+        self.assertIn("--partition=reqp --qos=requeue --requeue", self.sbatch_calls()[-1])
+
+    def test_one_partition_of_the_class_and_requeue_by_the_job(self):
+        rc, out, err = self.submit(cls="gpu", name="train", extra="--partition gvohp --requeue")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("--partition=gvohp --qos=gpu --gres=gpu:1 --requeue --open-mode=append", self.sbatch_calls()[-1])
+        self.assertEqual(self.submit(cls="batch", name="long", extra="--no-requeue")[0], 0)
+        self.assertIn("--qos=requeue --no-requeue", self.sbatch_calls()[-1])
+        n = len(self.sbatch_calls())
+        for extra, cls in (("--partition secp", "gpu"), ("--partition gmsap", "cpu"), ("--partition 'a b'", "cpu")):
+            rc, out, err = self.submit(cls=cls, name="x", extra=extra)
+            self.assertNotEqual(rc, 0, extra)
+        self.assertEqual(len(self.sbatch_calls()), n)
+
+    def test_the_job_gets_the_callers_environment_and_none_of_hpcworkers(self):
+        # This grid is the test's own, so its fake sbatch is swapped for one that writes its environment down.
+        dump = os.path.join(self.td, "env.txt")
+        with open(os.path.join(self.g.bin, "sbatch"), "w", newline="\n") as fh:
+            fh.write("#!/bin/bash\nenv > '%s'\necho 4242\n" % G.posix(dump))
+        os.chmod(os.path.join(self.g.bin, "sbatch"), 0o755)
+        rc, out, err = self.g.run("job submit --project demo --name one --class cpu --dir '%s' -- run.sbatch" % G.posix(self.work),
+                                  SEED="caller-seed", MY_VAR="kept",
+                                  HPCW_GATE="1", SSH_ORIGINAL_COMMAND="x")
+        self.assertEqual(rc, 0, (out, err))
+        with open(dump) as fh:
+            env = dict(line.rstrip("\n").split("=", 1) for line in fh if "=" in line)
+        self.assertEqual(env.get("SEED"), "caller-seed")
+        self.assertEqual(env.get("MY_VAR"), "kept")
+        for gone in ("HPCW_GATE", "SSH_ORIGINAL_COMMAND", "RUNTIME", "RUNTIME_BIN", "HPCW_NODE_TMP"):
+            self.assertNotIn(gone, env)
+        self.assertFalse([k for k in env if k.startswith("P_")])
+
+    def test_cancel_names_ids_outside_the_ledger_and_cancels_the_rest(self):
+        jid = self.submit(name="one")[1].split()[2]
+        rc, out, err = self.g.run("job cancel --project demo 999 %s" % jid)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.splitlines(), ["HPCW-JOB not-in-ledger 999", "HPCW-JOB cancelled %s" % jid])
+        self.assertIn("scancel %s" % jid, self.g.calls())
+
+    def test_status_reads_sacct_alone_when_squeue_is_silent(self):
+        jid = self.submit(name="one")[1].split()[2]
+        open(os.path.join(self.g.sched, "squeue_fail"), "w").close()
+        rc, out, err = self.g.run("job status --project demo --last 2000", FAKE_SACCT="%s|RUNNING|0:0|asx3" % jid)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB %s one RUNNING on asx3" % jid, out)
+
+    def test_a_long_name_and_the_version(self):
+        name = "fetch-" + "x" * 58
+        self.assertEqual(self.submit(name=name)[0], 0)
+        self.assertNotEqual(self.submit(name=name + "y")[0], 0)
+        rc, out, err = self.g.run("job version")
+        self.assertEqual((rc, out.strip()), (0, "HPCW-JOB version %s interface 2" % G.CURRENT_VERSION))
 
 
 if __name__ == "__main__":
