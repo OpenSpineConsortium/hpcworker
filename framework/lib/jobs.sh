@@ -124,7 +124,7 @@ job_submit() {
   [ "$P_scheduler" = slurm ] || die "hpcworker job speaks Slurm only for now; this site's scheduler is $P_scheduler"
   local opts dep
   opts=$(job_class_options "$class" "$gpus" 2>&1) || die "$opts"
-  dep=$(job_after_option "${afters[@]}") || die "--after is a job id, then :ok or :any (any when left out)"
+  dep=$(job_after_option ${afters[@]+"${afters[@]}"}) || die "--after is a job id, then :ok or :any (any when left out)"
   local jd; jd=$(job_dir "$project")
   ( umask 077; mkdir -p "$jd/logs" ) || die "could not make $jd/logs"
   local args=() o
@@ -156,7 +156,7 @@ job_submit() {
     echo "HPCW-JOB refused $name $part/${qos:-none}: ${out:-the scheduler gave no reason}"; return 1
   fi
   local log="$jd/logs/${name}_$id.out"; [ -n "$array" ] && log="$jd/logs/${name}_${id}_%a.out"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$class" "$part" "${qos:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$log" "$dir" "$script" "$array" "$(job_after_ids "${afters[@]}")" >> "$jd/jobs.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$class" "$part" "${qos:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$log" "$dir" "$script" "$array" "$(job_after_ids ${afters[@]+"${afters[@]}"})" >> "$jd/jobs.tsv"
   echo "HPCW-JOB submitted $id $name $part/${qos:-none} log $log"
 }
 
