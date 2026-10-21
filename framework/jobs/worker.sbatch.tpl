@@ -116,6 +116,10 @@ CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
 # through the link, so a running session never sees another account's files mid-run; the loop below
 # moves to the account the link names next, at once (the panel's swap) or by auto mode.
 CCD_LINK="$CCD"; ACCT_DIR="$(dirname "$CCD_LINK")/accounts"; AUTO_PROBE_S=1800; AUTO_HELD=0.9
+# framework 22: a worker kept to one account (hpcworker accounts start) names it in account.pin: it runs in
+# that account's folder from start to end, never moves with the link and never takes auto mode
+PIN=$(head -c 3 account.pin 2>/dev/null | tr -dc '0-9')
+[[ "$PIN" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]] && [ -d "$ACCT_DIR/$PIN" ] && CCD_LINK="$ACCT_DIR/$PIN"
 acct_named() { # the folder the link names now, one level and logically; the link itself when it is no link
   local t; [ -L "$CCD_LINK" ] && t=$(readlink "$CCD_LINK") || { printf '%s' "$CCD_LINK"; return 0; }
   case "$t" in /*) printf '%s' "$t";; *) printf '%s/%s' "$(dirname "$CCD_LINK")" "$t";; esac
@@ -230,7 +234,7 @@ CLEAN_ENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_UR
            -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u CLAUDE_CODE_USE_ANTHROPIC_AWS -u CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
            -u CLAUDE_CODE_USE_MANTLE -u CLAUDE_CODE_USE_GATEWAY -u CLAUDE_CODE_OAUTH_REFRESH_TOKEN -u CLAUDE_CODE_OAUTH_SCOPES
            -u CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC -u DISABLE_GROWTHBOOK
-           HOME="$HOME" CLAUDE_CONFIG_DIR="$CCD" DISABLE_AUTOUPDATER=1 TERM=xterm-256color BROWSER=/bin/false TMPDIR=/tmp ${XDG:+XDG_RUNTIME_DIR="$XDG"} HPCW_JOB="$JOB" HPCW_SITE="$SITE")
+           HOME="$HOME" CLAUDE_CONFIG_DIR="$CCD" DISABLE_AUTOUPDATER=1 TERM=xterm-256color BROWSER=/bin/false TMPDIR=/tmp ${XDG:+XDG_RUNTIME_DIR="$XDG"} HPCW_JOB="$JOB" HPCW_SITE="$SITE" SYMPHONY_WORKER="grid-$RUN")
 # in_image.sh runs one command inside the image with that environment; a file, so `timeout`,
 # `script` and tmux can all run it without quoting travelling through them
 { echo '#!/bin/bash'; echo "# written by hpcworker job $JOB on $NODE: one command inside the worker image, with Claude Code's clean environment"

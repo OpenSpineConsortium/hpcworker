@@ -259,7 +259,7 @@ class RenderedJob(SlurmBase):
 
     def lifted(self, text):
         sched = re.search(r"\nSCHED_PATH=\"\"\nif \[ \"\$SCHED_IN_WORKER\" = 1 \]; then\n.*?\nfi\n", text, re.S)
-        clean = re.search(r"\nCLEAN_ENV=\(.*?HPCW_SITE=\"\$SITE\"\)\n", text, re.S)
+        clean = re.search(r"\nCLEAN_ENV=\(.*?HPCW_SITE=\"\$SITE\"(?: SYMPHONY_WORKER=\"grid-\$RUN\")?\)\n", text, re.S)
         writer = re.search(r"\n\{ echo '#!/bin/bash'; echo \"# written by hpcworker job \$JOB on \$NODE: one command.*?\nchmod 700 in_image\.sh\.part && mv -f in_image\.sh\.part in_image\.sh\n", text, re.S)
         flag = re.search(r"SCHED_IN_WORKER=([01])", text)
         self.assertTrue(sched and clean and writer and flag, "the Slurm block, CLEAN_ENV or the in_image.sh writer is not in the rendered job in the expected shape")
@@ -273,7 +273,7 @@ class RenderedJob(SlurmBase):
         head = (
             "set -u\nsource '%s/lib/adapters/common.sh'\n" + GETENT + "say() { echo \"say $*\"; }\n"
             "export USER=go2432 HPCW_HOST_ROOT='%s'\ncd '%s' || exit 9\n"
-            "JOB=40500077; NODE=asx1; SITE=wayne; SCHEDULER=%s; SCHED_IN_WORKER=%s; SCHED_INSIDE=false; SCHED_NOTE='off in the site profile'\n"
+            "JOB=40500077; NODE=asx1; SITE=wayne; RUN=worker; SCHEDULER=%s; SCHED_IN_WORKER=%s; SCHED_INSIDE=false; SCHED_NOTE='off in the site profile'\n"
             "IMAGE='%s'; IMAGE_TYPE=sandbox; BINDS='-B /wsu/home/go/go24/go2432'; IPC='%s'; ORIG_TMPDIR=/wsu/tmp/go2432\n"
             "RUNTIME=apptainer; RUNTIME_BIN='%s'; RUNTIME_MODULE=''; HPCW_NODE_TMP='%s'; HPCW_CODE='%s'; RUN_DIR='%s'; CCD=/wsu/home/go/go24/go2432/.beethoven/claude; XDG=''\n"
         ) % (posix(ROOT), msys(self.root), msys(rd), scheduler, flag, msys(self.image), msys(os.path.join(self.td, "ipc")),

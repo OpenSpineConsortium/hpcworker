@@ -221,6 +221,29 @@ class Cli(unittest.TestCase):
             fh.write("2026-10-21T02:00:00Z AUTH-URL: https://evil.example/claude.ai\n")
         self.assertEqual(self.run_cli("cmd_accounts link 2")[0], 3)
 
+    def test_a_worker_of_its_own_on_one_account(self):
+        # framework 22: accounts start N [NAME] is worker start --account N; the listing names every worker
+        # and the account each runs on, and an account a live worker is kept to is never forgotten
+        self.listing()
+        os.makedirs(os.path.join(self.accounts(), "2"))
+        calls = os.path.join(self.td, "calls")
+        stub = "cmd_worker() { echo \"$*\" >> '%s'; local rd='%s/state/team-b'; mkdir -p \"$rd\"; echo 2 > \"$rd/account.pin\"; echo 2 > \"$rd/account\"; echo '{\"state\":\"online\",\"node\":\"asx1\"}' > \"$rd/status.json\"; }; " % (calls, self.td)
+        rc, out, err = self.run_cli(stub + "cmd_accounts start 2 team-b")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("HPCW-ACCOUNTS start 2", out)
+        with open(calls) as fh:
+            self.assertEqual(fh.read().strip(), "start --name team-b --account 2")
+        w = self.listing()["workers"]
+        self.assertEqual([(x["name"], x["account"], x["pinned"], x["state"]) for x in w], [("team-b", "2", "2", "online")])
+        self.assertNotEqual(self.run_cli("cmd_accounts forget 2")[0], 0, "a pinned worker's account stays")
+        self.assertNotEqual(self.run_cli(stub + "cmd_accounts start 3")[0], 0, "no account 3")
+        self.assertNotEqual(self.run_cli(stub + "cmd_accounts start 2 'bad name'")[0], 0)
+        rc, out, err = self.run_cli(stub + "cmd_accounts stop team-b")
+        self.assertEqual(rc, 0, err)
+        with open(calls) as fh:
+            self.assertEqual(fh.read().strip().splitlines()[-1], "stop --name team-b")
+        self.assertNotEqual(self.run_cli(stub + "cmd_accounts stop nobody")[0], 0)
+
     def test_never_through_beethovens_browser_key(self):
         rc, out, err = self.run_cli("cmd_accounts list --json", env={"HPCW_GATE": "1"})
         self.assertNotEqual(rc, 0)

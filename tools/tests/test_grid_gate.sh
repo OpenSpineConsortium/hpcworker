@@ -133,7 +133,11 @@ t "code N takes the code on stdin and hands it on stdin, never in arguments" bas
 t "  and never into the log" bash -c "! grep -q AbCdEf '$CH/gate.log'"
 OUT=$(rm -f "$CH/accounts.last"; printf 'bad code;id\n' | env SSH_ORIGINAL_COMMAND="accounts code 3" bash "$S/tools/grid_gate.sh" "${LINE_ARGS[@]}" 2>&1); RC=$?
 t "a code that is not one is refused" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'refused code'" _ "$OUT"
-for w in 'accounts use 0' 'accounts use 33' 'accounts use 2 3' 'accounts auto maybe' 'accounts usage now' 'accounts code 3 ABCDEFGH123' 'accounts;id' 'accounts list' 'accounts  use 2' 'accounts use 02'; do
+acct "accounts start 2 team-b" "${LINE_ARGS[@]}"
+t "start N NAME runs accounts start N NAME (framework 22), then the list" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts start 2 team-b|' && tail -1 '$HW_CALLS' | grep -q '^accounts list --json|'"
+acct "accounts stop team-b" "${LINE_ARGS[@]}"
+t "stop NAME runs accounts stop NAME" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts stop team-b|'"
+for w in 'accounts use 0' 'accounts use 33' 'accounts use 2 3' 'accounts auto maybe' 'accounts usage now' 'accounts code 3 ABCDEFGH123' 'accounts;id' 'accounts list' 'accounts  use 2' 'accounts use 02' 'accounts start 33' 'accounts start 2 a;b' 'accounts stop' 'accounts stop a b'; do
   acct "$w" "${LINE_ARGS[@]}"
   t "the word $(printf '%q' "$w") is refused" bash -c "[ '$RC' = 126 ] && printf '%s\n' \"\$1\" | grep -q '^HPCW-GRID-GATE refused word'" _ "$OUT"
 done
