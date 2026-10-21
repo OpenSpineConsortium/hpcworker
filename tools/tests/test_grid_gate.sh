@@ -467,6 +467,12 @@ sed -i 's/gate.sh v1/gate.sh v2/' "$T/snwork/grid/gate.sh" && "${SNE[@]}" git -C
 : > "$JOBS_CALLS"; job "schwingnet start" "${LINE_ARGS[@]}"
 t "schwingnet fast-forwards the clone to main before it runs gate.sh" bash -c "grep -qx 'gate.sh v2 start SCHWINGNET=$SN' '$JOBS_CALLS'"
 t "  saying how far" has '^HPCW-GRID-GATE schwingnet pull ok '
+sed -i 's/gate.sh v2/gate.sh v3/' "$T/snwork/grid/gate.sh" && "${SNE[@]}" git -C "$T/snwork" commit -q -am three && git -C "$T/snwork" push -q origin main
+mkdir -p "$SN/grid/logs" && echo "41000 abc123" > "$SN/grid/logs/HOLD"; : > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"
+t "a HOLD keeps the checkout where it is" bash -c "grep -qx 'gate.sh v2 status SCHWINGNET=$SN' '$JOBS_CALLS'"
+t "  and says whose" has '^HPCW-GRID-GATE schwingnet checkout held by grid/logs/HOLD: 41000 abc123$'
+rm -f "$SN/grid/logs/HOLD"; : > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"
+t "  and once it is gone the next word moves it on" bash -c "grep -qx 'gate.sh v3 status SCHWINGNET=$SN' '$JOBS_CALLS'"
 job "schwingnet leaks" "${LINE_ARGS[@]}"
 t "a word gate.sh refuses keeps its answer, 64" bash -c "[ '$RC' = 64 ]" && t "  and says so" has '^HPCW-GRID-GATE schwingnet leaks failed 64$'
 chmod o+w "$SN/grid"; : > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"

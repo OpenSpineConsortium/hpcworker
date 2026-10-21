@@ -74,7 +74,8 @@
 #   promoter start                 the same start at the head of that repository's main, which gh reads
 #                                  here (the promoter takes later code only by its own self-update rule)
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
-#                                  origin's main as update does here, then its grid/gate.sh WORD [ID]:
+#                                  origin's main as update does here (not while grid/logs/HOLD stands, a
+#                                  long run's mark), then its grid/gate.sh WORD [ID]:
 #                                  start, status, leaks, v1, latency or stop, or fetch with one id of
 #                                  lower-case letters, digits and _; gate.sh checks both again against its
 #                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
@@ -331,6 +332,10 @@ schwingnet() { # WORD [ID]
     out=$( umask 077; env -i "${JE[@]}" GIT_TERMINAL_PROMPT=0 gh repo clone "$SCHWINGNET_REPO" "$S" -- --quiet --branch main < /dev/null 2>&1 ) \
       || { note "$WORD" "failed (clone)"; printf '%s\n' "$out" | tail -3; echo "HPCW-GRID-GATE schwingnet failed: gh could not clone $SCHWINGNET_REPO"; return 1; }
     echo "HPCW-GRID-GATE schwingnet cloned $SCHWINGNET_REPO into $S"
+  elif [ -f "$S/grid/logs/HOLD" ] && [ ! -L "$S/grid/logs/HOLD" ]; then
+    # a long run (grid/v1-driver.sbatch) records its commit and runs later steps from this checkout, so
+    # while its HOLD stands the checkout stays where it is; gate.sh clears a HOLD whose job has gone
+    echo "HPCW-GRID-GATE schwingnet checkout held by grid/logs/HOLD: $(head -c 200 "$S/grid/logs/HOLD" | head -1 | tr -cd 'A-Za-z0-9 ._:-')"
   else
     ff_pull "$S" "schwingnet pull" || return $?
   fi
