@@ -50,8 +50,8 @@
 #                                  framework 23: what that job printed, cleaned (accounts.sh acct_clean)
 #   update                         this clone fast-forwarded to its origin's main (below)
 #   promoter status | start | stop spine-datasets' promoter chain (below)
-#   schwingnet status | pull | xray-chain
-#                                  the SchwingNet checkout's X-ray chain (below)
+#   schwingnet start | status | leaks | v1 | latency | stop | fetch ID
+#                                  SchwingNet's own grid/gate.sh, at its main (below)
 # N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
 # copy's rule too) and then prints the list as one line "HPCW-ACCOUNTS-JSON {...}". Words that only
 # read or write files have a floor of 3 seconds of their own; login and usage, which queue one job,
@@ -73,10 +73,13 @@
 #                                  from <lab root>/spine-datasets-promoter/code, where the chain keeps it
 #   promoter start                 the same start at the head of that repository's main, which gh reads
 #                                  here (the promoter takes later code only by its own self-update rule)
-#   schwingnet pull                ~/SchwingNet fast-forwarded to its origin's main, as update does here
-#   schwingnet xray-chain          grid/run-xray-chain.sh there: every open set, never the credentialed
-#                                  list, which stays the owner's own, its budget checked as it checks it
-#   schwingnet status              the account's jobs in squeue and the chain's grid/LAST_RUN.txt
+#   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
+#                                  origin's main as update does here (not while grid/logs/HOLD stands, a
+#                                  long run's mark), then its grid/gate.sh WORD [ID]:
+#                                  start, status, leaks, v1, latency or stop, or fetch with one id of
+#                                  lower-case letters, digits and _; gate.sh checks both again against its
+#                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
+#                                  answers 64 for a word it refuses and 75 while another of its words runs
 # Each folder and script they run is held to the clone's rule: this account's own, written by it alone.
 # The status words have the 3 second floor; the others queue jobs or run git and keep the minute.
 #
@@ -199,7 +202,7 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
-JOBS_RE='^(update|promoter (status|start|stop)|schwingnet (status|pull|xray-chain))$'
+JOBS_RE='^(update|promoter (status|start|stop)|schwingnet (start|status|leaks|v1|latency|stop|fetch [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -265,9 +268,18 @@ update_clone() {
   chmod -R go-w "$CLONE/tools" "$CLONE/framework" 2>/dev/null
   echo "HPCW-GRID-GATE framework $(tr -cd '0-9' < "$CLONE/framework/VERSION" 2>/dev/null | head -c 6)"
 }
-# the lab's root on the volume, where the promoter keeps its folder (Wayne State's layout, the only
-# site these jobs exist at); HPCW_LAB_ROOT is for the tests, since sshd passes a client no such name
-LAB_ROOT="${HPCW_LAB_ROOT:-/rs/rs_grp_oschome/$(id -un)}"
+# the lab's root on the volume, where the promoter keeps its folder: the folder above the site
+# profile's shared_state_dir, read as grid_runner.sh reads the profile; HPCW_LAB_ROOT is for the tests,
+# since sshd passes a client no such name
+lab_root() {
+  local d FW="$CLONE/framework"
+  [ -n "${HPCW_LAB_ROOT:-}" ] && { printf '%s\n' "$HPCW_LAB_ROOT"; return 0; }
+  [ -n "$SITE" ] && [ -f "$FW/profiles/$SITE.json" ] || return 1
+  d=$( LIB="$FW/lib" PROFILES="$FW/profiles"; . "$FW/lib/profile_sh.sh" && hpcw_prof_awk get "$FW/profiles/$SITE.json" shared_state_dir ) || return 1
+  [[ "$d" == /?* ]] || return 1
+  dirname "$d"
+}
+LAB_ROOT=$(lab_root) || LAB_ROOT=""
 PROMOTER_DIR="$LAB_ROOT/spine-datasets-promoter"
 PROMOTER_REPO=OpenSpineConsortium/spine-datasets
 SCHWINGNET_DIR="$HOME/SchwingNet"
@@ -292,6 +304,7 @@ gh_on_path() {
 }
 promoter() { # status|start|stop
   local script="$PROMOTER_DIR/code/promote.sh" sha rc out
+  [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE promoter failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
   job_env
   if [ "$1" = start ]; then
     gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE promoter failed: gh is not on this account's path"; return 1; }
@@ -309,27 +322,32 @@ promoter() { # status|start|stop
   else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE promoter $1 failed $rc"; fi
   return $rc
 }
-schwingnet() { # status|pull|xray-chain
-  local S="$SCHWINGNET_DIR" rc
-  held "$S" "$S/grid" || { note "$WORD" "refused (copy)"; return 126; }
+SCHWINGNET_REPO=OpenSpineConsortium/SchwingNet
+schwingnet() { # WORD [ID]
+  local S="$SCHWINGNET_DIR" rc out
   job_env
-  case "$1" in
-    pull) ff_pull "$S" "schwingnet pull"; return $?;;
-    status)
-      env -i "${JE[@]}" squeue -u "$(id -un)" -o '%.12i %.24j %.10P %.8T %.10M %R' < /dev/null 2>&1
-      [ -f "$S/grid/LAST_RUN.txt" ] && { echo "== grid/LAST_RUN.txt"; tail -20 "$S/grid/LAST_RUN.txt"; }
-      note "$WORD" "ok"; echo "HPCW-GRID-GATE schwingnet status ok"; return 0;;
-    xray-chain)
-      held "$S/grid/run-xray-chain.sh" || { note "$WORD" "refused (copy)"; return 126; }
-      ( cd "$S" && env -i "${JE[@]}" SCHWINGNET="$S" /bin/bash "$S/grid/run-xray-chain.sh" < /dev/null 2>&1 ); rc=$?
-      if [ $rc = 0 ]; then note "$WORD" "ok"; echo "HPCW-GRID-GATE schwingnet xray-chain ok"
-      else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE schwingnet xray-chain failed $rc"; fi
-      return $rc;;
-  esac
+  if [ ! -e "$S/.git" ]; then
+    [ ! -e "$S" ] || { note "$WORD" "refused (not a clone)"; echo "HPCW-GRID-GATE refused copy: $S is there but is no git clone; move it aside first"; return 126; }
+    gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE schwingnet failed: gh is not on this account's path"; return 1; }
+    out=$( umask 077; env -i "${JE[@]}" GIT_TERMINAL_PROMPT=0 gh repo clone "$SCHWINGNET_REPO" "$S" -- --quiet --branch main < /dev/null 2>&1 ) \
+      || { note "$WORD" "failed (clone)"; printf '%s\n' "$out" | tail -3; echo "HPCW-GRID-GATE schwingnet failed: gh could not clone $SCHWINGNET_REPO"; return 1; }
+    echo "HPCW-GRID-GATE schwingnet cloned $SCHWINGNET_REPO into $S"
+  elif [ -f "$S/grid/logs/HOLD" ] && [ ! -L "$S/grid/logs/HOLD" ]; then
+    # a long run (grid/v1-driver.sbatch) records its commit and runs later steps from this checkout, so
+    # while its HOLD stands the checkout stays where it is; gate.sh clears a HOLD whose job has gone
+    echo "HPCW-GRID-GATE schwingnet checkout held by grid/logs/HOLD: $(head -c 200 "$S/grid/logs/HOLD" | head -1 | tr -cd 'A-Za-z0-9 ._:-')"
+  else
+    ff_pull "$S" "schwingnet pull" || return $?
+  fi
+  held "$S" "$S/grid" "$S/grid/gate.sh" || { note "$WORD" "refused (copy)"; return 126; }
+  ( cd "$S" && env -i "${JE[@]}" SCHWINGNET="$S" /bin/bash "$S/grid/gate.sh" "$@" < /dev/null 2>&1 ) | head -c 200000; rc=${PIPESTATUS[0]}
+  if [ $rc = 0 ]; then note "$WORD" "ok"; echo "HPCW-GRID-GATE schwingnet $1 ok"
+  else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE schwingnet $1 failed $rc"; fi
+  return $rc
 }
 if [ "$KIND" = jobs ]; then
   set -f; J=( $WORD ); set +f
-  case "${J[0]}" in update) update_clone; exit $?;; promoter) promoter "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[1]}"; exit $?;; esac
+  case "${J[0]}" in update) update_clone; exit $?;; promoter) promoter "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[@]:1}"; exit $?;; esac
 fi
 if [ "$KIND" = accounts ]; then
   # the code comes on standard input: one line, read here with a time limit and checked as accounts code checks it
