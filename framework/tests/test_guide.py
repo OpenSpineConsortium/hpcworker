@@ -73,7 +73,7 @@ class GuideRender(GuideBase):
             "at most once every 60 seconds",
             "- Short and test jobs: partition `secp`, QoS `secondary`.",
             "- Long jobs: partition `reqp`, QoS `requeue`; a job there can be stopped and started again",
-            "- GPU jobs: partitions `gmsap` or `gvohp`, in that order of preference.",
+            "- GPU jobs: partitions `gmsap` or `gvohp` or `galhp`, in that order of preference, QoS `gpu`.",
             "`hpcworker job submit --project <project>",
             "name that folder with `-D`",
             "`--dependency=afterany:<id>`",

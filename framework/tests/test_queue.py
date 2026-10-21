@@ -573,18 +573,18 @@ class DiagPartitions(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_a_missing_partition_names_the_rest_once_each(self):
-        # the site profile wants secp, reqp, gmsap and gvohp; gmsap is not there
+        # the site profile wants secp, reqp, gmsap, gvohp and galhp; gmsap and galhp are not there
         rc, out, err = self.g.source("load_profile && diag_partitions", FAKE_SINFO="\n".join(self.SINFO))
-        self.assertEqual(out.splitlines(), ["%-5s %-24s %s" % ("FAIL", "hpcw.partitions", "not in sinfo: gmsap (have: gvohp reqp secp )")], err)
+        self.assertEqual(out.splitlines(), ["%-5s %-24s %s" % ("FAIL", "hpcw.partitions", "not in sinfo: gmsap galhp (have: gvohp reqp secp )")], err)
         self.assertEqual([(a["cmd"], a["argv"]) for a in self.g.argvs()], [("sinfo", SINFO_ARGV)])
 
     def test_every_partition_there(self):
-        rc, out, err = self.g.source("load_profile && diag_partitions", FAKE_SINFO="\n".join(self.SINFO + ["gmsap|7-00:00:00|up|2|idle", "gmsap|7-00:00:00|up|2|mixed"]))
-        self.assertEqual(out.splitlines(), ["%-5s %-24s %s" % ("ok", "hpcw.partitions", "profile partitions exist: secp reqp gmsap gvohp")], err)
+        rc, out, err = self.g.source("load_profile && diag_partitions", FAKE_SINFO="\n".join(self.SINFO + ["gmsap|7-00:00:00|up|2|idle", "gmsap|7-00:00:00|up|2|mixed", "galhp|7-00:00:00|up|1|idle"]))
+        self.assertEqual(out.splitlines(), ["%-5s %-24s %s" % ("ok", "hpcw.partitions", "profile partitions exist: secp reqp gmsap gvohp galhp")], err)
 
     def test_diag_runs_it(self):
         rc, out, err = self.g.run("diag", FAKE_SINFO="\n".join(self.SINFO))
-        self.assertIn("%-5s %-24s %s" % ("FAIL", "hpcw.partitions", "not in sinfo: gmsap (have: gvohp reqp secp )"), out.splitlines(), (out, err))
+        self.assertIn("%-5s %-24s %s" % ("FAIL", "hpcw.partitions", "not in sinfo: gmsap galhp (have: gvohp reqp secp )"), out.splitlines(), (out, err))
 
 
 class Arithmetic(unittest.TestCase):
