@@ -83,6 +83,34 @@ class JobTest(unittest.TestCase):
         self.assertEqual([(j["name"], j["state"]) for j in doc["jobs"]], [("one", "COMPLETED"), ("two", "PENDING")])
         self.assertEqual(sum(1 for c in self.g.calls() if c.startswith("squeue ")), 2)
 
+    def test_an_array_logs_per_task_and_counts_its_tasks(self):
+        rc, out, err = self.submit(name="scan", extra="--array 0-63%32 --after 41:ok")
+        self.assertEqual(rc, 0, (out, err))
+        call = self.sbatch_calls()[-1]
+        self.assertIn("--array=0-63%32", call)
+        self.assertIn("/jobs/demo/logs/scan_%A_%a.out", call)
+        jid = out.split()[2]
+        self.assertTrue(out.rstrip().endswith("scan_%s_%%a.out" % jid), out)
+        with open(self.ledger) as fh:
+            row = fh.readline().rstrip("\n").split("\t")
+        self.assertEqual(row[9:], ["0-63%32", "41"])
+        jobs = os.path.join(self.g.sched, "jobs")
+        open(jobs, "w").close()
+        sacct = "\n".join(["%s_0|COMPLETED|0:0|asx1" % jid, "%s_1|RUNNING|0:0|asx2" % jid, "%s_[2-63%%32]|PENDING|0:0|None assigned" % jid])
+        rc, out, err = self.g.run("job status --project demo --json", FAKE_SACCT=sacct)
+        self.assertEqual(rc, 0, (out, err))
+        import json
+        job = json.loads(out)["jobs"][0]
+        self.assertEqual((job["state"], job["array"], job["after"]), ("ARRAY COMPLETED:1,RUNNING:1,PENDING:62", "0-63%32", "41"))
+        rc, out, err = self.g.run("job log --project demo %s" % jid)
+        self.assertNotEqual(rc, 0)
+        with open(os.path.join(self.g.state, "jobs", "demo", "logs", "scan_%s_7.out" % jid), "w") as fh:
+            fh.write("task seven\n")
+        rc, out, err = self.g.run("job log --project demo %s --task 7" % jid)
+        self.assertEqual(out, "task seven\n")
+        for bad in ("0-", "a", "1%0", "0-63%32%2", "1;2"):
+            self.assertNotEqual(self.submit(name="x", extra="--array '%s'" % bad)[0], 0, bad)
+
     def test_status_with_no_jobs(self):
         rc, out, err = self.g.run("job status --project demo")
         self.assertEqual((rc, out.strip()), (0, "HPCW-JOB none for demo"))

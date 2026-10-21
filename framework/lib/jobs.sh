@@ -1,19 +1,23 @@
 # shellcheck shell=bash
-# ---- framework 24: the one way a project's batch job reaches the scheduler ---------------------------
+# ---- framework 25: the one way a project's batch job reaches the scheduler ---------------------------
 # Sourced by bin/hpcworker after lib/adapters/common.sh. Bash 4.2 (EL7), coreutils, grep, sed and awk;
 # nothing here runs python3 or a container on the login node, and each verb is one scheduler call.
 #
 #   hpcworker job submit --project P --name N --class cpu|batch|gpu [--time T] [--cpus C] [--mem M]
-#                        [--gpus G] [--after ID[:ok|any]]... [--dir D] [--check] -- SCRIPT [ARG...]
+#                        [--gpus G] [--after ID[:ok|any]]... [--array SPEC] [--dir D] [--check] -- SCRIPT [ARG...]
 #                     SCRIPT queued with the partition, QoS, account and GPU request the site profile
 #                     gives the class, its output (stdout and stderr together) under the project's log
 #                     folder, and one line in the project's ledger; prints "HPCW-JOB submitted ..."
 #                     or "HPCW-JOB refused ...". --check asks the scheduler whether it would take the
-#                     job (sbatch --test-only) and queues nothing.
+#                     job (sbatch --test-only) and queues nothing. The caller's environment reaches the
+#                     job as sbatch's default export gives it (the gate's own variables taken out);
+#                     nothing of it is written to the ledger. --array queues a Slurm array, each
+#                     task's log <name>_<id>_<task>.out; --after adds --kill-on-invalid-dep=yes.
 #   hpcworker job status --project P [--last K] [--json]
 #                     the project's last K jobs from its ledger (default 40) with their state, node and
-#                     exit code: one squeue for those it still holds, one sacct for those it has ended
-#   hpcworker job log --project P ID [--lines N]
+#                     exit code: one squeue for those it still holds, one sacct for those it has ended;
+#                     an array's state is ARRAY and its tasks counted by state (ARRAY RUNNING:2,PENDING:61)
+#   hpcworker job log --project P ID [--task N] [--lines N]
 #                     the end of a ledger job's output, control characters taken out
 #   hpcworker job cancel --project P ID...|--all
 #                     the ledger's jobs cancelled in one scancel; a job the ledger does not name never is
@@ -26,16 +30,17 @@
 # line over a script's #SBATCH lines, so whatever an older script still carries, the profile wins.
 #
 # The ledger is <shared_state_dir>/jobs/<project>/jobs.tsv, one line per job: id, name, class,
-# partition, qos, submitted (UTC), log, folder, script. Logs are <shared_state_dir>/jobs/<project>/logs/
+# partition, qos, submitted (UTC), log, folder, script, array spec, the ids it waits on. Logs are <shared_state_dir>/jobs/<project>/logs/
 # <name>_<id>.out. Only the account itself writes there (umask 077 folders).
 
 HPCW_JOB_PROJECT_RE='^[a-z0-9][a-z0-9_-]{0,31}$'
 HPCW_JOB_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$'
 HPCW_JOB_TIME_RE='^([0-9]{1,2}-)?[0-9]{1,3}:[0-5][0-9]:[0-5][0-9]$'
 HPCW_JOB_MEM_RE='^[1-9][0-9]{0,5}[KMGT]?$'
+HPCW_JOB_ARRAY_RE='^[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?(,[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?){0,31}(%[1-9][0-9]{0,4})?$'
 
 job_usage() {
-  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--time T --cpus C --mem M --gpus G --after ID[:ok|any] --dir D --check] -- SCRIPT [ARG...]
+  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--time T --cpus C --mem M --gpus G --after ID[:ok|any] --array SPEC --dir D --check] -- SCRIPT [ARG...]
        hpcworker job status --project P [--last K] [--json]
        hpcworker job log --project P ID [--lines N]
        hpcworker job cancel --project P ID...|--all"
@@ -76,10 +81,13 @@ job_after_option() { # ID[:ok|any]... -> --dependency=afterany:1,afterok:2 ; exi
   return 0
 }
 
+job_after_ids() { # ID[:ok|any]... -> the ids alone, comma-joined, for the ledger
+  local a out=""; for a in "$@"; do out="${out:+$out,}${a%%:*}"; done; printf '%s' "$out"
+}
 job_clean() { tr -d '\000-\010\013\014\016-\037\177' | tr '\t' ' '; }
 
 job_submit() {
-  local project="" name="" class="" time="04:00:00" cpus=1 mem=4G gpus=1 dir="$PWD" check=0 afters=()
+  local project="" name="" class="" time="04:00:00" cpus=1 mem=4G gpus=1 dir="$PWD" check=0 afters=() array=""
   while [ $# -gt 0 ]; do case "$1" in
     --project) project="${2:-}"; shift 2 || job_usage;;
     --name) name="${2:-}"; shift 2 || job_usage;;
@@ -89,6 +97,7 @@ job_submit() {
     --mem) mem="${2:-}"; shift 2 || job_usage;;
     --gpus) gpus="${2:-}"; shift 2 || job_usage;;
     --after) afters+=("${2:-}"); shift 2 || job_usage;;
+    --array) array="${2:-}"; shift 2 || job_usage;;
     --dir) dir="${2:-}"; shift 2 || job_usage;;
     --check) check=1; shift;;
     --) shift; break;;
@@ -101,6 +110,7 @@ job_submit() {
   [[ "$cpus" =~ ^[1-9][0-9]{0,2}$ ]] || die "--cpus is a whole number from 1 to 999"
   [[ "$mem" =~ $HPCW_JOB_MEM_RE ]] || die "--mem is a number with K, M, G or T after it"
   [[ "$gpus" =~ ^[1-8]$ ]] || die "--gpus is 1 to 8"
+  [ -z "$array" ] || [[ "$array" =~ $HPCW_JOB_ARRAY_RE ]] || die "--array is task numbers and ranges (0-63, 1,3,5-9, 0-99:2) with an optional %N limit"
   case "$dir" in /*) [ -d "$dir" ] || die "--dir $dir is not a folder";; *) die "--dir must be an absolute path";; esac
   [ -n "$script" ] || job_usage
   case "$script" in /*) ;; *) script="$dir/$script";; esac
@@ -120,8 +130,10 @@ job_submit() {
   # TERM two minutes before the wall time, to the batch shell, so a script's trap can save its place
   # (the same signal Beethoven for VS Code's workers take)
   args+=("--signal=B:TERM@120")
+  # an array's tasks each write their own log: %A the array's id, %a the task's number
+  local pat="${name}_%j.out"; [ -n "$array" ] && { args+=("--array=$array"); pat="${name}_%A_%a.out"; }
   args+=("--job-name=$project-$name" "--time=$time" "--cpus-per-task=$cpus" "--mem=$mem" -D "$dir"
-         "--output=$jd/logs/${name}_%j.out" "--error=$jd/logs/${name}_%j.out")
+         "--output=$jd/logs/$pat" "--error=$jd/logs/$pat")
   local part qos; part=$(printf '%s\n' "$opts" | sed -n 's/^--partition=//p'); qos=$(printf '%s\n' "$opts" | sed -n 's/^--qos=//p')
   if [ $check = 1 ]; then
     local t rc=0; t=$(unset HPCW_GATE HPCW_GATE_SLOT SSH_ORIGINAL_COMMAND; sbatch --test-only "${args[@]}" "$script" "$@" 2>&1) || rc=$?
@@ -138,8 +150,8 @@ job_submit() {
     out=$(printf '%s' "$out" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
     echo "HPCW-JOB refused $name $part/${qos:-none}: ${out:-the scheduler gave no reason}"; return 1
   fi
-  local log="$jd/logs/${name}_$id.out"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$class" "$part" "${qos:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$log" "$dir" "$script" >> "$jd/jobs.tsv"
+  local log="$jd/logs/${name}_$id.out"; [ -n "$array" ] && log="$jd/logs/${name}_${id}_%a.out"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$class" "$part" "${qos:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$log" "$dir" "$script" "$array" "$(job_after_ids "${afters[@]}")" >> "$jd/jobs.tsv"
   echo "HPCW-JOB submitted $id $name $part/${qos:-none} log $log"
 }
 
@@ -177,14 +189,21 @@ job_status() {
     function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/[\001-\037]/, " ", s); return "\"" s "\"" }
     BEGIN {
       n = split(ENVIRON["LIVE"], l, "\n"); for (i = 1; i <= n; i++) { split(l[i], f, "|"); if (f[2] != "" && f[2] != "UNKNOWN") { st[f[1]] = f[2]; nd[f[1]] = f[3] } }
-      n = split(ENVIRON["ENDED"], l, "\n"); for (i = 1; i <= n; i++) { split(l[i], f, "|"); if (f[1] != "" && !(f[1] in st)) { s = f[2]; sub(/ .*/, "", s); st[f[1]] = s; ex[f[1]] = f[3]; nd[f[1]] = f[4] } }
+      n = split(ENVIRON["ENDED"], l, "\n"); for (i = 1; i <= n; i++) { split(l[i], f, "|"); if (f[1] == "") continue; s = f[2]; sub(/ .*/, "", s)
+        # an array task (123_4, or 123_[5-63%32] while it waits): counted under the array, by state
+        if (f[1] ~ /^[0-9]+_/) { b = f[1]; sub(/_.*/, "", b); t = f[1]; sub(/^[0-9]+_/, "", t); w = 1
+          if (t ~ /^\[/) { w = 0; gsub(/[\[\]]|%.*/, "", t); m = split(t, rr, ","); for (j = 1; j <= m; j++) { if (split(rr[j], ab, "-") == 2) w += ab[2] - ab[1] + 1; else w++ } }
+          if (!((b, s) in cnt)) order[b] = order[b] " " s; cnt[b, s] += w; continue }
+        if (!(f[1] in st)) { st[f[1]] = s; ex[f[1]] = f[3]; nd[f[1]] = f[4] } }
       if (ENVIRON["JSON"] == "1") printf "{\"project\":%s,\"jobs\":[", esc(ENVIRON["PROJECT"])
     }
+    function tasks(b,   o, k, i, out, ws) { o = order[b]; k = split(o, ws, " "); out = ""; for (i = 1; i <= k; i++) if (ws[i] != "") out = out (out == "" ? "" : ",") ws[i] ":" cnt[b, ws[i]]; return out }
     NF >= 7 {
       id = $1; s = (id in st) ? st[id] : "ENDED"
+      if ($10 != "") s = (id in order) ? "ARRAY " tasks(id) : (id in st ? st[id] : "ARRAY ENDED")
       if (ENVIRON["JSON"] == "1") {
-        printf "%s{\"id\":%s,\"name\":%s,\"class\":%s,\"partition\":%s,\"qos\":%s,\"submitted\":%s,\"state\":%s,\"node\":%s,\"exit\":%s,\"log\":%s}",
-          (k++ ? "," : ""), esc(id), esc($2), esc($3), esc($4), esc($5), esc($6), esc(s), esc(nd[id]), esc(ex[id]), esc($7)
+        printf "%s{\"id\":%s,\"name\":%s,\"class\":%s,\"partition\":%s,\"qos\":%s,\"submitted\":%s,\"state\":%s,\"node\":%s,\"exit\":%s,\"log\":%s,\"array\":%s,\"after\":%s}",
+          (k++ ? "," : ""), esc(id), esc($2), esc($3), esc($4), esc($5), esc($6), esc(s), esc(nd[id]), esc(ex[id]), esc($7), esc($10), esc($11)
       } else printf "HPCW-JOB %s %s %s%s%s log %s\n", id, $2, s, (nd[id] != "" && nd[id] != "None assigned" ? " on " nd[id] : ""), (ex[id] != "" ? " exit " ex[id] : ""), $7
     }
     END { if (ENVIRON["JSON"] == "1") print "]}" }'
@@ -196,10 +215,11 @@ job_known() { # PROJECT ID -> the ledger line of ID, nothing when the ledger doe
 }
 
 job_log() {
-  local project="" id="" lines=80
+  local project="" id="" lines=80 task=""
   while [ $# -gt 0 ]; do case "$1" in
     --project) project="${2:-}"; shift 2 || job_usage;;
     --lines) lines="${2:-}"; shift 2 || job_usage;;
+    --task) task="${2:-}"; shift 2 || job_usage;;
     -*) job_usage;;
     *) [ -z "$id" ] || job_usage; id="$1"; shift;;
   esac; done
@@ -210,6 +230,9 @@ job_log() {
   local line log; line=$(job_known "$project" "$id")
   [ -n "$line" ] || die "job $id is not in $project's ledger"
   log=$(printf '%s\n' "$line" | cut -f7)
+  case "$log" in *%a.out)
+    [[ "$task" =~ ^[0-9]{1,7}$ ]] || die "job $id is an array: name its task with --task N"
+    log="${log%\%a.out}$task.out";; esac
   [ -f "$log" ] || { echo "HPCW-JOB no output yet for $id ($log)"; return 0; }
   tail -n "$lines" "$log" | tr -d '\r' | tr -d '\000-\010\013\014\016-\037\177'
 }
