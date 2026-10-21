@@ -37,7 +37,20 @@ class Reader(unittest.TestCase):
         w = A.who_of("2", key)
         self.assertEqual((w["signed_in"], w["sign_in"]), (False, "other"))
         self.assertNotIn("email", w, "nothing of a sign-in Beethoven never runs on is kept")
-        self.assertEqual(A.who_of("2", "not json")["sign_in"], "none")
+        self.assertEqual(A.who_of("2", json.dumps({"loggedIn": False}))["sign_in"], "none")
+        # a check that got no answer (the container failed, a refused command) says so, never "signed out"
+        w = A.who_of("2", "bash: /x/bin/hpcworker: Permission denied\n")
+        self.assertEqual((w["signed_in"], w["sign_in"]), (None, "unread"))
+        self.assertIn("Permission denied", w["error"])
+        self.assertEqual(A.who_of("2", "")["sign_in"], "unread")
+
+    def test_jobs_run_this_copy_through_bash(self):
+        # a clone of the repository carries bin/hpcworker as 0644: run directly from a job it is refused
+        import re
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "..", "lib", "accounts.sh"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertEqual(re.findall(r'(?<!/bin/bash\}" )"\$SELF" _exec', src), [])
 
     def test_use_reads_the_last_event_with_windows(self):
         text = "\n".join(['{"type":"system"}', event(used=0.2), event(used=0.55), '{"type":"result","result":"ok"}'])
