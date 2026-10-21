@@ -428,6 +428,7 @@ cat > "$JB/gh" <<EOF2
 echo "gh \$*" >> "$JOBS_CALLS"
 case "\$*" in
   *commits/main*) echo $SHA;;
+  "repo clone OpenSpineConsortium/SchwingNet "*) git clone -q "$T/sn-origin.git" "\$4"; exit \$?;;
   *contents/grid/promote.sh?ref=$SHA*) printf '#!/bin/bash\necho "promote.sh \$*" >> "$JOBS_CALLS"\necho "promote said \$1"\n';;
   *) exit 1;;
 esac
@@ -450,19 +451,32 @@ chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE
 t "a promote.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q promote.sh '$JOBS_CALLS'"
 chmod g-w "$P/code/promote.sh"
 
-SN="$HOME/SchwingNet"; mkdir -p "$SN/grid"
-printf '#!/bin/bash\necho "xray-chain $* SCHWINGNET=$SCHWINGNET" >> "%s"\necho submitted\n' "$JOBS_CALLS" > "$SN/grid/run-xray-chain.sh"
-echo "job 41 42 43" > "$SN/grid/LAST_RUN.txt"
-: > "$JOBS_CALLS"; job "schwingnet xray-chain" "${LINE_ARGS[@]}"
-t "schwingnet xray-chain runs grid/run-xray-chain.sh with no argument" bash -c "grep -qx 'xray-chain  SCHWINGNET=$SN' '$JOBS_CALLS'"
-t "  and says so" has '^HPCW-GRID-GATE schwingnet xray-chain ok$'
-job "schwingnet status" "${LINE_ARGS[@]}"
-t "schwingnet status reads squeue and LAST_RUN.txt" bash -c "grep -q '^squeue -u' '$JOBS_CALLS'" && t "  showing the last run" has '^job 41 42 43$'
-chmod o+w "$SN/grid"; : > "$JOBS_CALLS"; job "schwingnet xray-chain" "${LINE_ARGS[@]}"
-t "a SchwingNet grid/ others may write is refused and nothing runs" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+SN="$HOME/SchwingNet"; SNE=(env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t)
+git init -q -b main "$T/snwork" && mkdir -p "$T/snwork/grid"
+printf '#!/bin/bash\necho "gate.sh v1 $* SCHWINGNET=$SCHWINGNET" >> "%s"\necho "gate said $1"\n[ "$1" = leaks ] && exit 64\nexit 0\n' "$JOBS_CALLS" > "$T/snwork/grid/gate.sh"
+"${SNE[@]}" git -C "$T/snwork" add grid && "${SNE[@]}" git -C "$T/snwork" commit -q -m one && git clone -q --bare "$T/snwork" "$T/sn-origin.git"
+git -C "$T/snwork" remote add origin "$T/sn-origin.git"
+: > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"
+t "schwingnet with no ~/SchwingNet clones it with gh" bash -c "grep -q '^gh repo clone OpenSpineConsortium/SchwingNet $SN' '$JOBS_CALLS' && [ -d '$SN/.git' ]"
+t "  kept to the account" bash -c "[ -z \"\$(find '$SN' -maxdepth 0 -perm -g+w -o -maxdepth 0 -perm -o+w)\" ]"
+t "  then runs grid/gate.sh with the word" bash -c "grep -qx 'gate.sh v1 status SCHWINGNET=$SN' '$JOBS_CALLS'"
+t "  shows its output" has '^gate said status$' && t "  and says so" has '^HPCW-GRID-GATE schwingnet status ok$'
+: > "$JOBS_CALLS"; job "schwingnet fetch vindr_pcxr" "${LINE_ARGS[@]}"
+t "schwingnet fetch passes its one id to gate.sh" bash -c "grep -qx 'gate.sh v1 fetch vindr_pcxr SCHWINGNET=$SN' '$JOBS_CALLS' && ! grep -q 'repo clone' '$JOBS_CALLS'"
+sed -i 's/gate.sh v1/gate.sh v2/' "$T/snwork/grid/gate.sh" && "${SNE[@]}" git -C "$T/snwork" commit -q -am two && git -C "$T/snwork" push -q origin main
+: > "$JOBS_CALLS"; job "schwingnet start" "${LINE_ARGS[@]}"
+t "schwingnet fast-forwards the clone to main before it runs gate.sh" bash -c "grep -qx 'gate.sh v2 start SCHWINGNET=$SN' '$JOBS_CALLS'"
+t "  saying how far" has '^HPCW-GRID-GATE schwingnet pull ok '
+job "schwingnet leaks" "${LINE_ARGS[@]}"
+t "a word gate.sh refuses keeps its answer, 64" bash -c "[ '$RC' = 64 ]" && t "  and says so" has '^HPCW-GRID-GATE schwingnet leaks failed 64$'
+chmod o+w "$SN/grid"; : > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"
+t "a SchwingNet grid/ others may write is refused and gate.sh never runs" bash -c "[ '$RC' = 126 ] && ! grep -q gate.sh '$JOBS_CALLS'"
 chmod o-w "$SN/grid"
+mv "$SN" "$SN.away"; mkdir -m 700 "$SN"; : > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"
+t "a ~/SchwingNet that is no clone is refused, nothing cloned over it" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+rmdir "$SN"; mv "$SN.away" "$SN"
 
-for w in 'promoter start abc' 'promoter restart' 'schwingnet xray-chain --credentialed' 'schwingnet pull now' 'update now' 'update;id' 'schwingnet'; do
+for w in 'promoter start abc' 'promoter restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
