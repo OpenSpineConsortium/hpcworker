@@ -79,7 +79,9 @@
 #                                  start, status, leaks, v1, latency, stop, prior, chain_eval or samples, or fetch
 #                                  or census with one id of lower-case letters, digits and _; gate.sh checks both again against its
 #                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
-#                                  answers 64 for a word it refuses and 75 while another of its words runs
+#                                  answers 64 for a word it refuses and 75 while another of its words runs;
+#                                  HPCWORKER names this clone's framework/bin/hpcworker, whose `job submit`
+#                                  queues its jobs (run through bash: the clone keeps it 0644)
 # Each folder and script they run is held to the clone's rule: this account's own, written by it alone.
 # The status words have the 3 second floor; the others queue jobs or run git and keep the minute.
 #
@@ -340,7 +342,7 @@ schwingnet() { # WORD [ID]
     ff_pull "$S" "schwingnet pull" || return $?
   fi
   held "$S" "$S/grid" "$S/grid/gate.sh" || { note "$WORD" "refused (copy)"; return 126; }
-  ( cd "$S" && env -i "${JE[@]}" SCHWINGNET="$S" /bin/bash "$S/grid/gate.sh" "$@" < /dev/null 2>&1 ) | head -c 200000; rc=${PIPESTATUS[0]}
+  ( cd "$S" && env -i "${JE[@]}" SCHWINGNET="$S" HPCWORKER="$CLONE/framework/bin/hpcworker" /bin/bash "$S/grid/gate.sh" "$@" < /dev/null 2>&1 ) | head -c 200000; rc=${PIPESTATUS[0]}
   if [ $rc = 0 ]; then note "$WORD" "ok"; echo "HPCW-GRID-GATE schwingnet $1 ok"
   else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE schwingnet $1 failed $rc"; fi
   return $rc

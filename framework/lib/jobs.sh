@@ -124,14 +124,15 @@ job_submit() {
          "--output=$jd/logs/${name}_%j.out" "--error=$jd/logs/${name}_%j.out")
   local part qos; part=$(printf '%s\n' "$opts" | sed -n 's/^--partition=//p'); qos=$(printf '%s\n' "$opts" | sed -n 's/^--qos=//p')
   if [ $check = 1 ]; then
-    local t rc=0; t=$(sbatch --test-only "${args[@]}" "$script" "$@" 2>&1) || rc=$?
+    local t rc=0; t=$(unset HPCW_GATE HPCW_GATE_SLOT SSH_ORIGINAL_COMMAND; sbatch --test-only "${args[@]}" "$script" "$@" 2>&1) || rc=$?
     t=$(printf '%s' "$t" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
     if [ $rc = 0 ]; then echo "HPCW-JOB would-run $name $part/${qos:-none}: $t"; return 0; fi
     echo "HPCW-JOB refused $name $part/${qos:-none}: $t"; return 1
   fi
   local id out rc=0
   # sbatch itself rather than adapter_submit, which puts the script last and so takes no arguments for it
-  out=$(sbatch --parsable "${args[@]}" "$script" "$@" 2>&1) || rc=$?
+  # nothing of a gate or an ssh command rides into the job (sbatch exports the whole environment)
+  out=$(unset HPCW_GATE HPCW_GATE_SLOT SSH_ORIGINAL_COMMAND; sbatch --parsable "${args[@]}" "$script" "$@" 2>&1) || rc=$?
   id=$(printf '%s\n' "$out" | slurm_parse_submit 2>/dev/null) || id=""
   if [ $rc != 0 ] || [ -z "$id" ]; then
     out=$(printf '%s' "$out" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
