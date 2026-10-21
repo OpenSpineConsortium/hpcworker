@@ -419,5 +419,78 @@ t "--gate-setup not typed at a terminal is refused, nothing asked of gh" bash -c
 gh_reset; setup_nosite() { PATH="$G/bin:$PATH" HPCW_HOST_KEY_DIR="$HK" typed --gate-setup --repo "$GH_REPO" --runner-dir "$RD"; }; setup_nosite
 t "--gate-setup without --site is refused" bash -c "[ '$RC' != 0 ] && [ ! -s '$G/calls' ]"
 
+echo "== the job words: update, the promoter and SchwingNet (the owner's choice of 2026-10-21)"
+JB="$T/jobbin"; mkdir -p "$JB"; JOBS_CALLS="$T/jobs.calls"; : > "$JOBS_CALLS"
+SHA=0123456789abcdef0123456789abcdef01234567
+for c in sbatch squeue; do printf '#!/bin/bash\necho "%s $*" >> "%s"\necho "%s answered"\n' "$c" "$JOBS_CALLS" "$c" > "$JB/$c"; done
+cat > "$JB/gh" <<EOF2
+#!/bin/bash
+echo "gh \$*" >> "$JOBS_CALLS"
+case "\$*" in
+  *commits/main*) echo $SHA;;
+  *contents/grid/promote.sh?ref=$SHA*) printf '#!/bin/bash\necho "promote.sh \$*" >> "$JOBS_CALLS"\necho "promote said \$1"\n';;
+  *) exit 1;;
+esac
+EOF2
+chmod 755 "$JB"/*
+export HPCW_LAB_ROOT="$T/lab"; mkdir -p "$HPCW_LAB_ROOT"; chmod 755 "$HPCW_LAB_ROOT"
+P="$HPCW_LAB_ROOT/spine-datasets-promoter"
+job() { rm -f "$CH/jobs.last" "$CH/jobs.sched"; PATH="$JB:$PATH" gate "$@"; }
+
+job "promoter start" "${LINE_ARGS[@]}"
+t "promoter start reads main's head with gh and fetches promote.sh at it" bash -c "grep -q 'commits/main' '$JOBS_CALLS' && grep -q 'contents/grid/promote.sh?ref=$SHA' '$JOBS_CALLS' && [ -f '$P/code/promote.sh' ]"
+t "  then runs promote.sh start at that commit" bash -c "grep -qx 'promote.sh start $SHA' '$JOBS_CALLS'"
+t "  and says so" has "^HPCW-GRID-GATE promoter start ok at ${SHA:0:12}$"
+t "  its folder kept to the account" bash -c "[ -z \"\$(find '$P/code' -maxdepth 0 -perm -g+w)\" ]"
+job "promoter status" "${LINE_ARGS[@]}"
+t "promoter status runs promote.sh status and shows its output" bash -c "grep -qx 'promote.sh status' '$JOBS_CALLS'" && t "  its output" has '^promote said status$'
+job "promoter stop" "${LINE_ARGS[@]}"
+t "promoter stop runs promote.sh stop" bash -c "grep -qx 'promote.sh stop' '$JOBS_CALLS'"
+chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE_ARGS[@]}"
+t "a promote.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q promote.sh '$JOBS_CALLS'"
+chmod g-w "$P/code/promote.sh"
+
+SN="$HOME/SchwingNet"; mkdir -p "$SN/grid"
+printf '#!/bin/bash\necho "xray-chain $* SCHWINGNET=$SCHWINGNET" >> "%s"\necho submitted\n' "$JOBS_CALLS" > "$SN/grid/run-xray-chain.sh"
+echo "job 41 42 43" > "$SN/grid/LAST_RUN.txt"
+: > "$JOBS_CALLS"; job "schwingnet xray-chain" "${LINE_ARGS[@]}"
+t "schwingnet xray-chain runs grid/run-xray-chain.sh with no argument" bash -c "grep -qx 'xray-chain  SCHWINGNET=$SN' '$JOBS_CALLS'"
+t "  and says so" has '^HPCW-GRID-GATE schwingnet xray-chain ok$'
+job "schwingnet status" "${LINE_ARGS[@]}"
+t "schwingnet status reads squeue and LAST_RUN.txt" bash -c "grep -q '^squeue -u' '$JOBS_CALLS'" && t "  showing the last run" has '^job 41 42 43$'
+chmod o+w "$SN/grid"; : > "$JOBS_CALLS"; job "schwingnet xray-chain" "${LINE_ARGS[@]}"
+t "a SchwingNet grid/ others may write is refused and nothing runs" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+chmod o-w "$SN/grid"
+
+for w in 'promoter start abc' 'promoter restart' 'schwingnet xray-chain --credentialed' 'schwingnet pull now' 'update now' 'update;id' 'schwingnet'; do
+  : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
+  t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+done
+
+# update: the stub clone made a git checkout of an origin in the test folder
+GE=(env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t)
+"${GE[@]}" git -C "$S" init -q -b main && "${GE[@]}" git -C "$S" add tools framework && "${GE[@]}" git -C "$S" commit -q -m one
+git clone -q --bare "$S" "$T/origin.git" && git -C "$S" remote add origin "$T/origin.git"
+git clone -q "$T/origin.git" "$T/work" && echo 23 > "$T/work/framework/VERSION" && "${GE[@]}" git -C "$T/work" add framework/VERSION && "${GE[@]}" git -C "$T/work" commit -q -m two && git -C "$T/work" push -q origin main
+chmod -R go-w "$S/tools" "$S/framework"
+job update "${LINE_ARGS[@]}"
+t "update fast-forwards the clone to origin's main" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$S/framework/VERSION')\" = 23 ]"
+t "  and says from where to where, and the framework" has '^HPCW-GRID-GATE update ok [0-9a-f]{12}\.\.[0-9a-f]{12}$' && t "  the framework's version" has '^HPCW-GRID-GATE framework 23$'
+t "  leaving tools/ and framework/ to the account alone" bash -c "[ -z \"\$(find '$S/tools' '$S/framework' -perm -g+w)\" ]"
+job update "${LINE_ARGS[@]}"
+t "update again says the clone is current" has '^HPCW-GRID-GATE update current [0-9a-f]{12}$'
+"${GE[@]}" git -C "$S" commit -q --allow-empty -m local; job update "${LINE_ARGS[@]}"
+git -C "$T/work" commit -q --allow-empty -m three 2>/dev/null || "${GE[@]}" git -C "$T/work" commit -q --allow-empty -m three; git -C "$T/work" push -q origin main
+job update "${LINE_ARGS[@]}"
+t "a clone holding a commit main has not is refused, never merged" bash -c "[ '$RC' = 126 ] && [ \"\$(git -C '$S' log -1 --format=%s)\" = local ]"
+"${GE[@]}" git -C "$S" reset -q --hard HEAD~1; git -C "$S" checkout -q -b other; job update "${LINE_ARGS[@]}"
+t "a clone on another branch is refused" bash -c "[ '$RC' = 126 ]" && t "  saying so" has 'refused branch'
+git -C "$S" checkout -q main; echo 99 > "$S/framework/VERSION"; job update "${LINE_ARGS[@]}"
+t "a clone with changed files is refused" bash -c "[ '$RC' = 126 ] && [ \"\$(cat '$S/framework/VERSION')\" = 99 ]"
+git -C "$S" checkout -q -- framework/VERSION
+KEEP_CLOCK=1 job update "${LINE_ARGS[@]}"; rm -f "$CH/jobs.last"; KEEP_CLOCK=1 PATH="$JB:$PATH" gate update "${LINE_ARGS[@]}"
+t "update keeps the minute" has '^HPCW-GRID-GATE limit: one call a minute'
+unset HPCW_LAB_ROOT
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

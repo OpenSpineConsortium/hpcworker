@@ -48,11 +48,37 @@
 #   accounts stop NAME             that worker stopped
 #   accounts log login N | log usage | log worker NAME
 #                                  framework 23: what that job printed, cleaned (accounts.sh acct_clean)
+#   update                         this clone fast-forwarded to its origin's main (below)
+#   promoter status | start | stop spine-datasets' promoter chain (below)
+#   schwingnet status | pull | xray-chain
+#                                  the SchwingNet checkout's X-ray chain (below)
 # N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
 # copy's rule too) and then prints the list as one line "HPCW-ACCOUNTS-JSON {...}". Words that only
 # read or write files have a floor of 3 seconds of their own; login and usage, which queue one job,
 # keep the minute. This is the one sign-in the grid takes through a gate: the browser key's gate still
 # refuses every sign-in (framework 11), and nothing here passes HPCW_GATE on.
+#
+# The word update keeps this clone at its origin's main without a person at the grid's shell (the
+# owner's choice of 2026-10-21, "Yes, build all of it": Claude sends the grid's commands for him): only
+# while the clone is on main with nothing changed in what git tracks, only by fast-forward, never a
+# merge or a reset, and only to the head of main, which the repository's ruleset lets in only through
+# pull requests whose required checks passed; the grid's CI watcher installs the same head as the lab's
+# shared copy. After the pull it takes group and others' write off tools/ and framework/, as the umask
+# note above asks, so the next word is not refused. It runs git on the login node, as Beethoven's press
+# of the setup does, once a minute at most.
+#
+# The same choice gives the gate the lab's two standing grid jobs, so nobody types them at the grid's
+# shell, each a fixed word with no argument of the client's:
+#   promoter status | stop         grid/promote.sh status or stop of OpenSpineConsortium/spine-datasets,
+#                                  from <lab root>/spine-datasets-promoter/code, where the chain keeps it
+#   promoter start                 the same start at the head of that repository's main, which gh reads
+#                                  here (the promoter takes later code only by its own self-update rule)
+#   schwingnet pull                ~/SchwingNet fast-forwarded to its origin's main, as update does here
+#   schwingnet xray-chain          grid/run-xray-chain.sh there: every open set, never the credentialed
+#                                  list, which stays the owner's own, its budget checked as it checks it
+#   schwingnet status              the account's jobs in squeue and the chain's grid/LAST_RUN.txt
+# Each folder and script they run is held to the clone's rule: this account's own, written by it alone.
+# The status words have the 3 second floor; the others queue jobs or run git and keep the minute.
 #
 #   tools/grid_gate.sh --check-copy [RUNNER_DIR [OWNER-NAME]]
 #                     read only: one line per such finding, then "ok" (0) or "refused" (8)
@@ -173,9 +199,11 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
+JOBS_RE='^(update|promoter (status|start|stop)|schwingnet (status|pull|xray-chain))$'
 case "$WORD" in start|status|stop) ;; *)
+  if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
-  else refuse word "one of start, status or stop (or an accounts word), and nothing else"; fi;;
+  else refuse word "one of start, status or stop (or an accounts or job word), and nothing else"; fi; fi;;
 esac
 bin_problems() { # the hpcworker the accounts words run, held as tools/ is
   [ -d "$CLONE/framework/bin" ] && [ ! -L "$CLONE/framework/bin" ] || { echo "copy $CLONE/framework/bin (missing or a link)"; return 0; }
@@ -196,7 +224,7 @@ take_lock() { # a lock older than two minutes is a leftover
 }
 take_lock || { note "$WORD" "limit (another call holds the gate)"; echo "HPCW-GRID-GATE limit: another call is being taken; try again in a minute"; exit 123; }
 STAMP=gate.last
-case "$WORD" in accounts\ login\ *|accounts\ start\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; esac
+case "$WORD" in accounts\ login\ *|accounts\ start\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; *\ status) STAMP=jobs.last; FLOOR=3;; update|promoter\ *|schwingnet\ *) STAMP=jobs.sched;; esac
 now=$(date +%s); last=$(cat "$CHAIN/$STAMP" 2>/dev/null); [[ "$last" =~ ^[0-9]{1,12}$ ]] || last=0
 if [ $(( now - last )) -lt $FLOOR ] && [ $(( now - last )) -ge 0 ]; then
   rmdir "$LOCK" 2>/dev/null
@@ -212,6 +240,96 @@ rmdir "$LOCK" 2>/dev/null
 if ! command -v sbatch >/dev/null 2>&1 && [ -r /etc/profile ]; then
   p=$(set +u; . /etc/profile >/dev/null 2>&1 < /dev/null; printf '%s' "$PATH")
   [ -n "$p" ] && PATH="$p"
+fi
+# A checkout moved on to its origin's main. git replaces each file it changes by a new one, so this
+# script, which bash reads as it goes, keeps reading the copy it started from, and the call that runs
+# it ends on the same line.
+ff_pull() { # DIR WHAT
+  local G=(env -i HOME="$HOME" PATH="$PATH" LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" git -C "$1")
+  local w=$2 branch old new out
+  branch=$("${G[@]}" symbolic-ref --quiet --short HEAD 2>/dev/null)
+  [ "$branch" = main ] || { note "$WORD" "refused (on ${branch:-no branch})"; echo "HPCW-GRID-GATE refused branch: $1 is on ${branch:-no branch}, not main; check out main in it first"; return 126; }
+  [ -z "$("${G[@]}" status --porcelain --untracked-files=no 2>/dev/null)" ] || { note "$WORD" "refused (changed files)"; echo "HPCW-GRID-GATE refused changes: $1 has changes git tracks; commit or discard them first"; return 126; }
+  old=$("${G[@]}" rev-parse HEAD 2>/dev/null) || { note "$WORD" "failed (no HEAD)"; echo "HPCW-GRID-GATE $w failed: git cannot read $1"; return 1; }
+  out=$("${G[@]}" fetch --quiet origin main < /dev/null 2>&1) || { note "$WORD" "failed (fetch)"; printf '%s\n' "$out" | tail -3; echo "HPCW-GRID-GATE $w failed: git could not fetch origin's main"; return 1; }
+  new=$("${G[@]}" rev-parse FETCH_HEAD 2>/dev/null) || { note "$WORD" "failed (no FETCH_HEAD)"; echo "HPCW-GRID-GATE $w failed: git fetched no main"; return 1; }
+  if [ "$new" = "$old" ]; then note "$WORD" "current ${new:0:12}"; echo "HPCW-GRID-GATE $w current ${new:0:12}"; return 0; fi
+  "${G[@]}" merge-base --is-ancestor "$old" "$new" 2>/dev/null || { note "$WORD" "refused (not a fast-forward)"; echo "HPCW-GRID-GATE refused history: origin's main does not follow ${old:0:12} in $1, which holds commits main has not"; return 126; }
+  out=$("${G[@]}" merge --ff-only --quiet "$new" < /dev/null 2>&1) || { note "$WORD" "failed (merge)"; printf '%s\n' "$out" | tail -3; echo "HPCW-GRID-GATE $w failed: git could not fast-forward"; return 1; }
+  note "$WORD" "ok ${old:0:12}..${new:0:12}"
+  echo "HPCW-GRID-GATE $w ok ${old:0:12}..${new:0:12}"
+  return 0
+}
+update_clone() {
+  ff_pull "$CLONE" update || return $?
+  chmod -R go-w "$CLONE/tools" "$CLONE/framework" 2>/dev/null
+  echo "HPCW-GRID-GATE framework $(tr -cd '0-9' < "$CLONE/framework/VERSION" 2>/dev/null | head -c 6)"
+}
+# the lab's root on the volume, where the promoter keeps its folder (Wayne State's layout, the only
+# site these jobs exist at); HPCW_LAB_ROOT is for the tests, since sshd passes a client no such name
+LAB_ROOT="${HPCW_LAB_ROOT:-/rs/rs_grp_oschome/$(id -un)}"
+PROMOTER_DIR="$LAB_ROOT/spine-datasets-promoter"
+PROMOTER_REPO=OpenSpineConsortium/spine-datasets
+SCHWINGNET_DIR="$HOME/SchwingNet"
+job_env() { # the environment a job word's command gets: the gate's own, and gh's sign-in where it is
+  JE=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" PATH="$PATH" LC_ALL=C HPCW_GATE=1)
+  local v; for v in SLURM_CONF GH_CONFIG_DIR XDG_CONFIG_HOME; do [ -n "${!v:-}" ] && JE+=("$v=${!v}"); done
+  return 0
+}
+held() { # PATH... -> 0 when each is this account's own and written by it alone, as the clone is held
+  local f p
+  for f in "$@"; do
+    [ -e "$f" ] && [ ! -L "$f" ] || { echo "HPCW-GRID-GATE refused copy: $f is missing or a link"; return 1; }
+    p=$(find "$f" -maxdepth 0 \( ! -user "$ME" -o -perm -g+w -o -perm -o+w \) -print 2>/dev/null)
+    [ -z "$p" ] || { echo "HPCW-GRID-GATE refused copy: others may change $f (chmod go-w it)"; return 1; }
+  done
+}
+# gh where a login shell would find it: the forced command's PATH has only what /etc/profile gives
+gh_on_path() {
+  command -v gh >/dev/null 2>&1 && return 0
+  local d; for d in "$HOME/bin" "$HOME/.local/bin" "$HOME/opt/gh/bin"; do [ -x "$d/gh" ] && PATH="$PATH:$d" && return 0; done
+  return 1
+}
+promoter() { # status|start|stop
+  local script="$PROMOTER_DIR/code/promote.sh" sha rc out
+  job_env
+  if [ "$1" = start ]; then
+    gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE promoter failed: gh is not on this account's path"; return 1; }
+    sha=$(env -i "${JE[@]}" gh api "repos/$PROMOTER_REPO/commits/main" --jq .sha < /dev/null 2>/dev/null)
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { note "$WORD" "failed (main unread)"; echo "HPCW-GRID-GATE promoter failed: gh could not read the head of $PROMOTER_REPO's main"; return 1; }
+    if [ ! -e "$script" ]; then
+      ( umask 077; mkdir -p "$PROMOTER_DIR/code" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE promoter failed: cannot make $PROMOTER_DIR/code"; return 1; }
+      env -i "${JE[@]}" gh api -H "Accept: application/vnd.github.raw" "repos/$PROMOTER_REPO/contents/grid/promote.sh?ref=$sha" > "$script.tmp" < /dev/null 2>/dev/null \
+        && [ -s "$script.tmp" ] && mv -f "$script.tmp" "$script" || { rm -f "$script.tmp"; note "$WORD" "failed (script)"; echo "HPCW-GRID-GATE promoter failed: gh could not fetch grid/promote.sh at ${sha:0:12}"; return 1; }
+    fi
+  fi
+  held "$PROMOTER_DIR" "$PROMOTER_DIR/code" "$script" || { note "$WORD" "refused (copy)"; return 126; }
+  ( cd "$PROMOTER_DIR" && env -i "${JE[@]}" /bin/bash "$script" "$1" ${sha:+"$sha"} < /dev/null 2>&1 ); rc=$?
+  if [ $rc = 0 ]; then note "$WORD" "ok${sha:+ ${sha:0:12}}"; echo "HPCW-GRID-GATE promoter $1 ok${sha:+ at ${sha:0:12}}"
+  else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE promoter $1 failed $rc"; fi
+  return $rc
+}
+schwingnet() { # status|pull|xray-chain
+  local S="$SCHWINGNET_DIR" rc
+  held "$S" "$S/grid" || { note "$WORD" "refused (copy)"; return 126; }
+  job_env
+  case "$1" in
+    pull) ff_pull "$S" "schwingnet pull"; return $?;;
+    status)
+      env -i "${JE[@]}" squeue -u "$(id -un)" -o '%.12i %.24j %.10P %.8T %.10M %R' < /dev/null 2>&1
+      [ -f "$S/grid/LAST_RUN.txt" ] && { echo "== grid/LAST_RUN.txt"; tail -20 "$S/grid/LAST_RUN.txt"; }
+      note "$WORD" "ok"; echo "HPCW-GRID-GATE schwingnet status ok"; return 0;;
+    xray-chain)
+      held "$S/grid/run-xray-chain.sh" || { note "$WORD" "refused (copy)"; return 126; }
+      ( cd "$S" && env -i "${JE[@]}" SCHWINGNET="$S" /bin/bash "$S/grid/run-xray-chain.sh" < /dev/null 2>&1 ); rc=$?
+      if [ $rc = 0 ]; then note "$WORD" "ok"; echo "HPCW-GRID-GATE schwingnet xray-chain ok"
+      else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE schwingnet xray-chain failed $rc"; fi
+      return $rc;;
+  esac
+}
+if [ "$KIND" = jobs ]; then
+  set -f; J=( $WORD ); set +f
+  case "${J[0]}" in update) update_clone; exit $?;; promoter) promoter "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[1]}"; exit $?;; esac
 fi
 if [ "$KIND" = accounts ]; then
   # the code comes on standard input: one line, read here with a time limit and checked as accounts code checks it
