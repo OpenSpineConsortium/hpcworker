@@ -481,8 +481,12 @@ chmod o-w "$SN/grid"
 mv "$SN" "$SN.away"; mkdir -m 700 "$SN"; : > "$JOBS_CALLS"; job "schwingnet status" "${LINE_ARGS[@]}"
 t "a ~/SchwingNet that is no clone is refused, nothing cloned over it" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 rmdir "$SN"; mv "$SN.away" "$SN"
+: > "$JOBS_CALLS"; job "schwingnet census vindr_spinexr" "${LINE_ARGS[@]}"
+t "schwingnet census passes its one id to gate.sh" bash -c "grep -Eqx 'gate.sh v[0-9]+ census vindr_spinexr SCHWINGNET=$SN' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "schwingnet chain_eval" "${LINE_ARGS[@]}"
+t "schwingnet chain_eval goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ chain_eval SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'promoter start abc' 'promoter restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'promoter start abc' 'promoter restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
