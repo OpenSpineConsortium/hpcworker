@@ -137,7 +137,13 @@ acct "accounts start 2 team-b" "${LINE_ARGS[@]}"
 t "start N NAME runs accounts start N NAME (framework 22), then the list" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts start 2 team-b|' && tail -1 '$HW_CALLS' | grep -q '^accounts list --json|'"
 acct "accounts stop team-b" "${LINE_ARGS[@]}"
 t "stop NAME runs accounts stop NAME" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts stop team-b|'"
-for w in 'accounts use 0' 'accounts use 33' 'accounts use 2 3' 'accounts auto maybe' 'accounts usage now' 'accounts code 3 ABCDEFGH123' 'accounts;id' 'accounts list' 'accounts  use 2' 'accounts use 02' 'accounts start 33' 'accounts start 2 a;b' 'accounts stop' 'accounts stop a b'; do
+acct "accounts log login 2" "${LINE_ARGS[@]}"
+t "log login N runs accounts log login N (framework 23)" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts log login 2|'"
+acct "accounts log worker team-b" "${LINE_ARGS[@]}"
+t "log worker NAME runs accounts log worker NAME" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts log worker team-b|'"
+acct "accounts log usage" "${LINE_ARGS[@]}"
+t "log usage runs accounts log usage" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts log usage|'"
+for w in 'accounts use 0' 'accounts use 33' 'accounts use 2 3' 'accounts auto maybe' 'accounts usage now' 'accounts code 3 ABCDEFGH123' 'accounts;id' 'accounts list' 'accounts  use 2' 'accounts use 02' 'accounts start 33' 'accounts start 2 a;b' 'accounts stop' 'accounts stop a b' 'accounts log' 'accounts log login 33' 'accounts log worker ../x' 'accounts log worker a b' 'accounts log rc.log'; do
   acct "$w" "${LINE_ARGS[@]}"
   t "the word $(printf '%q' "$w") is refused" bash -c "[ '$RC' = 126 ] && printf '%s\n' \"\$1\" | grep -q '^HPCW-GRID-GATE refused word'" _ "$OUT"
 done

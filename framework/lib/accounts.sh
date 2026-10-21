@@ -126,6 +126,43 @@ acct_field() { # JSON KEY -> a top-level plain string or true/false (the files a
   printf '%s' "$1" | grep -o "\"$2\": *\(\"[^\"]*\"\|true\|false\)" | head -1 | sed -e "s/^\"$2\": *//" -e 's/^"//' -e 's/"$//'
 }
 
+# ---- what a job printed, for the control panel's Console (framework 23) ---------------------------------
+# A job's log reaches the panel through the gate and the branch grid, so it is cleaned first: no terminal
+# codes, no byte outside printable ASCII, no line over 300 characters, and any run of 32 or more letters
+# and digits hidden, which is the shape of every token, key and code Claude Code or Anthropic's page prints
+acct_clean() { # stdin -> stdout
+  hpcw_strip_codes | LC_ALL=C tr -cd '\11\12\40-\176' | cut -c1-300 \
+    | sed -E -e 's/[A-Za-z0-9_+=-]{32,}/[hidden]/g' -e 's/(sk-ant|oauth|token|secret|password)[^ ]*[:=][^ ]*/\1 [hidden]/Ig'
+}
+acct_last_said() { # FILE -> its last line that says something, cleaned, at most 200 characters
+  [ -f "$1" ] && [ ! -L "$1" ] || return 0
+  tail -c 8000 "$1" 2>/dev/null | acct_clean | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-200
+}
+acct_show() { # TITLE FILE LINES
+  [ -s "$2" ] && [ ! -L "$2" ] || { echo "--- $1: nothing yet"; return 0; }
+  echo "--- $1 (last $3 lines)"
+  tail -c 40000 "$2" 2>/dev/null | acct_clean | grep -v '^[[:space:]]*$' | tail -n "$3"
+}
+acct_log() { # login N | usage | worker NAME: what that job printed, between two marker lines
+  local what="${1:-}" w
+  case "$what" in
+    login) acct_need_slot "${2:-}"; w=$(acct_login_dir "$2")
+      echo "HPCW-ACCOUNTS-LOG-BEGIN login $2"
+      acct_show "the sign-in's own lines" "$w/out" 80
+      acct_show "the job's output (stdout and stderr)" "$w/job.log" 120;;
+    usage) w="$ACCT_WORK/usage"
+      echo "HPCW-ACCOUNTS-LOG-BEGIN usage"
+      acct_show "the job's output (stdout and stderr)" "$w/job.log" 120;;
+    worker) [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "accounts: log worker needs a worker's name"
+      w="$STATE_DIR/$2"; [ -d "$w" ] && [ ! -L "$w" ] || die "accounts: there is no worker named $2"
+      echo "HPCW-ACCOUNTS-LOG-BEGIN worker $2"
+      acct_show "Claude Code's terminal" "$w/rc.log" 120
+      acct_show "the job's output (stdout and stderr)" "$(ls -t "$w"/slurm_*.out "$w"/pbs.out "$w"/lsf_*.out 2>/dev/null | head -1)" 80;;
+    *) die "accounts: log login N, log usage or log worker NAME";;
+  esac
+  echo "HPCW-ACCOUNTS-LOG-END"
+}
+
 # ---- the sitting as a job (the control panel's sign-in) --------------------------------------------
 acct_login_dir() { echo "$ACCT_WORK/login-$1"; }
 acct_job_live() { # DIR: a job was started there, has not said it ended, and is younger than the stale bound
@@ -142,7 +179,10 @@ acct_login_state() { # N -> "STATE|SENTENCE": none | waiting | link | code | sig
       *HPCW-LOGIN-FAILED:*) echo "failed|${l#*HPCW-LOGIN-FAILED: }"; return 0;;
     esac
   fi
-  if [ -e "$w/done" ]; then echo "failed|The sign-in ended without a word from Claude Code (its job's log is $w/job.log)"; return 0; fi
+  if [ -e "$w/done" ]; then
+    l=$(acct_last_said "$w/job.log")
+    echo "failed|The sign-in ended without a word from Claude Code${l:+; the last line it printed: $l} (its log is $w/job.log; Console shows it whole)"; return 0
+  fi
   acct_job_live "$w" || { echo "failed|The sign-in's job is gone (wall time, or the grid ended it); start it again"; return 0; }
   if [ -s "$out" ] && grep -q ' code received, checking' "$out" && ! grep -q 'that code was not accepted' <(sed -n '/code received, checking/,$p' "$out" | tail -n +2); then echo "code|Checking the code"; return 0; fi
   if [ -s "$out" ] && grep -q ' AUTH-URL: ' "$out"; then
@@ -198,6 +238,7 @@ cmd_accounts() {
     forget) acct_forget "$@";;
     start) acct_start "$@";;
     stop) acct_stop "$@";;
+    log) acct_log "$@";;
     _login-job) acct_login_job "$@";;
     _usage-job) acct_usage_job "$@";;
     *) die "accounts: list | use N | login N [--detach] | link N | code N CODE | usage | auto on|off | forget N | start N [NAME] | stop NAME";;

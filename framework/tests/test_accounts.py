@@ -182,6 +182,33 @@ class Cli(unittest.TestCase):
         kept = [os.path.join(r, f) for r, _, fs in os.walk(os.path.join(self.accounts(), ".forgotten")) for f in fs]
         self.assertTrue(any(k.endswith("claude/marker") for k in kept), "moved aside, nothing deleted")
 
+    def test_log_shows_a_jobs_output_cleaned_and_the_failure_names_its_last_line(self):
+        self.listing()
+        self.assertEqual(self.run_cli("cmd_accounts login 2 --detach")[0], 0)
+        w = os.path.join(self.td, "state", ".accounts", "login-2")
+        secret = "sk-ant-oat01-" + "A" * 40
+        with open(os.path.join(w, "job.log"), "w") as fh:
+            fh.write("\x1b[31mstarting\x1b[0m\n\nnode hao1\nput %s here\napptainer: image not found\n" % secret)
+        open(os.path.join(w, "done"), "w").close()
+        state = self.listing()["accounts"][1]["login"]
+        self.assertEqual(state["state"], "failed")
+        self.assertIn("the last line it printed: apptainer: image not found", state["line"])
+        rc, out, err = self.run_cli("cmd_accounts log login 2")
+        self.assertEqual(rc, 0, err)
+        lines = out.splitlines()
+        self.assertEqual((lines[0], lines[-1]), ("HPCW-ACCOUNTS-LOG-BEGIN login 2", "HPCW-ACCOUNTS-LOG-END"))
+        self.assertIn("starting", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("A" * 32, out, "a token's shape never leaves the grid")
+        self.assertIn("--- the sign-in's own lines: nothing yet", out)
+        rc, out, err = self.run_cli("cmd_accounts log worker nobody")
+        self.assertNotEqual(rc, 0)
+        rc, out, err = self.run_cli("cmd_accounts log worker '../x'")
+        self.assertNotEqual(rc, 0)
+        rc, out, err = self.run_cli("cmd_accounts log usage")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("nothing yet", out)
+
     def test_the_sign_in_as_a_job_its_link_and_its_code(self):
         self.listing()
         rc, out, err = self.run_cli("cmd_accounts login 2 --detach")
