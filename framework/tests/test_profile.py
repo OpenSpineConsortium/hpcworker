@@ -38,7 +38,7 @@ class Validate(unittest.TestCase):
         self.assertEqual(prof["qos_cpu"], "secondary")
         self.assertEqual(prof["partition_cpu_batch"], "reqp")
         self.assertEqual(prof["qos_batch"], "requeue")
-        self.assertEqual(prof["partitions_gpu"], ["gmsap", "gvohp"])
+        self.assertEqual(prof["partitions_gpu"], ["gmsap", "gvohp", "galhp"])
         self.assertEqual(prof["node_tmp"], "/tmp/$USER/hpcworker_$SLURM_JOB_ID")
         self.assertFalse(prof["tmpdir_is_node_local"])
         self.assertEqual(prof["egress"]["class"], "direct")
@@ -329,7 +329,8 @@ class SchedulerInWorker(unittest.TestCase):
                                                       "grid_account_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/ArticleDet?ID=20199",
                                                       "grid_2fa_help_url": "https://services.wayne.edu/TDClient/277/Portal/KB/Article/20242/How-do-I-set-up-and-use-Google-Authenticator-for-the-Grid",
                                                       "ssh_host": "grid.wayne.edu", "ssh_port": 22,
-                                                      "ssh_host_key": "SHA256:kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s", "ssh_relay": None})
+                                                      "ssh_host_key": "SHA256:kLTz1xK6anQ1denM+31kDEryQtgan2P76r9aLno+K3s", "ssh_relay": None,
+                                                      "qos_gpu": "gpu", "node_domain": "nas.grid.wayne.edu"})
 
     def test_framework11_keys_validated(self):
         prof = P.load(WAYNE)
