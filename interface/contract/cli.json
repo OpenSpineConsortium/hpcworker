@@ -11,6 +11,9 @@
   "permission_mode": {"enum": ["default", "acceptEdits", "plan"]},
   "gate_file": {"enum": ["status.json", "connection.json", "progress.log", "node"]},
   "repo": {"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}$", "note": "a GitHub repository, OWNER/NAME"},
+  "project": {"pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+  "job_name": {"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$"},
+  "job_class": {"enum": ["cpu", "batch", "gpu"]},
   "clone": {"pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}){0,7}$", "default": "hpcworker", "note": "the lab lead's own clone of OpenSpineConsortium/hpcworker, a folder under the home; no part begins with a dot, so never .."}
  },
  "commands": [
@@ -22,6 +25,10 @@
   {"id": "install-shared", "line": "bash '<tool>' install --shared '<shared_install>' --profile '<site>'"},
   {"id": "login-setup", "line": "bash <tool> login-setup", "reads": "lines.json login-setup family", "note": "typed by the student in their own terminal, never by a client's own shell"},
   {"id": "version", "line": "bash '<tool>' version", "reads": "lines.json version family"},
+  {"id": "job-submit", "line": "bash '<tool>' job submit --project '<project>' --name '<job_name>' --class '<job_class>' [--time T] [--cpus C] [--mem M] [--gpus G] [--after ID[:ok|any]]... [--array SPEC] [--dir D] [--check] -- SCRIPT [ARG...]", "reads": "one line: HPCW-JOB submitted <id> <name> <partition>/<qos> log <path> (exit 0), HPCW-JOB refused <name> <partition>/<qos>: <scheduler's words> (exit 1), or HPCW-JOB would-run with --check", "note": "the partition, QoS, account and GPU request come from the site profile by class, never from the script; the caller's environment reaches the job as sbatch's default export gives it and is never recorded; --after adds --kill-on-invalid-dep=yes; an array's tasks log to <name>_<id>_<task>.out; Slurm only"},
+  {"id": "job-status", "line": "bash '<tool>' job status --project '<project>' [--last K] --json", "reads": "{\"project\": ..., \"jobs\": [{id, name, class, partition, qos, submitted, state, node, exit, log, array, after}]; an array's state is ARRAY and its tasks counted by state, as ARRAY RUNNING:2,PENDING:61}", "note": "one squeue and at most one sacct for the project's ledger"},
+  {"id": "job-log", "line": "bash '<tool>' job log --project '<project>' <id> [--task N] [--lines N]", "reads": "the tail of the job's output, control characters stripped; only a job the project's ledger holds"},
+  {"id": "job-cancel", "line": "bash '<tool>' job cancel --project '<project>' <id>...|--all", "reads": "HPCW-JOB cancelled <ids>; only jobs the project's ledger holds"},
   {"id": "grid-gate-setup", "line": "cd \"$HOME\"/'<clone>' && git checkout -q main && GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' git pull -q --ff-only && bash tools/grid_runner.sh --gate-setup --repo '<repo>' --site '<site>'", "reads": "the exit status: 0 set up and grid-gate.yml started; anything else refused or failed, the last line beginning grid_runner: says why, or, where it says only that nothing was changed, the line before it does (a public repository, gh unable to read it)", "note": "a lab lead's tool, pressed by a person: the pull asks nothing at the terminal (no HTTPS prompt, ssh in batch mode), since the line runs with a terminal on stdin; it runs from the lab lead's own clone, which the ssh gate's forced command runs from (README.md, A GitHub Actions runner on the grid), never from the shared copy"},
   {"id": "grid-gate-off", "line": "cd \"$HOME\"/'<clone>' && bash tools/grid_runner.sh --gate-off --repo '<repo>' --site '<site>'", "reads": "the exit status: 0 the line is out, or was not there", "note": "takes the gate's line for the repository out of ~/.ssh/authorized_keys; the secret stays at GitHub until it is deleted there"}
  ],

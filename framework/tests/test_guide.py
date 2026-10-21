@@ -74,6 +74,7 @@ class GuideRender(GuideBase):
             "- Short and test jobs: partition `secp`, QoS `secondary`.",
             "- Long jobs: partition `reqp`, QoS `requeue`; a job there can be stopped and started again",
             "- GPU jobs: partitions `gmsap` or `gvohp`, in that order of preference.",
+            "`hpcworker job submit --project <project>",
             "name that folder with `-D`",
             "`--dependency=afterany:<id>`",
             "under `/dev/shm/go2432`, not `/tmp`",
@@ -125,7 +126,7 @@ class GuideRender(GuideBase):
         prof = json.loads(json.dumps(self.prof))
         prof.update({
             "display_name": "", "scheduler": "pbs", "submit_host": "", "ood_base_url": "", "account": "lab42",
-            "partition_cpu_batch": "", "qos_cpu": "", "partitions_gpu": ["gpu"], "max_walltime": "48:00:00",
+            "partition_cpu_batch": "", "qos_cpu": "", "partitions_gpu": ["gpu"], "qos_gpu": "", "max_walltime": "48:00:00",
             "shared_state_dir": "$HOME/hpcworker", "binds": ["$HOME", "/scratch/$USER:/scratch"], "scheduler_in_worker": False,
         })
         self.assertEqual(P.validate(prof), [])

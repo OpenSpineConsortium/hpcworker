@@ -45,6 +45,7 @@ function schema_init() {
   sadd("partition_cpu_batch", "str", 0, "\"\"")
   sadd("qos_batch", "str", 0, "\"\"")
   sadd("partitions_gpu", "list", 0, "[]")
+  sadd("qos_gpu", "str", 0, "\"\"")
   sadd("account", "str", 0, "\"\"")
   sadd("max_walltime", "str", 0, "\"\"")
   sadd("node_tmp", "str", 1, "")
@@ -76,6 +77,7 @@ function schema_init() {
   sadd("grid_2fa_help_url", "str", 0, "\"\"")
   sadd("ssh_host", "str", 0, "\"\"")
   sadd("ssh_port", "int", 0, "22")
+  sadd("node_domain", "str", 0, "\"\"")
   sadd("ssh_host_key", "str", 0, "\"\"")
   sadd("ssh_relay", "str_or_none", 0, "")
   sadd("browser_key_days", "int_or_none", 0, "")
@@ -90,7 +92,7 @@ function schema_init() {
   sadd("worker_defaults", "dict", 0, "{\"cpus\":2,\"mem\":\"8G\",\"hours\":8,\"permission_mode\":\"default\",\"capacity\":4}")
   sadd("notes", "str", 0, "\"\"")
   # profile.py FIELDS_FROM_SITE: a field a later version added takes the site profile's value until the account sets its own
-  NFS = split("scheduler_in_worker session_title login_abandon_s ood_auth vpn_portal vpn_app vpn_help_url grid_account_help_url restricted restricted_workspaces grid_2fa_help_url ssh_host ssh_port ssh_host_key ssh_relay browser_key_days", FSK, " ")
+  NFS = split("scheduler_in_worker session_title login_abandon_s ood_auth vpn_portal vpn_app vpn_help_url grid_account_help_url restricted restricted_workspaces grid_2fa_help_url ssh_host ssh_port ssh_host_key ssh_relay browser_key_days qos_gpu node_domain", FSK, " ")
 }
 
 # ---- JSON, read whole into node tables -----------------------------------------------------------
@@ -432,6 +434,7 @@ function validate(   i, k, id, img, t, p, eg, pe, rules, v, nt, s, j, e, keys) {
   for (i = 1; i <= 3; i++) { v = mget(keys[i]); if (isstr(v) && NV[v] != "" && !urlish(NV[v], "https://")) verr(keys[i] " must be an https address (or empty)") }
   v = mget("vpn_portal"); if (isstr(v) && NV[v] != "" && !hostish(NV[v], 253)) verr("vpn_portal must be a host name (letters, digits, dots and dashes)")
   v = mget("ssh_host"); if (isstr(v) && NV[v] != "" && !hostish(NV[v], 253)) verr("ssh_host must be a host name (letters, digits, dots and dashes)")
+  v = mget("node_domain"); if (isstr(v) && NV[v] != "" && !hostish(NV[v], 253)) verr("node_domain must be a domain name (letters, digits, dots and dashes)")
   v = mget("ssh_port"); if (isint(v) && (NV[v] + 0 < 1 || NV[v] + 0 > 65535)) verr("ssh_port must be between 1 and 65535")
   v = mget("ssh_host_key")
   if (isstr(v) && NV[v] != "" && !(substr(NV[v], 1, 7) == "SHA256:" && length(NV[v]) == 50 && substr(NV[v], 8) ~ /^[A-Za-z0-9+\/]+$/)) verr("ssh_host_key must be a SHA256: fingerprint as ssh-keygen -l prints it (or empty)")
@@ -583,8 +586,9 @@ function guide_parts(   sch, word, name, portal, host, terminal, poll, v, cpu, q
   }
   v = mget("partitions_gpu"); n = 0; g = ""
   if (islist(v)) for (j = 1; j <= NN[v]; j++) if (truthy(NC[v, j])) { n++; g = g (n > 1 ? " or " : "") "`" pystr(NC[v, j]) "`"; x = pystr(NC[v, j]) }
-  if (n == 1) lines = lines "\n- GPU jobs: " word " `" x "`."
-  else if (n > 1) lines = lines "\n- GPU jobs: " word "s " g ", in that order of preference."
+  v = mget("qos_gpu"); qgpu = truthy(v) ? ", QoS `" pystr(v) "`" : ""
+  if (n == 1) lines = lines "\n- GPU jobs: " word " `" x "`" qgpu "."
+  else if (n > 1) lines = lines "\n- GPU jobs: " word "s " g ", in that order of preference" qgpu "."
   v = mget("account"); acct = truthy(v) ? pystr(v) : ""
   if (acct != "") {
     opt = (sch == "slurm") ? "--account=" acct : (sch == "pbs") ? "-A " acct : (sch == "lsf") ? "-P " acct : ""
@@ -594,6 +598,7 @@ function guide_parts(   sch, word, name, portal, host, terminal, poll, v, cpu, q
   if (sch == "slurm") {
     lines = lines "\n- `#SBATCH --output` is read relative to the folder a job is submitted from; name that folder with `-D`."
     lines = lines "\n- Chain jobs with `--dependency=afterany:<id>` and read each output yourself; with `afterok`, one failed job leaves the rest waiting for ever."
+    lines = lines "\n- `hpcworker job submit --project <project> --name <name> --class cpu|batch|gpu -- <script>` fills in the partition, QoS, account and output above and keeps each job's id and log; `hpcworker job status --project <project>` reads them back."
   }
   putv("HPCW_G_SCHEDULING", lines)
   # guide_submitting_lines
