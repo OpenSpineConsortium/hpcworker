@@ -57,6 +57,10 @@ case "$1 ${2:-}" in
           printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_ENV_URL"
           exec sleep 600;;
       esac
+    elif [ "${FAKE_RC_FORM:-}" = not_enabled ]; then
+      # what Claude Code printed on go2432's grid every five minutes for four days (job 40626756, 2026-10-21)
+      printf "\033[31mError: Remote Control isn't enabled for this account. If you recently changed plans, run \`claude auth logout\` then \`claude auth login\` to refresh your entitlements, or \`claude doctor\` for details.\r\n"
+      exit 1
     elif [ "${FAKE_RC_FORM:-}" = silent ]; then
       # framework 19: Remote Control that starts and never registers (go2432's chain, 13 links of 8 h, 2026-10-20)
       printf 'Starting Remote Control\r\n'
@@ -466,6 +470,21 @@ class Job(unittest.TestCase):
         self.assertNotIn("Renewing", progress)
         self.assertEqual(out.count("starting it again once"), 1, out)
         self.assertTrue(os.path.exists(os.path.join(self.rd, "stop.done")))
+        self.assertFalse(os.path.exists(os.path.join(self.rd, "next.id")), "no successor left queued")
+        self.assertIn("scancel 40501234", self.g.calls())
+
+    def test_remote_control_not_enabled_ends_the_chain_at_once(self):
+        open(self.logged_in, "w").close()
+        self.rc_form = "not_enabled"
+        self.render()
+        self.queued_file()
+        proc = self.start_job()
+        out, _ = proc.communicate(timeout=120)
+        self.assertEqual(proc.returncode, 0, out)
+        s = self.status()
+        self.assertEqual(s["state"], "error", out)
+        self.assertIn("Remote Control isn't enabled for the Claude account", s["message"])
+        self.assertTrue(self.progress()[-1].startswith("Couldn't start: Claude says Remote Control isn't enabled"))
         self.assertFalse(os.path.exists(os.path.join(self.rd, "next.id")), "no successor left queued")
         self.assertIn("scancel 40501234", self.g.calls())
 
