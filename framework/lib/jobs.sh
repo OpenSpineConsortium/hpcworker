@@ -114,7 +114,9 @@ job_submit() {
   ( umask 077; mkdir -p "$jd/logs" ) || die "could not make $jd/logs"
   local args=() o
   while IFS= read -r o; do [ -n "$o" ] && args+=("$o"); done <<< "$opts"
-  [ -n "$dep" ] && args+=("$dep")
+  # a dependency that can never be met (its job failed under afterok, or is gone) ends this job at
+  # once instead of leaving it pending for ever behind a half-built chain
+  [ -n "$dep" ] && args+=("$dep" "--kill-on-invalid-dep=yes")
   # TERM two minutes before the wall time, to the batch shell, so a script's trap can save its place
   # (the same signal Beethoven for VS Code's workers take)
   args+=("--signal=B:TERM@120")

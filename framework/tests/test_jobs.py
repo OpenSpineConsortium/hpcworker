@@ -56,7 +56,7 @@ class JobTest(unittest.TestCase):
     def test_after_becomes_one_dependency(self):
         rc, out, err = self.submit(extra="--after 41 --after 42:ok --after 43:any")
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("--dependency=afterany:41,afterok:42,afterany:43", self.sbatch_calls()[-1])
+        self.assertIn("--dependency=afterany:41,afterok:42,afterany:43 --kill-on-invalid-dep=yes", self.sbatch_calls()[-1])
 
     def test_the_ledger_and_status(self):
         self.submit(name="one")
