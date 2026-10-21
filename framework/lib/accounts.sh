@@ -258,7 +258,7 @@ acct_list() {
       who=$(acct_one_line "$ACCT_DIR/$n.who.json")
       st=$(acct_login_state "$n")
       printf '%s account %s: %s%s\n' "$([ "$n" = "$cur" ] && echo '*' || echo ' ')" "$n" \
-        "$(if [ "$(acct_field "$who" signed_in)" = true ]; then echo "$(acct_field "$who" email) ($(acct_field "$who" plan))"; elif [ "$who" = null ]; then echo "not read yet"; else echo "not signed in"; fi)" \
+        "$(if [ "$(acct_field "$who" signed_in)" = true ]; then echo "$(acct_field "$who" email) ($(acct_field "$who" plan))"; elif [ "$who" = null ]; then echo "not read yet"; elif [ "$(acct_field "$who" sign_in)" = unread ]; then echo "not checked (the last check got no answer)"; else echo "not signed in"; fi)" \
         "$([ "${st%%|*}" != none ] && echo "; sign-in: ${st#*|}")"
     done
     [ -n "$(acct_slots)" ] || say "No account yet: hpcworker accounts login 1"
@@ -450,7 +450,9 @@ acct_login_job() {
       if [ -s "$w/code" ]; then c=$(head -c 600 "$w/code"); : > "$w/code"; printf '%s\n' "$c" >&8; fi
       sleep 1; i=$((i + 1)); done ) &
   feeder=$!
-  "$SELF" _exec login --plain --deadline $(( $(date +%s) + ACCT_LOGIN_MIN * 60 - 60 )) <&8 2>&1 \
+  # through bash, never by the file's mode: a clone of the repository carries bin/hpcworker as 0644, and
+  # run directly it was refused (Permission denied), which the panel read as a sign-in with no word
+  "${BASH:-/bin/bash}" "$SELF" _exec login --plain --deadline $(( $(date +%s) + ACCT_LOGIN_MIN * 60 - 60 )) <&8 2>&1 \
     | while IFS= read -r l; do printf '%s %s\n' "$(hpcw_now_iso)" "$l" >> "$w/out"; done
   rc=${PIPESTATUS[0]}
   kill "$feeder" 2>/dev/null; exec 8>&-; rm -f "$pipe"; rmdir "$nt" 2>/dev/null
@@ -505,11 +507,11 @@ acct_usage_job() {
   trap 'exit 143' TERM
   [ -n "$PY" ] || die "accounts: python3 is needed on the compute node"
   for n in $(acct_slots); do
-    HPCW_ACCOUNT_SLOT="$n" HPCW_WS=.accounts-probe timeout 120 "$SELF" _exec run auth status > "$w/auth-$n" 2>/dev/null
+    HPCW_ACCOUNT_SLOT="$n" HPCW_WS=.accounts-probe timeout 120 "${BASH:-/bin/bash}" "$SELF" _exec run auth status > "$w/auth-$n" 2>/dev/null
     "$PY" "$LIB/accounts_read.py" who "$n" "$w/auth-$n" "$ACCT_DIR/$n.who.json"
     : > "$w/auth-$n"
     if [ "$(acct_field "$(acct_one_line "$ACCT_DIR/$n.who.json")" signed_in)" = true ]; then
-      HPCW_ACCOUNT_SLOT="$n" HPCW_WS=.accounts-probe timeout 150 "$SELF" _exec run -p "$ACCT_PROBE" --model haiku --max-turns 1 --output-format stream-json --verbose > "$w/probe-$n" 2>&1
+      HPCW_ACCOUNT_SLOT="$n" HPCW_WS=.accounts-probe timeout 150 "${BASH:-/bin/bash}" "$SELF" _exec run -p "$ACCT_PROBE" --model haiku --max-turns 1 --output-format stream-json --verbose > "$w/probe-$n" 2>&1
       "$PY" "$LIB/accounts_read.py" use "$n" "$w/probe-$n" "$ACCT_DIR/$n.use.json"
     fi
   done

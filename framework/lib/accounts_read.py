@@ -154,7 +154,16 @@ def who_of(slot, text):
     except ValueError:
         answer = None
     record = {"v": 1, "slot": slot, "checked_at": now_iso(), "signed_in": False}
-    if not isinstance(answer, dict) or answer.get("loggedIn") is not True:
+    if not isinstance(answer, dict):
+        # no answer is not "signed out": the check itself failed (the container, a timeout, a refused
+        # command), and saying signed out sent the person to sign in again an account that was fine
+        record["signed_in"] = None
+        record["sign_in"] = "unread"
+        tail = [line for line in text.splitlines() if line.strip()][-1:]
+        record["error"] = ("Claude Code did not answer the check" +
+                           (": " + " ".join(tail[0].split())[:160] if tail else ""))
+        return record
+    if answer.get("loggedIn") is not True:
         record["sign_in"] = "none"
         return record
     provider = answer.get("apiProvider")
