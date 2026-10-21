@@ -50,7 +50,7 @@ class JobTest(unittest.TestCase):
         rc, out, err = self.submit(cls="gpu", name="train", extra="--gpus 2 --time 1-00:00:00 --cpus 8 --mem 64G")
         self.assertEqual(rc, 0, (out, err))
         call = self.sbatch_calls()[-1]
-        for want in ("--partition=gmsap,gvohp", "--qos=gpu", "--gres=gpu:2", "--time=1-00:00:00", "--cpus-per-task=8", "--mem=64G"):
+        for want in ("--partition=gmsap,gvohp,galhp", "--qos=gpu", "--gres=gpu:2", "--time=1-00:00:00", "--cpus-per-task=8", "--mem=64G"):
             self.assertIn(want, call)
 
     def test_after_becomes_one_dependency(self):
@@ -120,7 +120,7 @@ class JobTest(unittest.TestCase):
             fh.write("sbatch: error: Invalid qos specification\n")
         rc, out, err = self.submit(cls="gpu", name="train")
         self.assertEqual(rc, 1)
-        self.assertEqual(out.strip(), "HPCW-JOB refused train gmsap,gvohp/gpu: sbatch: error: Invalid qos specification")
+        self.assertEqual(out.strip(), "HPCW-JOB refused train gmsap,gvohp,galhp/gpu: sbatch: error: Invalid qos specification")
         self.assertFalse(os.path.exists(self.ledger))
 
     def test_check_queues_nothing(self):
