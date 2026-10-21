@@ -75,6 +75,7 @@ SCHEMA = [
     ("partition_cpu_batch", str, False, "", "CPU partition for long workers"),
     ("qos_batch", str, False, "", "QoS for partition_cpu_batch"),
     ("partitions_gpu", "list", False, [], "GPU partitions, in order of preference"),
+    ("qos_gpu", str, False, "", "QoS for partitions_gpu"),
     ("account", str, False, "", "allocation account, when the site needs one"),
     ("max_walltime", str, False, "", "longest wall time the CPU partition accepts"),
     ("node_tmp", str, True, None, "node-local temp pattern; $USER and $SLURM_JOB_ID/$HPCW_JOB_ID expand in the job"),
@@ -106,6 +107,7 @@ SCHEMA = [
     ("grid_2fa_help_url", str, False, "", "the university's page on setting up the cluster's two-factor code for a password sign-in (https)"),
     ("ssh_host", str, False, "", "the login node's public ssh name, for Beethoven's ssh path (grid.wayne.edu); empty = no ssh path"),
     ("ssh_port", int, False, 22, "the port of ssh_host"),
+    ("node_domain", str, False, "", "the compute nodes' domain (nas.grid.wayne.edu): a node is reached by ssh through the login node, and only while a job of yours runs on it; empty = not known"),
     ("ssh_host_key", str, False, "", "ssh_host's host key fingerprint as ssh-keygen -l prints it (SHA256:...); Beethoven refuses any other key"),
     ("ssh_relay", "str_or_none", False, None, "a relay Beethoven may use to reach ssh_host (a wss:// or https:// address), or null for none"),
     ("browser_key_days", "int_or_none", False, None, "days a browser key's line stays valid; past them the gate removes it (null = no expiry)"),
@@ -261,6 +263,9 @@ def validate(prof):
     sh = prof.get("ssh_host")
     if isinstance(sh, str) and sh and not re.match(r"^[A-Za-z0-9.-]{1,253}$", sh):
         errs.append("ssh_host must be a host name (letters, digits, dots and dashes)")
+    nd = prof.get("node_domain")
+    if isinstance(nd, str) and nd and not re.match(r"^[A-Za-z0-9.-]{1,253}$", nd):
+        errs.append("node_domain must be a domain name (letters, digits, dots and dashes)")
     sp = prof.get("ssh_port")
     if isinstance(sp, int) and not isinstance(sp, bool) and not 1 <= sp <= 65535:
         errs.append("ssh_port must be between 1 and 65535")
@@ -313,7 +318,9 @@ def _walk(obj, prefix=""):
 FIELDS_FROM_SITE = ("scheduler_in_worker", "session_title", "login_abandon_s", "ood_auth", "vpn_portal", "vpn_app",
                     "vpn_help_url", "grid_account_help_url", "restricted", "restricted_workspaces",
                     # framework 11
-                    "grid_2fa_help_url", "ssh_host", "ssh_port", "ssh_host_key", "ssh_relay", "browser_key_days")
+                    "grid_2fa_help_url", "ssh_host", "ssh_port", "ssh_host_key", "ssh_relay", "browser_key_days",
+                    # framework 25
+                    "qos_gpu", "node_domain")
 
 
 def session_title(prof, run):
@@ -406,6 +413,7 @@ FIELD_LAYERS = {
     "qos_batch": ("lab",),
     # the site's catalogue; the engine's own jobs choose from it even where a lab runs no GPU worker
     "partitions_gpu": ("site",),
+    "qos_gpu": ("site",),
     "account": ("lab",),
     "max_walltime": ("site",),
     "node_tmp": ("site",),
@@ -438,6 +446,7 @@ FIELD_LAYERS = {
     "grid_2fa_help_url": ("site",),
     "ssh_host": ("site",),
     "ssh_port": ("site",),
+    "node_domain": ("site",),
     "ssh_host_key": ("site",),
     "ssh_relay": ("site",),
     "browser_key_days": ("lab",),
@@ -1151,10 +1160,12 @@ def guide_scheduling_lines(prof):
         more = "; a job there can be stopped and started again, so save progress as it goes" if qbatch == "requeue" else ""
         lines.append("- Long jobs: %s%s." % (where(batch, qbatch), more))
     gpus = [g for g in prof.get("partitions_gpu") or [] if g]
+    qgpu = prof.get("qos_gpu") or ""
+    qgpu_text = ", QoS `%s`" % qgpu if qgpu else ""
     if len(gpus) == 1:
-        lines.append("- GPU jobs: %s `%s`." % (word, gpus[0]))
+        lines.append("- GPU jobs: %s `%s`%s." % (word, gpus[0], qgpu_text))
     elif gpus:
-        lines.append("- GPU jobs: %ss %s, in that order of preference." % (word, " or ".join("`%s`" % g for g in gpus)))
+        lines.append("- GPU jobs: %ss %s, in that order of preference%s." % (word, " or ".join("`%s`" % g for g in gpus), qgpu_text))
     acct = prof.get("account") or ""
     if acct:
         opt = {"slurm": "--account=%s", "pbs": "-A %s", "lsf": "-P %s"}.get(sch)
@@ -1164,6 +1175,7 @@ def guide_scheduling_lines(prof):
     if sch == "slurm":
         lines.append("- `#SBATCH --output` is read relative to the folder a job is submitted from; name that folder with `-D`.")
         lines.append("- Chain jobs with `--dependency=afterany:<id>` and read each output yourself; with `afterok`, one failed job leaves the rest waiting for ever.")
+        lines.append("- `hpcworker job submit --project <project> --name <name> --class cpu|batch|gpu -- <script>` fills in the partition, QoS, account and output above and keeps each job's id and log; `hpcworker job status --project <project>` reads them back.")
     return lines
 
 
