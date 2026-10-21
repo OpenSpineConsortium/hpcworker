@@ -267,9 +267,18 @@ update_clone() {
   chmod -R go-w "$CLONE/tools" "$CLONE/framework" 2>/dev/null
   echo "HPCW-GRID-GATE framework $(tr -cd '0-9' < "$CLONE/framework/VERSION" 2>/dev/null | head -c 6)"
 }
-# the lab's root on the volume, where the promoter keeps its folder (Wayne State's layout, the only
-# site these jobs exist at); HPCW_LAB_ROOT is for the tests, since sshd passes a client no such name
-LAB_ROOT="${HPCW_LAB_ROOT:-/rs/rs_grp_oschome/$(id -un)}"
+# the lab's root on the volume, where the promoter keeps its folder: the folder above the site
+# profile's shared_state_dir, read as grid_runner.sh reads the profile; HPCW_LAB_ROOT is for the tests,
+# since sshd passes a client no such name
+lab_root() {
+  local d FW="$CLONE/framework"
+  [ -n "${HPCW_LAB_ROOT:-}" ] && { printf '%s\n' "$HPCW_LAB_ROOT"; return 0; }
+  [ -n "$SITE" ] && [ -f "$FW/profiles/$SITE.json" ] || return 1
+  d=$( LIB="$FW/lib" PROFILES="$FW/profiles"; . "$FW/lib/profile_sh.sh" && hpcw_prof_awk get "$FW/profiles/$SITE.json" shared_state_dir ) || return 1
+  [[ "$d" == /?* ]] || return 1
+  dirname "$d"
+}
+LAB_ROOT=$(lab_root) || LAB_ROOT=""
 PROMOTER_DIR="$LAB_ROOT/spine-datasets-promoter"
 PROMOTER_REPO=OpenSpineConsortium/spine-datasets
 SCHWINGNET_DIR="$HOME/SchwingNet"
@@ -294,6 +303,7 @@ gh_on_path() {
 }
 promoter() { # status|start|stop
   local script="$PROMOTER_DIR/code/promote.sh" sha rc out
+  [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE promoter failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
   job_env
   if [ "$1" = start ]; then
     gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE promoter failed: gh is not on this account's path"; return 1; }
