@@ -477,7 +477,7 @@
     "site"
    ],
    "required": false,
-   "description": "the compute nodes' domain (nas.grid.wayne.edu): a node is reached by ssh through the login node, and only while a job of yours runs on it; empty = not known"
+   "description": "the compute nodes' domain (as nodes.university.example): a node is reached by ssh through the login node, and only while a job of yours runs on it; empty = not known"
   },
   "ssh_host_key": {
    "type": "str",

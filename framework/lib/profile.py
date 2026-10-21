@@ -107,7 +107,7 @@ SCHEMA = [
     ("grid_2fa_help_url", str, False, "", "the university's page on setting up the cluster's two-factor code for a password sign-in (https)"),
     ("ssh_host", str, False, "", "the login node's public ssh name, for Beethoven's ssh path (grid.wayne.edu); empty = no ssh path"),
     ("ssh_port", int, False, 22, "the port of ssh_host"),
-    ("node_domain", str, False, "", "the compute nodes' domain (nas.grid.wayne.edu): a node is reached by ssh through the login node, and only while a job of yours runs on it; empty = not known"),
+    ("node_domain", str, False, "", "the compute nodes' domain (as nodes.university.example): a node is reached by ssh through the login node, and only while a job of yours runs on it; empty = not known"),
     ("ssh_host_key", str, False, "", "ssh_host's host key fingerprint as ssh-keygen -l prints it (SHA256:...); Beethoven refuses any other key"),
     ("ssh_relay", "str_or_none", False, None, "a relay Beethoven may use to reach ssh_host (a wss:// or https:// address), or null for none"),
     ("browser_key_days", "int_or_none", False, None, "days a browser key's line stays valid; past them the gate removes it (null = no expiry)"),

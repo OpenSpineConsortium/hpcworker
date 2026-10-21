@@ -63,9 +63,14 @@ job_class_options() { # CLASS GPUS -> one sbatch option per line, from the site 
   [ -n "$qos" ] && printf '%s\n' "--qos=$qos"
   [ -n "${P_account:-}" ] && printf '%s\n' "--account=$P_account"
   [ "$class" = gpu ] && printf '%s\n' "--gres=gpu:$gpus"
-  # Beethoven for VS Code's worker rule: a QoS named requeue may stop a job and start it again, so the
-  # job says it may be requeued and its log is appended to rather than started over
-  [ "$qos" = requeue ] && printf '%s\n' "--requeue" "--open-mode=append"
+  # Beethoven for VS Code's worker rule, read as the profile's job header reads it (profile.py's REQUEUE):
+  # the batch QoS named requeue may stop a job and start it again, so such a job says it may be requeued
+  # and its log is appended to rather than started over; every other job says it may not be
+  if [ "$class" = batch ] && [ -n "$qos" ] && [ "$qos" = "$P_qos_batch" ] && [ "$P_qos_batch" = requeue ]; then
+    printf '%s\n' "--requeue" "--open-mode=append"
+  else
+    printf '%s\n' "--no-requeue"
+  fi
   return 0
 }
 
