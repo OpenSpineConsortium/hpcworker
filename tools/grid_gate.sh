@@ -50,7 +50,7 @@
 #                                  framework 23: what that job printed, cleaned (accounts.sh acct_clean)
 #   update                         this clone fast-forwarded to its origin's main (below)
 #   promoter status | start | stop spine-datasets' promoter chain (below)
-#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | fetch ID | census ID
+#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | fetch ID | census ID
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 # N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
 # copy's rule too) and then prints the list as one line "HPCW-ACCOUNTS-JSON {...}". Words that only
@@ -76,7 +76,7 @@
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
 #                                  long run's mark), then its grid/gate.sh WORD [ID]:
-#                                  start, status, leaks, v1, latency, stop, prior or chain_eval, or fetch
+#                                  start, status, leaks, v1, latency, stop, prior, chain_eval or samples, or fetch
 #                                  or census with one id of lower-case letters, digits and _; gate.sh checks both again against its
 #                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
 #                                  answers 64 for a word it refuses and 75 while another of its words runs
@@ -202,7 +202,7 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
-JOBS_RE='^(update|promoter (status|start|stop)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|(fetch|census) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|promoter (status|start|stop)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
