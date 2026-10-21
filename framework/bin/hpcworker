@@ -40,6 +40,9 @@
 #                     framework 11: the browser's key, one restricted authorized_keys line whose only
 #                     command is the gate (lib/browser_key.sh); check is read only, for the lab lead
 #   hpcworker gate    that line's forced command: SSH_ORIGINAL_COMMAND, eight fixed verbs, never a sign-in
+#   hpcworker accounts list [--json] | use N | login N [--detach] | link N | code N CODE|- | usage | auto on|off | forget N
+#                     framework 21: several Claude accounts on the grid, one in use; a worker moves to the one
+#                     `use` names within seconds, and auto mode moves it when its account nears a limit (lib/accounts.sh)
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker queue report [--days N] [--limits]                 maintainers and lab leads: how long this account's jobs waited
 #                                                                per partition and QoS, from Eligible (or Submit where Eligible
@@ -73,7 +76,7 @@
 # in (framework 17, greg's rule of 2026-10-04: no API key anywhere): no sitting picks another way to
 # sign in, and no worker runs on one. Versions are integers.
 set -uo pipefail
-VERSION=20
+VERSION=21
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -265,6 +268,8 @@ source "$LIB/adapters/common.sh" || die "$LIB/adapters/common.sh is missing"
 # `browser-key` and `gate` then refuse (the dispatch below)
 # shellcheck disable=SC1090,SC1091
 [ -r "$LIB/browser_key.sh" ] && source "$LIB/browser_key.sh"
+# shellcheck disable=SC1091
+[ -r "$LIB/accounts.sh" ] && source "$LIB/accounts.sh"
 json_str() { hpcw_json_str "$1"; }
 in_job() { [ -n "${SLURM_JOB_ID:-${PBS_JOBID:-${LSB_JOBID:-}}}" ]; }
 same_dir() { local a b; a=$(cd "$1" 2>/dev/null && pwd -P) && b=$(cd "$2" 2>/dev/null && pwd -P) && [ "$a" = "$b" ]; }   # two directories that exist and are one
@@ -324,6 +329,10 @@ load_profile() {
   source "$ADAPTER"
   STATE_DIR="$P_shared_state_dir"; WORKSPACES="$STATE_DIR/workspaces"
   CCD="$P_claude_config_dir"
+  # framework 21: the profile's folder may be a link to the account in use (lib/accounts.sh); a command
+  # for one account names it with HPCW_ACCOUNT_SLOT, and works in that account's own folder
+  CCD_LINK="$CCD"
+  if [[ "${HPCW_ACCOUNT_SLOT:-}" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then CCD="$(dirname "$CCD_LINK")/accounts/$HPCW_ACCOUNT_SLOT"; fi
   export RUNTIME="$P_runtime" RUNTIME_BIN="$P_runtime_bin" RUNTIME_MODULE="$P_runtime_module"
   export HPCW_NODE_TMP_PATTERN="$P_node_tmp" HPCW_NODE_TMP_VAR="$P_node_tmp_var" HPCW_TMPDIR_IS_NODE_LOCAL="$([ "$P_tmpdir_is_node_local" = true ] && echo 1 || echo 0)"
   PROFILE_LOADED="$PROFILE"
@@ -529,7 +538,7 @@ install_own() { # NAME DISCOVER FORCE: a copy of the code in this home, as befor
   # a link where the command goes is moved aside first: a copy onto it would write through it
   [ -L "$HPCW_HOME/bin/hpcworker" ] && { move_aside bin/hpcworker || die "could not move the link $HPCW_HOME/bin/hpcworker aside"; }
   if ! same_dir "$SRC_ROOT" "$HPCW_HOME"; then
-    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/profile.awk" "$SRC_ROOT/lib/profile_sh.sh" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.sh" "$SRC_ROOT/lib/browser_key.sh" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
+    cp "$SRC_ROOT/bin/hpcworker" "$HPCW_HOME/bin/" && cp "$SRC_ROOT/lib/profile.py" "$SRC_ROOT/lib/profile.awk" "$SRC_ROOT/lib/profile_sh.sh" "$SRC_ROOT/lib/login_plain.sh" "$SRC_ROOT/lib/relay.sh" "$SRC_ROOT/lib/browser_key.sh" "$SRC_ROOT/lib/accounts.sh" "$SRC_ROOT/lib/accounts_read.py" "$HPCW_HOME/lib/" && cp "$SRC_ROOT"/lib/adapters/*.sh "$HPCW_HOME/lib/adapters/" \
       && cp "$SRC_ROOT"/jobs/* "$HPCW_HOME/jobs/" && cp "$SRC_ROOT"/profiles/*.json "$HPCW_HOME/profiles/" && cp "$SRC_ROOT/VERSION" "$HPCW_HOME/" || die "copy into $HPCW_HOME failed"
     [ -f "$SRC_ROOT/README.md" ] && cp "$SRC_ROOT/README.md" "$HPCW_HOME/"
     # copied from a shared copy (read-only there), the files would stay read-only and the next install or upload could not replace them
@@ -2213,7 +2222,7 @@ diag_browser_key() { # framework 11: the browser key's line (its date and the co
 cmd_diag() {
   [ "${1:-}" = "--json" ] && DIAG_JSON=1
   [ $DIAG_JSON = 1 ] && printf '{"version":%s,"host":%s,"user":%s,"nodes":[' "$VERSION" "$(json_str "$(hostname -s)")" "$(json_str "$USER")"
-  local miss="" f; for f in bin/hpcworker lib/profile.py lib/profile.awk lib/profile_sh.sh lib/login_plain.sh lib/relay.sh lib/browser_key.sh lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
+  local miss="" f; for f in bin/hpcworker lib/profile.py lib/profile.awk lib/profile_sh.sh lib/login_plain.sh lib/relay.sh lib/browser_key.sh lib/accounts.sh lib/accounts_read.py lib/adapters/common.sh lib/adapters/slurm.sh jobs/worker.sbatch.tpl jobs/probe.sbatch VERSION; do [ -s "$SRC_ROOT/$f" ] || miss="$miss $f"; done
   grep -q $'\r' "$SRC_ROOT/bin/hpcworker" "$SRC_ROOT"/lib/*.sh "$SRC_ROOT"/lib/adapters/*.sh "$SRC_ROOT"/jobs/* 2>/dev/null && miss="$miss (CR line endings: run hpcworker install)"
   if [ -n "$miss" ]; then emit hpcw.scripts false false false "missing or damaged:$miss"
   elif shared_mode && ! is_launcher "$HPCW_HOME/bin/hpcworker"; then emit hpcw.scripts true true false "hpcworker $VERSION, the shared copy at $SHARED_DIR ($SRC_ROOT); $HPCW_HOME/bin/hpcworker is not its launcher: hpcworker install"
@@ -2289,6 +2298,7 @@ case "${1:-help}" in
   # the forced command: a copy without the gate refuses everything, as the gate itself would
   gate) shift; declare -F cmd_gate >/dev/null || { echo "HPCW-GATE refused"; exit 126; }; cmd_gate "$@";;
   claude) shift; cmd_claude "$@";;
+  accounts) shift; declare -F cmd_accounts >/dev/null || die "lib/accounts.sh is missing from this copy (hpcworker install)"; cmd_accounts "$@";;
   diag) shift; cmd_diag "$@";;
   queue) shift; cmd_queue "$@";;
   _exec) shift; in_job_exec "$@";;

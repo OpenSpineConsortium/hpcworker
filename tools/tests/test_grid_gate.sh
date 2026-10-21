@@ -108,6 +108,49 @@ t "  with grid_runner's words" has 'sbatch refused'
 t "  and the gate's" has '^HPCW-GRID-GATE start failed 1$'
 unstub
 
+echo "== the accounts words (framework 21)"
+# a stand-in hpcworker in the stub clone: it writes down its arguments, its stdin and what of its environment matters
+mkdir -p "$S/framework/bin" "$S/framework/jobs"
+cat > "$S/framework/bin/hpcworker" <<'EOF2'
+#!/bin/bash
+d=$(cd "$(dirname "$0")/../.." && pwd)
+in=""; [ -t 0 ] || in=$(head -c 200)
+printf '%s|stdin=%s|HPCW_GATE=%s GRID=%s SSH=%s\n' "$*" "$in" "${HPCW_GATE:-}" "${HPCW_GRID_GATE:-}" "${SSH_ORIGINAL_COMMAND:-}" >> "$d/hw.calls"
+case "$*" in "accounts list --json") echo '{"v":1,"current":"1","accounts":[]}';; *) echo "HPCW-ACCOUNTS $2 done";; esac
+EOF2
+chmod 755 "$S/framework/bin/hpcworker"; HW_CALLS="$S/hw.calls"; : > "$HW_CALLS"
+acct() { rm -f "$CH/accounts.last" "$CH/accounts.sched"; gate "$@"; }
+acct accounts "${LINE_ARGS[@]}"
+t "accounts runs hpcworker accounts list --json from the clone" bash -c "tail -1 '$HW_CALLS' | grep -q '^accounts list --json|stdin=|HPCW_GATE= GRID=1 SSH=\$'"
+t "  and prints it as one HPCW-ACCOUNTS-JSON line" has '^HPCW-ACCOUNTS-JSON \{"v":1,"current":"1","accounts":\[\]\}$'
+t "  and ends well" has '^HPCW-GRID-GATE accounts ok$'
+acct "accounts use 2" "${LINE_ARGS[@]}"
+t "use N runs accounts use N, then the list" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts use 2|' && tail -1 '$HW_CALLS' | grep -q '^accounts list --json|'"
+acct "accounts login 3" "${LINE_ARGS[@]}"
+t "login N is the detached sitting" bash -c "tail -2 '$HW_CALLS' | head -1 | grep -q '^accounts login 3 --detach --wait 45|'"
+OUT=$(rm -f "$CH/accounts.last"; printf 'AbCdEf123456_-#st9\n' | env SSH_ORIGINAL_COMMAND="accounts code 3" bash "$S/tools/grid_gate.sh" "${LINE_ARGS[@]}" 2>&1); RC=$?
+t "code N takes the code on stdin and hands it on stdin, never in arguments" bash -c "[ '$RC' = 0 ] && grep -q '^accounts code 3 - --wait 25|stdin=AbCdEf123456_-#st9|' '$HW_CALLS'"
+t "  and never into the log" bash -c "! grep -q AbCdEf '$CH/gate.log'"
+OUT=$(rm -f "$CH/accounts.last"; printf 'bad code;id\n' | env SSH_ORIGINAL_COMMAND="accounts code 3" bash "$S/tools/grid_gate.sh" "${LINE_ARGS[@]}" 2>&1); RC=$?
+t "a code that is not one is refused" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'refused code'" _ "$OUT"
+for w in 'accounts use 0' 'accounts use 33' 'accounts use 2 3' 'accounts auto maybe' 'accounts usage now' 'accounts code 3 ABCDEFGH123' 'accounts;id' 'accounts list' 'accounts  use 2' 'accounts use 02'; do
+  acct "$w" "${LINE_ARGS[@]}"
+  t "the word $(printf '%q' "$w") is refused" bash -c "[ '$RC' = 126 ] && printf '%s\n' \"\$1\" | grep -q '^HPCW-GRID-GATE refused word'" _ "$OUT"
+done
+acct "accounts auto on" "${LINE_ARGS[@]}"
+KEEP_CLOCK=1 gate "accounts use 1" "${LINE_ARGS[@]}"
+t "the file words keep a floor of their own, a few seconds" bash -c "[ '$RC' = 123 ] && printf '%s' \"\$1\" | grep -q 'every 3 seconds'" _ "$OUT"
+rm -f "$CH/accounts.last"; KEEP_CLOCK=1 gate "accounts usage" "${LINE_ARGS[@]}"
+t "usage queues a job: a call a minute" rc_is 0
+rm -f "$CH/accounts.last"; KEEP_CLOCK=1 gate "accounts login 2" "${LINE_ARGS[@]}"
+t "  shared with login" bash -c "[ '$RC' = 123 ] && printf '%s' \"\$1\" | grep -q 'a minute'" _ "$OUT"
+rm -f "$CH/accounts.sched"
+chmod g+w "$S/framework/bin/hpcworker"; acct accounts "${LINE_ARGS[@]}"
+t "an accounts word refuses a framework/bin/hpcworker the group may write" bash -c "[ '$RC' = 126 ] && ! grep -q . <(tail -n +99999 '$HW_CALLS')"
+gate status "${LINE_ARGS[@]}"
+t "  which start, status and stop never run, and so never judge" rc_is 0
+chmod g-w "$S/framework/bin/hpcworker"
+
 echo "== what the gate refuses"
 n=$(n_calls)
 for w in 'status --now' 'status;id' 'status$(id)' 'status`id`' $'status\nid' 'stop ' ' stop' 'Start' 'install' 'serve' 'restart' 'gatekey' "$(printf 's%.0s' {1..17})" ''; do

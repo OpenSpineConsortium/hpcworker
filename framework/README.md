@@ -1093,6 +1093,35 @@ probe's and the worker's own reads on the compute node (`hpcw_workspace_trusted`
 only, the `qstat` JSON parse in `lib/adapters/pbs.sh`. `diag` reports whether `python3` is there and
 no longer runs it.
 
+## Several Claude accounts: `hpcworker accounts` (version 21)
+
+One Claude account at a time runs the worker, and the person may keep several signed in on the grid and
+move between them: from a terminal, or from the Symphony control panel's Grid tab through the grid's ssh
+gate (`tools/grid_gate.sh`, the `accounts` words, which only an admin of the repository may send through
+its `grid-accounts.yml`). The layout sits beside the profile's `claude_config_dir` (at Wayne State
+`~/.beethoven`): `claude` becomes a link to `accounts/<N>`, one Claude Code folder per account, N from 1
+to 32 as in the token pool, and the first verb that finds `claude` a plain folder makes it account 1 by a
+rename and a link, copying and deleting nothing. `accounts/<N>.who.json` keeps what `claude auth status`
+said (signed in with a subscription, the e-mail, the plan) and `accounts/<N>.use.json` the last usage
+reading (the five-hour and seven-day windows and when each resets), read from the `rate_limit_event` of
+one word on Haiku, which spends that word.
+
+    hpcworker accounts list [--json]       the accounts, the one in use, auto mode, the worker
+    hpcworker accounts use N               a running worker moves to N within seconds: Remote Control stops
+                                           on the old account and starts on N, with a new link
+    hpcworker accounts login N             a person's sitting, into account N
+    hpcworker accounts login N --detach    the sitting as a job; `link N` prints Anthropic's link, `code N -`
+                                           takes the code on stdin
+    hpcworker accounts usage               one short job reads every account's windows
+    hpcworker accounts auto on|off         at 90% of a window the worker moves to the signed-in account with
+                                           the most room (checked every 30 minutes and when Claude Code
+                                           speaks of a limit)
+    hpcworker accounts forget N            moved aside under accounts/.forgotten, never deleted
+
+The worker runs Claude Code in the folder the link names when it starts, never through the link, so a
+running session never sees another account's files mid-run. A session moved to another account appears
+in that account on claude.ai, not in the first. Nothing here reads a credential or signs anyone out.
+
 ## Always on
 
 `worker start` renders `job.sbatch` and submits it. When the job has confirmed the container and the
