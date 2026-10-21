@@ -467,16 +467,27 @@ register_missed() {
     # the clock starts again with the next start, not during its back-off
     rc_stop; REG_SINCE=0; return 0
   fi
+  local words="Remote Control did not connect to Claude on $NODE in two tries of $span each. Claude Code's last words: ${last:-none}"
+  [ "$STATE" = error ] && [ -n "$MESSAGE" ] && words="$MESSAGE. $words"
+  give_up "Remote Control printed no link in two tries of $REGISTER_TIMEOUT_S s" "$words"
+}
+# Anthropic refuses Remote Control to this sign-in (a cancelled plan, one without it, or entitlements older than
+# the plan), and Claude Code exits: no retry changes that, and four days of retries every five minutes said
+# nothing (go2432, 2026-10-20), so the job leaves at once and says what to do
+not_enabled_check() { # TEXT: Claude Code's output since this start
+  printf '%s' "$1" | grep -q -i "Remote Control isn't enabled for this account" || return 0
+  give_up "Remote Control is not enabled for this Claude account" "Claude says Remote Control isn't enabled for the Claude account signed in on the grid. Sign in to Claude again with an account whose plan includes Remote Control (hpcworker claude login), then start your worker again"
+}
+give_up() { # NOTE WORDS: end the session and the chain, and leave with state error and WORDS for the panel
+  [ "$STOPPING" = 1 ] && return 0
   STOPPING=1
   rc_stop
   end_chain
-  CHAIN_NOTE="chain ended: Remote Control printed no link in two tries of $REGISTER_TIMEOUT_S s"
-  local words="Remote Control did not connect to Claude on $NODE in two tries of $span each. Claude Code's last words: ${last:-none}"
-  [ "$STATE" = error ] && [ -n "$MESSAGE" ] && words="$MESSAGE. $words"
-  write_status error "$words"
-  hpcw_progress "$RUN_DIR" "Couldn't start: $words"
+  CHAIN_NOTE="chain ended: $1"
+  write_status error "$2"
+  hpcw_progress "$RUN_DIR" "Couldn't start: $2"
   rm -f stop; touch stop.done
-  say "stopped: $words; the chain ended"
+  say "stopped: $2; the chain ended"
   exit 0
 }
 trap on_term TERM INT
@@ -504,6 +515,7 @@ while :; do
       fi
     else
       note_registration "$(clean_tail "$RC_OFF" lines)" || true
+      not_enabled_check "$tail_txt"
       if printf '%s' "$tail_txt" | grep -q -i -E 'full-scope|must be logged in|not logged in|log in again|Please run /login|Invalid API key'; then
         [ "$STATE" = need_login ] || { write_status need_login "Claude Code says the sign-in on the grid is missing or expired; run: hpcworker claude login"; say "need_login"; }
       elif printf '%s' "$tail_txt" | grep -q -i "Couldn't verify Remote Control eligibility"; then
@@ -542,6 +554,7 @@ while :; do
     RC_ALIVE=false
     if [ "$RC_PID" != 0 ]; then
       # it exited: back off and start again (a fresh registration joins the same environment; --continue was tried once)
+      not_enabled_check "$(clean_tail "$RC_OFF")"
       RC_PID=0; RESTARTS=$((RESTARTS + 1)); NEXT_START=$(( $(now_s) + BACKOFF )); BACKOFF=$(( BACKOFF * 2 > 300 ? 300 : BACKOFF * 2 ))
       if [ "$STATE" != need_login ]; then
         write_status starting "Remote Control stopped; starting again in $(( NEXT_START - $(now_s) )) s. Last output: $(last_line "$(clean_tail "$RC_OFF")")"
