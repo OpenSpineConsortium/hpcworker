@@ -76,7 +76,7 @@
 # in (framework 17, greg's rule of 2026-10-04: no API key anywhere): no sitting picks another way to
 # sign in, and no worker runs on one. Versions are integers.
 set -uo pipefail
-VERSION=22
+VERSION=23
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne

@@ -46,6 +46,8 @@
 #   accounts usage                 one short job reads each account's use
 #   accounts start N [NAME]        framework 22: a worker of its own kept to account N (one sbatch)
 #   accounts stop NAME             that worker stopped
+#   accounts log login N | log usage | log worker NAME
+#                                  framework 23: what that job printed, cleaned (accounts.sh acct_clean)
 # N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
 # copy's rule too) and then prints the list as one line "HPCW-ACCOUNTS-JSON {...}". Words that only
 # read or write files have a floor of 3 seconds of their own; login and usage, which queue one job,
@@ -169,7 +171,7 @@ if [ -z "${SSH_ORIGINAL_COMMAND+set}" ]; then
   echo "HPCW-GRID-GATE refused word: name one of start, status or stop after the host (ssh ... <user>@<host> status)"; exit 126
 fi
 WORD=$SSH_ORIGINAL_COMMAND
-ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32})?$'
+ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 case "$WORD" in start|status|stop) ;; *)
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
