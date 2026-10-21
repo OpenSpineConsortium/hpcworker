@@ -559,6 +559,36 @@ class Job(unittest.TestCase):
         self.assertIn("moving from account 1 to account 2", out)
         self.assertEqual(self.status()["state"], "stopped")
 
+    def test_a_worker_kept_to_one_account_never_moves(self):
+        # framework 22: accounts start N writes account.pin; that worker runs in account N's folder from start
+        # to end, whatever the link names, and says it is a Symphony worker of its own
+        cfg, acc = self.accounts_layout()
+        open(self.logged_in, "w").close()
+        self.render()
+        self.queued_file()
+        with open(os.path.join(self.rd, "account.pin"), "w") as fh:
+            fh.write("2\n")
+        os.environ["FAKE_CCD_LOG"] = os.path.join(self.td, "ccd.log")
+        try:
+            proc = self.start_job()
+        finally:
+            del os.environ["FAKE_CCD_LOG"]
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online", 90), "online within 90 s")
+            self.assertEqual(self.ccd_log(), [os.path.join(acc, "2")], "account 2, not the one the link names")
+            self.assertEqual(self.account_file(), "2")
+            os.remove(cfg); os.symlink("accounts/1", cfg)
+            time.sleep(8)
+            self.assertEqual(self.ccd_log(), [os.path.join(acc, "2")], "a swap of the link moves no pinned worker")
+            with open(os.path.join(self.rd, "in_image.sh")) as fh:
+                self.assertIn("SYMPHONY_WORKER=grid-", fh.read())
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertNotIn("moving from account", out)
+
     def test_a_job_on_the_plain_folder_moves_once_it_becomes_account_1(self):
         # the reviewer's case: a job begun before any accounts verb must never run Claude Code through the
         # link, or a later swap would change its account mid-run

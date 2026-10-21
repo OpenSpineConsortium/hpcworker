@@ -24,7 +24,7 @@
 #                     the extension's one line (framework 10): set the account up if needed, record the
 #                     Remote Control answer, start the worker (or keep the one in line or running), and
 #                     sign in to Claude unless already signed in; "HPCW-STEP ..." lines say how far it got
-#   hpcworker worker start [--name N --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain] [--wait [MIN]]
+#   hpcworker worker start [--name N --account A --hours H --cpus C --mem M --partition P --qos Q --permission-mode M --capacity K --no-chain] [--wait [MIN]]
 #   hpcworker worker status [--name N] [--json] [--details]       one line for a person ("Your worker is in line for a computer (6 min so far).")
 #   hpcworker worker watch [--name N] [--minutes MIN]            follow it until it is online (files every 5 s; the scheduler at most once a minute)
 #   hpcworker worker stop|list|log|restrict [--name N] [--lines N]   restrict: mark the workspace so no worker starts there
@@ -76,7 +76,7 @@
 # in (framework 17, greg's rule of 2026-10-04: no API key anywhere): no sitting picks another way to
 # sign in, and no worker runs on one. Versions are integers.
 set -uo pipefail
-VERSION=21
+VERSION=22
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne
@@ -1102,7 +1102,7 @@ cmd_worker() {
   load_profile
   local sub="${1:-list}"; shift || true
   local name="worker" hours="$P_worker_defaults_hours" cpus="$P_worker_defaults_cpus" mem="$P_worker_defaults_mem" part="" qos="" pm="$P_worker_defaults_permission_mode" cap="$P_worker_defaults_capacity" as_json=0 lines=60 requeue="" chain=1
-  local wait_min=0 details=0 minutes=30 floor=0
+  local wait_min=0 details=0 minutes=30 floor=0 pin=""
   while [ $# -gt 0 ]; do case "$1" in
     --poll-floor) floor="${2:-}"; [[ "$floor" =~ ^[0-9]{1,5}$ ]] || die "--poll-floor must be a whole number of seconds"; shift 2;;
     --name) name="$2"; shift 2;; --hours) hours="$2"; shift 2;; --cpus) cpus="$2"; shift 2;; --mem) mem="$2"; shift 2;;
@@ -1110,6 +1110,7 @@ cmd_worker() {
     --requeue) requeue=1; shift;; --no-requeue) requeue=0; shift;; --no-chain) chain=0; shift;; --chain) chain=1; shift;; --json) as_json=1; shift;; --lines) lines="$2"; shift 2;;
     --wait) if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then wait_min="$2"; shift 2; else wait_min=30; shift; fi;;
     --details) details=1; shift;; --minutes) minutes="$2"; shift 2;;
+    --account) pin="${2:-}"; [[ "$pin" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]] || die "--account must be an account number, 1 to 32"; shift 2;;
     *) die "worker: unknown option $1";; esac; done
   [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "worker name must be letters, digits, _ or -"
   [[ "$minutes" =~ ^[0-9]+$ ]] || die "--minutes must be a whole number"
@@ -1153,6 +1154,12 @@ cmd_worker() {
         return 0
       fi
       rm -f "$rd/stop" "$rd/stop.done" "$rd/next.id"
+      # framework 22: a worker kept to one account (accounts start) reads its number from account.pin in
+      # its run directory; a start without --account follows the account in use again
+      if [ -n "$pin" ]; then
+        [ -d "$(dirname "$CCD_LINK")/accounts/$pin" ] || { start_unlock "$rd"; die "there is no account $pin (hpcworker accounts list)"; }
+        printf '%s\n' "$pin" > "$rd/account.pin"
+      else rm -f "$rd/account.pin"; fi
       # first-time notice, in plain words (the report's disclosure text, shortened for a terminal)
       if [ ! -e "$rd/.notice-shown" ] && [ "$CONNECT_MODE" != 1 ]; then
         cat <<'EOT'

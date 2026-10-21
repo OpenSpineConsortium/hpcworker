@@ -21,6 +21,11 @@
 #                                             moves to the signed-in account with the most room
 #   hpcworker accounts forget N               account N's folder moved aside under accounts/.forgotten;
 #                                             nothing is deleted, and the account in use is refused
+#   hpcworker accounts start N [NAME]         framework 22: a worker of its own on account N, kept to it
+#                                             (no swap, no auto mode), named NAME or accountN; several
+#                                             run at once, each its own Remote Control session on its
+#                                             own account and its own workspace
+#   hpcworker accounts stop NAME              that worker stopped, as worker stop does
 #
 # The layout, under the folder that holds the profile's claude_config_dir (at Wayne State ~/.beethoven):
 #   claude                  a link, accounts/<N>, to the account in use: Claude Code's CLAUDE_CONFIG_DIR
@@ -191,9 +196,11 @@ cmd_accounts() {
     usage) acct_usage "$@";;
     auto) acct_auto "$@";;
     forget) acct_forget "$@";;
+    start) acct_start "$@";;
+    stop) acct_stop "$@";;
     _login-job) acct_login_job "$@";;
     _usage-job) acct_usage_job "$@";;
-    *) die "accounts: list | use N | login N [--detach] | link N | code N CODE | usage | auto on|off | forget N";;
+    *) die "accounts: list | use N | login N [--detach] | link N | code N CODE | usage | auto on|off | forget N | start N [NAME] | stop NAME";;
   esac
 }
 
@@ -224,7 +231,7 @@ acct_list() {
       "$who" "$use" "$(json_str "${st%%|*}")" "$(json_str "${st#*|}")"
   done
   local uw; uw="$ACCT_WORK/usage"
-  printf '],"usage_job":%s,"worker":%s}\n' "$(if acct_job_live "$uw"; then echo '"running"'; else echo null; fi)" "$(acct_worker_json)"
+  printf '],"usage_job":%s,"worker":%s,"workers":%s}\n' "$(if acct_job_live "$uw"; then echo '"running"'; else echo null; fi)" "$(acct_worker_json)" "$(acct_workers_json)"
 }
 acct_worker_json() { # the newest worker heartbeat, the few fields the panel shows; null when there is none
   local best="" bt=0 d m
@@ -236,6 +243,53 @@ acct_worker_json() { # the newest worker heartbeat, the few fields the panel sho
     "$(json_str "$(basename "$best")")" "$(json_str "$(read_field "$f" state)")" "$(json_str "$(read_field "$f" message | cut -c1-300)")" \
     "$(json_str "$(read_field "$f" job)")" "$(json_str "$(read_field "$f" node)")" "$(json_str "$(run_link "$f")")" \
     "$(json_str "$(read_field "$f" updated_at)")" "$(( $(date +%s) - bt ))" "$([ -n "$a" ] && json_str "$a" || echo null)"
+}
+
+acct_workers_json() { # framework 22: every worker with a heartbeat in the last day, newest first, as the panel lists them
+  local d f m now first=1 a pin
+  now=$(date +%s)
+  printf '['
+  for d in $(ls -1dt "$STATE_DIR"/*/ 2>/dev/null); do
+    [ "$(basename "$d")" = probe ] && continue
+    f="$d/status.json"; [ -s "$f" ] || continue
+    m=$(stat -c %Y "$f" 2>/dev/null || echo 0); [ $(( now - m )) -lt 86400 ] || continue
+    a=""; [ -s "$d/account" ] && a=$(head -c 3 "$d/account" | tr -dc '0-9')
+    pin=$(acct_pin_of "$d")
+    [ $first = 1 ] || printf ','; first=0
+    printf '{"name":%s,"state":%s,"node":%s,"link":%s,"age_s":%s,"account":%s,"pinned":%s}' \
+      "$(json_str "$(basename "$d")")" "$(json_str "$(read_field "$f" state)")" "$(json_str "$(read_field "$f" node)")" \
+      "$(json_str "$(run_link "$f")")" "$(( now - m ))" "$([ -n "$a" ] && json_str "$a" || echo null)" "$([ -n "$pin" ] && json_str "$pin" || echo null)"
+  done
+  printf ']'
+}
+acct_pin_of() { local p; p=$(head -c 3 "$1/account.pin" 2>/dev/null | tr -dc '0-9'); [[ "$p" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]] && printf '%s' "$p"; return 0; }
+acct_pinned_live() { # N: the name of a live worker kept to account N, nothing when there is none
+  local d st m
+  for d in "$STATE_DIR"/*/; do
+    [ "$(acct_pin_of "$d")" = "$1" ] || continue
+    [ -s "$d/status.json" ] || continue
+    st=$(read_field "$d/status.json" state); case "$st" in stopped|error) continue;; esac
+    m=$(stat -c %Y "$d/status.json" 2>/dev/null || echo 0); [ $(( $(date +%s) - m )) -lt 86400 ] || continue
+    basename "$d"; return 0
+  done
+  return 0
+}
+acct_start() { # N [NAME]: a worker of its own on account N (worker start --account N)
+  acct_need_slot "${1:-}"
+  local n="$1" name="${2:-account$1}"
+  [[ "$name" =~ ^[A-Za-z0-9_-]{1,24}$ ]] || die "accounts: a worker name is letters, digits, _ or -, at most 24"
+  acct_adopt
+  [ -d "$ACCT_DIR/$n" ] || die "accounts: there is no account $n yet (hpcworker accounts login $n signs one in)"
+  [ "$(acct_field "$(acct_one_line "$ACCT_DIR/$n.who.json")" signed_in)" = false ] && die "accounts: account $n is not signed in with a Claude subscription (the last check said so); sign it in again first"
+  cmd_worker start --name "$name" --account "$n" || return $?
+  say "HPCW-ACCOUNTS start $n: worker $name asked for a computer on account $n"
+}
+acct_stop() { # NAME
+  local name="${1:-}"
+  [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "accounts: stop needs a worker's name"
+  [ -d "$STATE_DIR/$name" ] || die "accounts: there is no worker named $name"
+  cmd_worker stop --name "$name" || return $?
+  say "HPCW-ACCOUNTS stop $name: stopped"
 }
 
 acct_use() {
@@ -280,6 +334,8 @@ acct_forget() {
   [ -d "$ACCT_DIR/$n" ] || die "accounts: there is no account $n"
   [ "$(acct_current)" = "$n" ] && die "accounts: account $n is in use; use another first. Nothing was changed."
   acct_job_live "$(acct_login_dir "$n")" && die "accounts: a sign-in for account $n is under way. Nothing was changed."
+  local held; held=$(acct_pinned_live "$n")
+  [ -z "$held" ] || die "accounts: worker $held runs on account $n; stop it first. Nothing was changed."
   to="$ACCT_DIR/.forgotten/$(date -u +%Y%m%dT%H%M%SZ)-$n"
   acct_mkdir "$to" || die "accounts: cannot make $to"
   mv "$ACCT_DIR/$n" "$to/claude" || die "accounts: could not move account $n aside"
