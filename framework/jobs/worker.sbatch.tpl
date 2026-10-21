@@ -111,6 +111,18 @@ SUBMITTED_AT=""; RENEWAL=false
 if [ "$(prev_field job)" = "$JOB" ]; then SUBMITTED_AT=$(prev_field submitted_at); [ "$(prev_field renewal)" = true ] && RENEWAL=true; fi
 if [ -s next.id ]; then read -r _nid _np < next.id || true; [ "${_nid:-}" = "$JOB" ] && RENEWAL=true; fi
 CCD=$(hpcw_expand_job_vars "$CLAUDE_CONFIG_DIR_VALUE")
+# framework 21, several Claude accounts: the profile's folder may be a link, accounts/<N>, to the account in
+# use (hpcworker accounts). The job runs Claude Code in the folder the link names when it starts, never
+# through the link, so a running session never sees another account's files mid-run; the loop below
+# moves to the account the link names next, at once (the panel's swap) or by auto mode.
+CCD_LINK="$CCD"; ACCT_DIR="$(dirname "$CCD_LINK")/accounts"; AUTO_PROBE_S=1800; AUTO_HELD=0.9
+acct_named() { # the folder the link names now, one level and logically; the link itself when it is no link
+  local t; [ -L "$CCD_LINK" ] && t=$(readlink "$CCD_LINK") || { printf '%s' "$CCD_LINK"; return 0; }
+  case "$t" in /*) printf '%s' "$t";; *) printf '%s/%s' "$(dirname "$CCD_LINK")" "$t";; esac
+}
+acct_number() { local t="${1#"$ACCT_DIR"/}"; [ "$t" != "$1" ] && [[ "$t" =~ ^[0-9]{1,2}$ ]] && printf '%s' "$t"; return 0; }
+CCD=$(acct_named); ACCOUNT=$(acct_number "$CCD")
+printf '%s\n' "$ACCOUNT" > account.part && mv -f account.part account
 # the session title (framework 10): the profile's session_title, "<title> · <name>" for a worker not named worker; Claude Code's --name
 # framework 14: SESSION_URL is the link Claude Code printed (either form), ENV_URL the environment link when one was printed;
 # LINK_NOTED the link the last online status.json was written with, LINK_SAID the last one the job output named
@@ -212,6 +224,8 @@ if [ -n "$HIDE_KEY" ]; then BINDS="$BINDS $HIDE_KEY"; export HPCW_BINDS="$BINDS"
 # token in the environment would outrank the sign-in and switch Remote Control off; a key, a gateway
 # or a cloud provider's switch would put it on paid use, which Beethoven never runs on), feature flags
 # left on (Remote Control needs them), no self-update under a running worker.
+write_in_image() { # again whenever the account changes: CLAUDE_CONFIG_DIR is part of it
+# (the body is not indented: tests lift these lines out whole, as they stood before framework 21)
 CLEAN_ENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR -u CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
            -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u CLAUDE_CODE_USE_ANTHROPIC_AWS -u CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
            -u CLAUDE_CODE_USE_MANTLE -u CLAUDE_CODE_USE_GATEWAY -u CLAUDE_CODE_OAUTH_REFRESH_TOKEN -u CLAUDE_CODE_OAUTH_SCOPES
@@ -226,6 +240,8 @@ CLEAN_ENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_UR
   echo "source $(printf %q "$HPCW_CODE/lib/adapters/common.sh")"
   printf 'hpcw_runtime_exec %q' "$IMAGE"; for a in "${CLEAN_ENV[@]}"; do printf ' %q' "$a"; done; echo ' "$@"'; } > in_image.sh.part
 chmod 700 in_image.sh.part && mv -f in_image.sh.part in_image.sh
+}
+write_in_image
 in_image() { local t="$1"; shift; timeout "$t" "$RUN_DIR/in_image.sh" "$@"; }
 v=$(in_image 120 "$CLAUDE_BIN" --version 2>&1 | tail -1) || v="(no answer: $v)"
 case "$v" in *REFUSING*|*"no answer"*|"") write_status error "the container cannot run claude on $NODE: $v"; exit 1;; esac
@@ -490,6 +506,54 @@ give_up() { # NOTE WORDS: end the session and the chain, and leave with state er
   say "stopped: $2; the chain ended"
   exit 0
 }
+# framework 21, the account in use: the panel's swap or auto mode points the link at another account, and
+# the job ends Remote Control on the old one and starts it on the new one at once (a new link; the old
+# session is not continued, since it belongs to the other account)
+SWITCH_SAID=""; LAST_AUTO=0; AUTO_PY=$(command -v python3 2>/dev/null || echo /usr/bin/python3)
+account_moved() { # by the folders themselves: the plain folder made account 1 under a running job is no move
+  local to; to=$(acct_named); [ "$to" = "$CCD" ] && return 1
+  [ "$(cd "$to" 2>/dev/null && pwd -P)" != "$(cd "$CCD" 2>/dev/null && pwd -P)" ]
+}
+switch_account() {
+  local to; to=$(acct_named)
+  if [ ! -d "$to" ]; then
+    [ "$SWITCH_SAID" = "$to" ] || { say "the account link names $to, which is no folder; staying on account ${ACCOUNT:-in use}"; SWITCH_SAID="$to"; }
+    return 0
+  fi
+  say "moving from account ${ACCOUNT:-(the plain folder)} to account $(acct_number "$to")"
+  rc_stop
+  CCD="$to"; ACCOUNT=$(acct_number "$to"); SWITCH_SAID=""
+  printf '%s\n' "$ACCOUNT" > account.part && mv -f account.part account
+  write_in_image
+  [ -s connection.json ] && mv -f connection.json connection.prev.json
+  RC_PID=0; RESUME_TRIED=1; RESUMED=false; NEXT_START=0; BACKOFF=10; ONLINE_NOTED=0; ONLINE_AT=""
+  SESSION_URL=""; ENV_URL=""; ENV_ID=""; LINK_NOTED=""; LINK_SAID=""; REG_SINCE=0; REG_MISSES=0
+  WS_TRUSTED=false; hpcw_workspace_trusted "$CCD" "$WORKSPACE" && WS_TRUSTED=true
+  check_auth
+  hpcw_progress "$RUN_DIR" "Reconnecting"
+  if [ "$LOGGED_IN" = true ]; then write_status starting "moved to account $ACCOUNT; starting Remote Control on it"
+  else write_status need_login "$(login_words)"; fi
+}
+# auto mode (accounts/auto says on): every AUTO_PROBE_S, and when Claude Code speaks of a limit, one word
+# on Haiku reads the account's windows; at AUTO_HELD of one, the link moves to the signed-in account with
+# the most room (lib/accounts_read.py pick), and the loop's next turn moves the session to it
+LIMIT_RE="hit your (usage )?limit|usage limit|limit reached|limit will reset|rate limit"
+auto_on() { [ "$(head -c 2 "$ACCT_DIR/auto" 2>/dev/null)" = on ] && [ -L "$CCD_LINK" ] && [ -n "$ACCOUNT" ]; }
+auto_due() { auto_on && [ "$LOGGED_IN" = true ] && [ $(( $(now_s) - LAST_AUTO )) -ge "$AUTO_PROBE_S" ]; }
+auto_check() {
+  LAST_AUTO=$(now_s)
+  local rd="$HPCW_CODE/lib/accounts_read.py" f="$IPC/usage" pw to
+  [ -x "$AUTO_PY" ] && [ -s "$rd" ] || { say "auto mode: python3 or $rd is missing on $NODE, so auto mode reads nothing here"; return 0; }
+  # a folder of its own, so the probe never becomes the session --continue would bring back
+  pw="$(dirname "$WORKSPACE")/.accounts-probe"; mkdir -p "$pw"
+  in_image 90 bash -c 'cd "$1" && exec "$2" -p "$3" --model haiku --max-turns 1 --output-format stream-json --verbose' _ "$pw" "$CLAUDE_BIN" "Reply with the one word ok." > "$f" 2>&1
+  "$AUTO_PY" "$rd" use "$ACCOUNT" "$f" "$ACCT_DIR/$ACCOUNT.use.json" 2>/dev/null
+  : > "$f"
+  to=$("$AUTO_PY" "$rd" pick "$ACCT_DIR" "$ACCOUNT" "$AUTO_HELD" 2>/dev/null)
+  [[ "$to" =~ ^[0-9]{1,2}$ ]] && [ "$to" != "$ACCOUNT" ] || return 0
+  say "auto mode: account $ACCOUNT is at its limit; moving to account $to"
+  ln -s "accounts/$to" "$CCD_LINK.hpcw$$" 2>/dev/null && mv -Tf "$CCD_LINK.hpcw$$" "$CCD_LINK" 2>/dev/null || rm -f "$CCD_LINK.hpcw$$"
+}
 trap on_term TERM INT
 
 # ---- 7. main loop: start, watch, answer from the recorded consent, record, heartbeat ---------------
@@ -500,6 +564,7 @@ if [ "$LOGGED_IN" != true ]; then write_status need_login "$(login_words)"; fi
 while :; do
   if [ -e stop ]; then stop_and_leave "stop file"; fi
   if abandon_due; then login_abandon; fi
+  if account_moved; then switch_account; fi
   if rc_alive; then
     RC_ALIVE=true
     tail_txt=$(clean_tail "$RC_OFF")
@@ -516,6 +581,7 @@ while :; do
     else
       note_registration "$(clean_tail "$RC_OFF" lines)" || true
       not_enabled_check "$tail_txt"
+      if auto_on && [ $(( $(now_s) - LAST_AUTO )) -ge 300 ] && printf '%s' "$tail_txt" | grep -q -i -E "$LIMIT_RE"; then auto_check; fi
       if printf '%s' "$tail_txt" | grep -q -i -E 'full-scope|must be logged in|not logged in|log in again|Please run /login|Invalid API key'; then
         [ "$STATE" = need_login ] || { write_status need_login "Claude Code says the sign-in on the grid is missing or expired; run: hpcworker claude login"; say "need_login"; }
       elif printf '%s' "$tail_txt" | grep -q -i "Couldn't verify Remote Control eligibility"; then
@@ -580,6 +646,7 @@ while :; do
     # then waits as it does for no sign-in (and the sign-in wait's own clock may stop it)
     if [ "$SIGNIN" = other ]; then rc_stop; write_status need_login "$(login_words)"; say "signed in, but not with a Claude subscription: Remote Control stopped"; fi
   fi
+  if auto_due; then auto_check; fi
   # after this look at Claude Code's output, so a link printed since the last look counts first
   if register_due; then register_missed; fi
   if [ $(( $(now_s) - LAST_BEAT )) -ge "$HEARTBEAT_S" ]; then write_status "$STATE" "$MESSAGE"; LAST_BEAT=$(now_s); fi

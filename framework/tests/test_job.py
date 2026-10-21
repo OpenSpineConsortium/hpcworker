@@ -43,6 +43,8 @@ case "$1 ${2:-}" in
     else echo '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "st1234@wayne.edu", "subscriptionType": "max"}'; fi;;
   "remote-control --help") echo "Usage: claude remote-control [options]  --name <name> --capacity <n> --continue --permission-mode <mode>";;
   remote-control*)
+    # framework 21: which account each start ran on
+    [ -n "${FAKE_CCD_LOG:-}" ] && printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$FAKE_CCD_LOG"
     printf '\033[2J\033[H'
     if [ "${FAKE_RC_FORM:-}" = resume_exit ]; then
       # a resumed single session that ends a few seconds in, then a fresh registration (live: job 40554631, 2026-10-03)
@@ -89,6 +91,11 @@ case "$1 ${2:-}" in
       [ "${FAKE_RC_FORM:-}" = both ] && printf 'Continue coding in the Claude mobile app or %s\r\n' "$FAKE_SESSION_URL"
     fi
     exec sleep 600;;
+  "-p "*)
+    # framework 21, auto mode's probe: the reading FAKE_PROBE_DIR holds for this account's folder
+    printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "${FAKE_PROBE_DIR:-/nonexistent}/probed"
+    cat "${FAKE_PROBE_DIR:-/nonexistent}/$(basename "$CLAUDE_CONFIG_DIR")" 2>/dev/null
+    echo '{"type":"result","result":"ok"}';;
   *) echo "fake claude: $*" >&2; exit 2;;
 esac
 """
@@ -504,6 +511,86 @@ class Job(unittest.TestCase):
                 proc.communicate(timeout=60)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+    def accounts_layout(self, n=2):
+        """framework 21: the profile's folder as a link to accounts/1, accounts 1..n signed in"""
+        cfg = os.path.join(self.td, "cfg"); acc = os.path.join(self.td, "accounts")
+        for i in range(1, n + 1):
+            os.makedirs(os.path.join(acc, str(i)))
+            with open(os.path.join(acc, "%d.who.json" % i), "w") as fh:
+                fh.write('{"signed_in":true,"slot":"%d","v":1}\n' % i)
+        os.symlink("accounts/1", cfg)
+        return cfg, acc
+
+    def ccd_log(self):
+        try:
+            with open(os.path.join(self.td, "ccd.log")) as fh:
+                return fh.read().split()
+        except OSError:
+            return []
+
+    def account_file(self):
+        with open(os.path.join(self.rd, "account")) as fh:
+            return fh.read().strip()
+
+    def test_a_swap_moves_the_session_to_the_other_account(self):
+        cfg, acc = self.accounts_layout()
+        open(self.logged_in, "w").close()
+        self.render()
+        self.queued_file()
+        os.environ["FAKE_CCD_LOG"] = os.path.join(self.td, "ccd.log")
+        try:
+            proc = self.start_job()
+        finally:
+            del os.environ["FAKE_CCD_LOG"]
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online", 90), "online within 90 s")
+            self.assertEqual(self.ccd_log(), [os.path.join(acc, "1")], "Claude Code runs in the account's own folder, never through the link")
+            self.assertEqual(self.account_file(), "1")
+            os.remove(cfg); os.symlink("accounts/2", cfg)
+            self.assertTrue(self.wait_for(lambda: self.ccd_log()[-1:] == [os.path.join(acc, "2")] and self.status()["state"] == "online", 60), "online again on account 2")
+            self.assertEqual(self.account_file(), "2")
+            self.assertIn("Reconnecting", self.progress())
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertIn("moving from account 1 to account 2", out)
+        self.assertEqual(self.status()["state"], "stopped")
+
+    def test_auto_mode_moves_off_an_account_at_its_limit(self):
+        cfg, acc = self.accounts_layout(3)
+        with open(os.path.join(acc, "auto"), "w") as fh:
+            fh.write("on\n")
+        resets = datetime.fromtimestamp(time.time() + 7200, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(os.path.join(acc, "2.use.json"), "w") as fh:
+            fh.write(json.dumps({"windows": {"five_hour": {"utilization": 0.6, "resetsAt": resets}}}) + "\n")
+        with open(os.path.join(acc, "3.use.json"), "w") as fh:
+            fh.write(json.dumps({"windows": {"five_hour": {"utilization": 0.2, "resetsAt": resets}}}) + "\n")
+        probes = os.path.join(self.td, "probes"); os.makedirs(probes)
+        with open(os.path.join(probes, "1"), "w") as fh:
+            fh.write(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.93, "resetsAt": resets,
+                                 "unifiedWindows": {"five_hour": {"utilization": 0.93, "resetsAt": resets}}}}) + "\n")
+        open(self.logged_in, "w").close()
+        self.render()
+        self.queued_file()
+        os.environ.update(FAKE_CCD_LOG=os.path.join(self.td, "ccd.log"), FAKE_PROBE_DIR=probes)
+        try:
+            proc = self.start_job()
+        finally:
+            del os.environ["FAKE_CCD_LOG"], os.environ["FAKE_PROBE_DIR"]
+        try:
+            self.assertTrue(self.wait_for(lambda: os.readlink(cfg) == "accounts/3", 60), "the link moved to the account with the most room")
+            self.assertTrue(self.wait_for(lambda: self.ccd_log()[-1:] == [os.path.join(acc, "3")] and self.status()["state"] == "online", 60), "online on account 3")
+            with open(os.path.join(acc, "1.use.json")) as fh:
+                self.assertEqual(json.load(fh)["windows"]["five_hour"]["utilization"], 0.93, "the reading is kept for the panel")
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertIn("auto mode: account 1 is at its limit; moving to account 3", out)
 
     def test_a_chain_successor_is_a_renewal(self):
         # the predecessor (4241) queued this job: its status.json names 4241, next.id names this job first; SubmitTime from the scheduler

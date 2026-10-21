@@ -36,6 +36,20 @@
 # On a login node whose umask is 002, git writes what a pull changes group-writable: after each pull,
 # chmod -R go-w tools framework in the clone, or the gate refuses until it is done.
 #
+# Framework 21 adds the account's Claude accounts on the grid (framework/lib/accounts.sh), for the
+# Symphony control panel's Grid tab through the repository's grid-accounts workflow, whose dispatch only
+# an admin of the repository may make. The word is one of these, exactly:
+#   accounts                       the list, as JSON
+#   accounts use N | forget N | link N | auto on | auto off
+#   accounts login N               a sign-in as a job of its own (hpcworker accounts login N --detach)
+#   accounts code N                the code from Anthropic's page, on standard input, never in the word
+#   accounts usage                 one short job reads each account's use
+# N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
+# copy's rule too) and then prints the list as one line "HPCW-ACCOUNTS-JSON {...}". Words that only
+# read or write files have a floor of 3 seconds of their own; login and usage, which queue one job,
+# keep the minute. This is the one sign-in the grid takes through a gate: the browser key's gate still
+# refuses every sign-in (framework 11), and nothing here passes HPCW_GATE on.
+#
 #   tools/grid_gate.sh --check-copy [RUNNER_DIR [OWNER-NAME]]
 #                     read only: one line per such finding, then "ok" (0) or "refused" (8)
 set -uo pipefail
@@ -153,8 +167,19 @@ if [ -z "${SSH_ORIGINAL_COMMAND+set}" ]; then
   echo "HPCW-GRID-GATE refused word: name one of start, status or stop after the host (ssh ... <user>@<host> status)"; exit 126
 fi
 WORD=$SSH_ORIGINAL_COMMAND
-case "$WORD" in start|status|stop) ;; *) refuse word "one of start, status or stop, and nothing else";; esac
-problems=$( { copy_problems; runner_problems "$RUNNER_DIR" "${REPO//\//-}"; } | refusals)
+ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage)?$'
+KIND=runner
+case "$WORD" in start|status|stop) ;; *)
+  if [ ${#WORD} -le 40 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
+  else refuse word "one of start, status or stop (or an accounts word), and nothing else"; fi;;
+esac
+bin_problems() { # the hpcworker the accounts words run, held as tools/ is
+  [ -d "$CLONE/framework/bin" ] && [ ! -L "$CLONE/framework/bin" ] || { echo "copy $CLONE/framework/bin (missing or a link)"; return 0; }
+  find "$CLONE/framework/bin" "$CLONE/framework/jobs" -maxdepth 1 \( ! -user "$ME" -o \( ! -type l \( -perm -g+w -o -perm -o+w \) \) \) -print 2>/dev/null | sed 's/^/copy /'
+  find "$CLONE/framework/bin" "$CLONE/framework/jobs" -mindepth 1 -type l -print 2>/dev/null | sed 's/^/copy (a link) /'
+  return 0
+}
+problems=$( { copy_problems; runner_problems "$RUNNER_DIR" "${REPO//\//-}"; [ "$KIND" = runner ] || bin_problems; } | refusals)
 [ -z "$problems" ] || refuse copy "others may change the clone or the runner's folder the key runs from ($(printf '%s' "$problems" | head -1)); tools/grid_gate.sh --check-copy $RUNNER_DIR ${REPO//\//-} lists all"
 ( umask 077; mkdir -p "$CHAIN" ) 2>/dev/null && [ -d "$CHAIN" ] && [ ! -L "$CHAIN" ] || refuse folder "the chain's folder $CHAIN cannot be made"
 
@@ -166,13 +191,15 @@ take_lock() { # a lock older than two minutes is a leftover
   t=$(stat -c %Y "$LOCK" 2>/dev/null) && [ $(( $(date +%s) - t )) -gt 120 ] && rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null
 }
 take_lock || { note "$WORD" "limit (another call holds the gate)"; echo "HPCW-GRID-GATE limit: another call is being taken; try again in a minute"; exit 123; }
-now=$(date +%s); last=$(cat "$CHAIN/gate.last" 2>/dev/null); [[ "$last" =~ ^[0-9]{1,12}$ ]] || last=0
+STAMP=gate.last
+case "$WORD" in accounts\ login\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; esac
+now=$(date +%s); last=$(cat "$CHAIN/$STAMP" 2>/dev/null); [[ "$last" =~ ^[0-9]{1,12}$ ]] || last=0
 if [ $(( now - last )) -lt $FLOOR ] && [ $(( now - last )) -ge 0 ]; then
   rmdir "$LOCK" 2>/dev/null
-  note "$WORD" "limit"; echo "HPCW-GRID-GATE limit: one call a minute; try again in $(( FLOOR - (now - last) )) seconds"; exit 123
+  note "$WORD" "limit"; echo "HPCW-GRID-GATE limit: one call $([ $FLOOR = 60 ] && echo a minute || echo "every $FLOOR seconds"); try again in $(( FLOOR - (now - last) )) seconds"; exit 123
 fi
-tmp=$(mktemp "$CHAIN/.gate.last.XXXXXX" 2>/dev/null) && printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$CHAIN/gate.last" \
-  || { rm -f "${tmp:-}"; rmdir "$LOCK" 2>/dev/null; refuse folder "cannot write $CHAIN/gate.last"; }
+tmp=$(mktemp "$CHAIN/.$STAMP.XXXXXX" 2>/dev/null) && printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$CHAIN/$STAMP" \
+  || { rm -f "${tmp:-}"; rmdir "$LOCK" 2>/dev/null; refuse folder "cannot write $CHAIN/$STAMP"; }
 rmdir "$LOCK" 2>/dev/null
 
 # ---- the one command ----------------------------------------------------------------------------------
@@ -181,6 +208,33 @@ rmdir "$LOCK" 2>/dev/null
 if ! command -v sbatch >/dev/null 2>&1 && [ -r /etc/profile ]; then
   p=$(set +u; . /etc/profile >/dev/null 2>&1 < /dev/null; printf '%s' "$PATH")
   [ -n "$p" ] && PATH="$p"
+fi
+if [ "$KIND" = accounts ]; then
+  # the code comes on standard input: one line, read here with a time limit and checked as accounts code checks it
+  CODE=""
+  if [[ "$WORD" == "accounts code "* ]]; then
+    IFS= read -r -t 20 CODE || true
+    [[ "$CODE" =~ ^[A-Za-z0-9_#.~-]{8,512}$ ]] || { note "$WORD" "refused (no code on stdin)"; echo "HPCW-GRID-GATE refused code: send the code from Anthropic's page on standard input"; exit 126; }
+  fi
+  set -f; V=( $WORD ); set +f; V=("${V[@]:1}")
+  case "${V[0]:-list}" in
+    list) V=(list --json);;
+    login) V+=(--detach --wait 45);;
+    code) V+=(- --wait 25);;
+  esac
+  AK=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" PATH="$PATH" LC_ALL=C HPCW_GRID_GATE=1)
+  for v in SLURM_CONF; do [ -n "${!v:-}" ] && AK+=("$v=${!v}"); done
+  HW="$CLONE/framework/bin/hpcworker"
+  if [ -n "$CODE" ]; then out=$(printf '%s\n' "$CODE" | env -i "${AK[@]}" /bin/bash "$HW" accounts "${V[@]}" 2>&1); rc=$?
+  else out=$(env -i "${AK[@]}" /bin/bash "$HW" accounts "${V[@]}" < /dev/null 2>&1); rc=$?; fi
+  CODE=""
+  if [ "${V[0]}" = list ]; then printf 'HPCW-ACCOUNTS-JSON %s\n' "$(printf '%s\n' "$out" | grep '^{' | tail -1)"; printf '%s\n' "$out" | grep -v '^{'
+  else
+    printf '%s\n' "$out"
+    printf 'HPCW-ACCOUNTS-JSON %s\n' "$(env -i "${AK[@]}" /bin/bash "$HW" accounts list --json < /dev/null 2>/dev/null | grep '^{' | tail -1)"
+  fi
+  if [ $rc = 0 ]; then note "$WORD" "ok"; echo "HPCW-GRID-GATE accounts ok"; else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE accounts failed $rc"; fi
+  exit $rc
 fi
 ARGS=(--repo "$REPO" --runner-dir "$RUNNER_DIR"); [ -n "$SITE" ] && ARGS+=(--site "$SITE")
 case "$WORD" in
