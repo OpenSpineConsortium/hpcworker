@@ -559,6 +559,32 @@ class Job(unittest.TestCase):
         self.assertIn("moving from account 1 to account 2", out)
         self.assertEqual(self.status()["state"], "stopped")
 
+    def test_a_job_on_the_plain_folder_moves_once_it_becomes_account_1(self):
+        # the reviewer's case: a job begun before any accounts verb must never run Claude Code through the
+        # link, or a later swap would change its account mid-run
+        cfg = os.path.join(self.td, "cfg"); acc = os.path.join(self.td, "accounts")
+        os.makedirs(cfg)
+        open(self.logged_in, "w").close()
+        self.render()
+        self.queued_file()
+        os.environ["FAKE_CCD_LOG"] = os.path.join(self.td, "ccd.log")
+        try:
+            proc = self.start_job()
+        finally:
+            del os.environ["FAKE_CCD_LOG"]
+        try:
+            self.assertTrue(self.wait_for(lambda: self.status()["state"] == "online", 90))
+            self.assertEqual(self.ccd_log(), [cfg])
+            os.makedirs(acc); os.rename(cfg, os.path.join(acc, "1")); os.symlink("accounts/1", cfg)
+            self.assertTrue(self.wait_for(lambda: self.ccd_log()[-1:] == [os.path.join(acc, "1")] and self.status()["state"] == "online", 60), "on account 1's own folder")
+            os.makedirs(os.path.join(acc, "2")); os.remove(cfg); os.symlink("accounts/2", cfg)
+            self.assertTrue(self.wait_for(lambda: self.ccd_log()[-1:] == [os.path.join(acc, "2")], 60), "and a swap after it is seen")
+            open(os.path.join(self.rd, "stop"), "w").close()
+            proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
     def test_auto_mode_moves_off_an_account_at_its_limit(self):
         cfg, acc = self.accounts_layout(3)
         with open(os.path.join(acc, "auto"), "w") as fh:

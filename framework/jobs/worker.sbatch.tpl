@@ -510,9 +510,9 @@ give_up() { # NOTE WORDS: end the session and the chain, and leave with state er
 # the job ends Remote Control on the old one and starts it on the new one at once (a new link; the old
 # session is not continued, since it belongs to the other account)
 SWITCH_SAID=""; LAST_AUTO=0; AUTO_PY=$(command -v python3 2>/dev/null || echo /usr/bin/python3)
-account_moved() { # by the folders themselves: the plain folder made account 1 under a running job is no move
-  local to; to=$(acct_named); [ "$to" = "$CCD" ] && return 1
-  [ "$(cd "$to" 2>/dev/null && pwd -P)" != "$(cd "$CCD" 2>/dev/null && pwd -P)" ]
+account_moved() { # the folder the link names is not the one the session runs in. A job that began on the
+  # plain folder moves once when that folder becomes account 1, so its Claude Code never runs through the link
+  [ "$(acct_named)" != "$CCD" ]
 }
 switch_account() {
   local to; to=$(acct_named)

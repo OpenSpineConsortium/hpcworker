@@ -44,7 +44,7 @@
 ACCT_SLOT_RE='^([1-9]|[12][0-9]|3[0-2])$'
 ACCT_SLOTS=$(seq 1 32)
 ACCT_LOGIN_MIN=25       # wall time of the sitting's job, minutes; a code later than this misses it
-ACCT_USAGE_MIN=10       # wall time of the usage job
+ACCT_USAGE_MIN=10       # the usage job's least wall time; three minutes more for each account
 ACCT_STALE_S=1800       # a sitting or usage job with no end after this long counts as gone
 ACCT_PROBE='Reply with the one word ok.'
 
@@ -96,12 +96,17 @@ acct_adopt() { # claude as a plain folder becomes an account; nothing when it is
   acct_mkdir "$ACCT_DIR" || die "accounts: cannot make $ACCT_DIR"
   [ -e "$ACCT_LINK" ] || return 0
   [ -d "$ACCT_LINK" ] || die "accounts: $ACCT_LINK is neither a folder nor a link; nothing was changed"
-  local n; n=$(acct_free_slot) || die "accounts: all 32 numbers are taken; nothing was changed"
-  mv "$ACCT_LINK" "$ACCT_DIR/$n" 2>/dev/null || die "accounts: could not move $ACCT_LINK to $ACCT_DIR/$n; nothing was changed"
+  # two verbs at once (a terminal and the panel) must not both move it: one lock, and the test again under it
+  local lock; lock="$(dirname "$ACCT_LINK")/.accounts.lock"
+  mkdir "$lock" 2>/dev/null || { sleep 2; [ -L "$ACCT_LINK" ] && return 0; die "accounts: another accounts command is making the first account; try again"; }
+  if [ -L "$ACCT_LINK" ]; then rmdir "$lock"; return 0; fi
+  local n; n=$(acct_free_slot) || { rmdir "$lock"; die "accounts: all 32 numbers are taken; nothing was changed"; }
+  mv "$ACCT_LINK" "$ACCT_DIR/$n" 2>/dev/null || { rmdir "$lock"; die "accounts: could not move $ACCT_LINK to $ACCT_DIR/$n; nothing was changed"; }
   if ! ln -s "accounts/$n" "$ACCT_LINK" 2>/dev/null; then
-    mv "$ACCT_DIR/$n" "$ACCT_LINK" 2>/dev/null
+    mv "$ACCT_DIR/$n" "$ACCT_LINK" 2>/dev/null; rmdir "$lock"
     die "accounts: could not link $ACCT_LINK to $ACCT_DIR/$n; it was put back"
   fi
+  rmdir "$lock"
   acct_seed_who "$n"
   ACCT_ADOPTED="$n"
 }
@@ -164,7 +169,8 @@ acct_submit() { # DIR NAME MINUTES VERB...: one job that runs this command's VER
     printf 'exec /bin/bash %q accounts' "$self"; for q in "$@"; do printf ' %q' "$q"; done; echo; } > "$w/job.sh.part" \
     && chmod 700 "$w/job.sh.part" && mv -f "$w/job.sh.part" "$w/job.sh" || die "accounts: cannot write $w/job.sh"
   local id
-  id=$(adapter_submit "$w/job.sh" -p "$P_partition_cpu" ${P_qos_cpu:+--qos="$P_qos_cpu"} -t "00:$(printf '%02d' "$min"):00" -N 1 -n 1 --mem=2G \
+  # nothing of a gate or an ssh command rides into the job, where it would bar the sitting (sbatch exports all)
+  id=$(unset HPCW_GATE HPCW_GATE_SLOT SSH_ORIGINAL_COMMAND; adapter_submit "$w/job.sh" -p "$P_partition_cpu" ${P_qos_cpu:+--qos="$P_qos_cpu"} -t "00:$(printf '%02d' "$min"):00" -N 1 -n 1 --mem=2G \
        -J "$name" -D "$w" --output "$w/job.log") || die "accounts: the scheduler refused the job"
   acct_write "$w/job.id" "$id" || die "accounts: cannot write $w/job.id"
   echo "$id"
@@ -240,10 +246,24 @@ acct_use() {
   who=$(acct_one_line "$ACCT_DIR/$n.who.json")
   [ "$(acct_field "$who" signed_in)" = false ] && die "accounts: account $n is not signed in with a Claude subscription (the last check said so); sign it in again first"
   [ "$(acct_current)" = "$n" ] && { say "HPCW-ACCOUNTS use $n: already in use"; return 0; }
+  # a worker of framework 20 or older runs Claude Code through the link itself, so moving the link would
+  # change its account mid-run: it is stopped and started again first (it then follows every move)
+  local old; old=$(acct_old_worker)
+  [ -z "$old" ] || die "accounts: your worker runs framework $old, which cannot move between accounts; stop it and start it again (it then runs framework $VERSION), then use $n. Nothing was changed."
   acct_link "$n" || die "accounts: could not point $ACCT_LINK at account $n; nothing was changed"
   say "HPCW-ACCOUNTS use $n: in use now; a running worker moves to it within seconds"
 }
 
+acct_old_worker() { # the framework of a live worker older than 21, nothing when there is none
+  local d v st m
+  for d in "$STATE_DIR"/*/; do
+    [ -s "$d/status.json" ] || continue
+    m=$(stat -c %Y "$d/status.json" 2>/dev/null || echo 0); [ $(( $(date +%s) - m )) -lt 300 ] || continue
+    st=$(read_field "$d/status.json" state); case "$st" in online|starting|running|need_consent) ;; *) continue;; esac
+    v=$(read_field "$d/status.json" version); [[ "$v" =~ ^[0-9]{1,4}$ ]] && [ "$v" -lt 21 ] && { echo "$v"; return 0; }
+  done
+  return 0
+}
 acct_auto() {
   case "${1:-}" in
     on|off) acct_mkdir "$ACCT_DIR" || die "accounts: cannot make $ACCT_DIR"
@@ -371,7 +391,11 @@ acct_usage() {
   local w="$ACCT_WORK/usage"
   acct_mkdir "$ACCT_WORK" && acct_mkdir "$w" || die "accounts: cannot make $w"
   if acct_job_live "$w"; then say "HPCW-ACCOUNTS usage: already being read"
-  else rm -f "$w/done"; local id; id=$(acct_submit "$w" hpcw_acct_usage "$ACCT_USAGE_MIN" _usage-job) || return 1; say "HPCW-ACCOUNTS usage: job $id"; fi
+  else
+    # three minutes an account at most (a container start for its sign-in, a probe of 150 s), and a few more
+    local min; min=$(( 3 + 3 * $(acct_slots | wc -l) )); [ "$min" -gt 59 ] && min=59; [ "$min" -lt "$ACCT_USAGE_MIN" ] && min=$ACCT_USAGE_MIN
+    rm -f "$w/done"; local id; id=$(acct_submit "$w" hpcw_acct_usage "$min" _usage-job) || return 1; say "HPCW-ACCOUNTS usage: job $id"
+  fi
   local i=0
   while [ $i -lt "$wait_s" ] && acct_job_live "$w"; do sleep 3; i=$((i + 3)); done
   if [ -e "$w/done" ]; then say "HPCW-ACCOUNTS usage: read"; else say "HPCW-ACCOUNTS usage: still reading"; fi
@@ -379,9 +403,12 @@ acct_usage() {
 acct_usage_job() {
   in_job || die "accounts: _usage-job runs inside its job"
   local w="$ACCT_WORK/usage" n
-  [ -n "$PY" ] || { touch "$w/done"; die "accounts: python3 is needed on the compute node"; }
+  # done whatever ends the job (the wall time sends TERM first), so the panel never waits on a job that is gone
+  trap 'touch "$w/done"' EXIT
+  trap 'exit 143' TERM
+  [ -n "$PY" ] || die "accounts: python3 is needed on the compute node"
   for n in $(acct_slots); do
-    HPCW_ACCOUNT_SLOT="$n" HPCW_WS=.accounts-probe "$SELF" _exec run auth status > "$w/auth-$n" 2>/dev/null
+    HPCW_ACCOUNT_SLOT="$n" HPCW_WS=.accounts-probe timeout 120 "$SELF" _exec run auth status > "$w/auth-$n" 2>/dev/null
     "$PY" "$LIB/accounts_read.py" who "$n" "$w/auth-$n" "$ACCT_DIR/$n.who.json"
     : > "$w/auth-$n"
     if [ "$(acct_field "$(acct_one_line "$ACCT_DIR/$n.who.json")" signed_in)" = true ]; then

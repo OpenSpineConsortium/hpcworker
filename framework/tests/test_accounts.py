@@ -142,6 +142,29 @@ class Cli(unittest.TestCase):
         rc, out, err = self.run_cli("cmd_accounts use 33")
         self.assertNotEqual(rc, 0)
 
+    def test_use_waits_for_a_worker_too_old_to_move(self):
+        self.listing()
+        os.makedirs(os.path.join(self.accounts(), "2"))
+        rd = os.path.join(self.td, "state", "worker")
+        os.makedirs(rd)
+        with open(os.path.join(rd, "status.json"), "w") as fh:
+            fh.write('{"version":20,"state":"online","message":"x"}\n')
+        rc, out, err = self.run_cli("cmd_accounts use 2")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("framework 20", err)
+        self.assertEqual(os.readlink(self.cfg), "accounts/1", "nothing was changed")
+        with open(os.path.join(rd, "status.json"), "w") as fh:
+            fh.write('{"version":21,"state":"online","message":"x"}\n')
+        self.assertEqual(self.run_cli("cmd_accounts use 2")[0], 0)
+
+    def test_the_sign_in_job_carries_nothing_of_a_gate(self):
+        self.listing()
+        rc, out, err = self.run_cli("adapter_submit() { echo \"gate=${HPCW_GATE:-} ssh=${SSH_ORIGINAL_COMMAND:-}\" >> '%s/submits'; echo 1; }; cmd_accounts login 2 --detach" % self.td,
+                                    env={"SSH_ORIGINAL_COMMAND": "accounts login 2"})
+        self.assertEqual(rc, 0, err)
+        with open(os.path.join(self.td, "submits")) as fh:
+            self.assertIn("gate= ssh=", fh.read())
+
     def test_auto_and_forget(self):
         self.listing()
         self.assertEqual(self.run_cli("cmd_accounts auto on")[0], 0)
