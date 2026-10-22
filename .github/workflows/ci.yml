@@ -7,10 +7,17 @@ name: ci
 # grid/framework-suite-py36 and grid/slurm-in-container), and its watcher (tools/grid_ci.sh --watch,
 # started once on the grid) installs main's head as the lab's shared copy after these checks and the
 # grid suite pass, and posts grid/deploy.
+#
+# The job check, the one the ruleset "Protect the default branch" requires (.github/workflows/
+# required-check.yml makes it so with SymphonyBoard's token), waits for the three and fails unless
+# each passed, and on a pull request holds one marked ready to its review record (tools/review_record.py,
+# CONTRIBUTING.md), so every contributor, a person or a session, meets the same CI the owner's own
+# sessions do. The extra pull request types are the moments the record changes without a push.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 # every job only reads the repository, and none keeps the token in its checkout's git configuration:
@@ -36,7 +43,11 @@ jobs:
         run: bash tools/tests/test_grid_ci.sh
       - name: the grid's Actions runner (tools/grid_runner.sh; Slurm, gh, Apptainer and the runner stood in for)
         run: bash tools/tests/test_grid_runner.sh
-        
+      - name: the ssh gate (tools/grid_runner.sh --gate-*; sshd's forced command and gh stood in for)
+        run: bash tools/tests/test_grid_gate.sh
+      - name: the review record and the required check's own tools
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
+
   suite-centos7:
     # the login node's own stack: CentOS 7, python 3.6.8, bash 4.2.46, util-linux 2.23. The
     # checkout runs on the host (node20 actions cannot run inside centos:7), and the suite runs
@@ -77,3 +88,27 @@ jobs:
               else echo "no earlier commit to compare with"; fi;;
             *) echo "only a pull request or a push is compared";;
           esac
+
+  check:
+    # the required check: the suite in both environments and the version check, each passed, and the
+    # review record of a pull request marked ready; it runs when one of them failed too, so a required
+    # check is never skipped
+    needs: [suite-linux, suite-centos7, version]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: a pull request marked ready carries its review record (tools/review_record.py)
+        if: github.event_name == 'pull_request'
+        run: python3 tools/review_record.py
+      - name: every job of the suite passed
+        env:
+          LINUX: ${{ needs.suite-linux.result }}
+          CENTOS: ${{ needs.suite-centos7.result }}
+          VERSION: ${{ needs.version.result }}
+        run: |
+          echo "suite (ubuntu): $LINUX; suite (centos 7): $CENTOS; framework version: $VERSION"
+          [ "$LINUX" = success ] && [ "$CENTOS" = success ] && [ "$VERSION" = success ]
