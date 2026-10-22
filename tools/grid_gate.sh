@@ -49,7 +49,8 @@
 #   accounts log login N | log usage | log worker NAME
 #                                  framework 23: what that job printed, cleaned (accounts.sh acct_clean)
 #   update                         this clone fast-forwarded to its origin's main (below)
-#   promoter status | start | stop spine-datasets' promoter chain (below)
+#   promoter status | start | stop | restart
+#                                  spine-datasets' promoter chain (below)
 #   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | fetch ID | census ID
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 # N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
@@ -73,6 +74,14 @@
 #                                  from <lab root>/spine-datasets-promoter/code, where the chain keeps it
 #   promoter start                 the same start at the head of that repository's main, which gh reads
 #                                  here (the promoter takes later code only by its own self-update rule)
+#   promoter restart               the chain moved onto the head of that repository's main: tools/promote.py
+#                                  and grid/promote.sh fetched at it, the chain stopped, the two put in
+#                                  place and the chain started at it, for code the self-update rule will
+#                                  not take (a commit of the owner's that names a co-author); the owner
+#                                  chose the word on 2026-10-22, for spine-datasets #121
+#                                  It waits up to 90 seconds for squeue to list none of the chain's jobs.
+#                                  Every promoter word gives promote.sh HPCWORKER, this clone's hpcworker,
+#                                  whose `job submit` queues the chain's jobs, as the schwingnet words do.
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
 #                                  long run's mark), then its grid/gate.sh WORD [ID]:
@@ -204,7 +213,7 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
-JOBS_RE='^(update|promoter (status|start|stop)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|promoter (status|start|stop|restart)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -304,22 +313,74 @@ gh_on_path() {
   local d; for d in "$HOME/bin" "$HOME/.local/bin" "$HOME/opt/gh/bin"; do [ -x "$d/gh" ] && PATH="$PATH:$d" && return 0; done
   return 1
 }
-promoter() { # status|start|stop
-  local script="$PROMOTER_DIR/code/promote.sh" sha rc out
+PROMOTER_JOB=spine-datasets-promoter   # the job name promote.sh's chain runs under (its NAME)
+promoter_head() { # -> main's head of the promoter's repository in $sha, read with gh as a start reads it
+  gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE promoter failed: gh is not on this account's path"; return 1; }
+  sha=$(env -i "${JE[@]}" gh api "repos/$PROMOTER_REPO/commits/main" --jq .sha < /dev/null 2>/dev/null)
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { note "$WORD" "failed (main unread)"; echo "HPCW-GRID-GATE promoter failed: gh could not read the head of $PROMOTER_REPO's main"; return 1; }
+}
+# The gate's own .gate.tmp, never promote.py's self-update's .tmp, whose names it writes in the same folder
+promoter_fetch() { # REPO_PATH DEST: one file of the promoter's repository at $sha, written to DEST.gate.tmp and kept to the account
+  local dest="$2"
+  rm -f "$dest.gate.tmp"
+  env -i "${JE[@]}" gh api -H "Accept: application/vnd.github.raw" "repos/$PROMOTER_REPO/contents/$1?ref=$sha" > "$dest.gate.tmp" < /dev/null 2>/dev/null \
+    && [ -s "$dest.gate.tmp" ] && [ ! -L "$dest.gate.tmp" ] && chmod go-w "$dest.gate.tmp" \
+    || { rm -f "$dest.gate.tmp"; note "$WORD" "failed (fetch $1)"; echo "HPCW-GRID-GATE promoter failed: gh could not fetch $1 at ${sha:0:12}"; return 1; }
+}
+promoter_run() { # ARGS...: promote.sh with them, in the promoter's folder, with this clone's hpcworker
+  ( cd "$PROMOTER_DIR" && env -i "${JE[@]}" HPCWORKER="$CLONE/framework/bin/hpcworker" /bin/bash "$PROMOTER_DIR/code/promote.sh" "$@" < /dev/null 2>&1 )
+}
+promoter_gone() { # 0 once squeue answers with none of the chain's jobs, cancelled ones still ending among them
+  # about 90 seconds: Slurm's KillWait of 30 s and the epilog come after scancel; every tenth poll that
+  # still lists a job stops the chain again, since a job that started as stop read the queue may have
+  # queued a successor stop never saw
+  local i out
+  for i in $(seq 1 30); do
+    if out=$(squeue -h -u "$(id -un)" -n "$PROMOTER_JOB" -o %i < /dev/null 2>/dev/null); then
+      [ -z "$out" ] && return 0
+      [ $(( i % 10 )) = 0 ] && promoter_run stop > /dev/null
+    fi
+    sleep "${HPCW_GATE_POLL:-3}"
+  done
+  return 1
+}
+promoter_restart() {
+  local code="$PROMOTER_DIR/code" rc f old=""
+  ( umask 077; mkdir -p "$code" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE promoter failed: cannot make $code"; return 1; }
+  # the copy on disk stops the chain it started; with none there is no chain of the gate's to stop
+  { [ -e "$code/promote.sh" ] || [ -L "$code/promote.sh" ]; } && old=1
+  held "$PROMOTER_DIR" "$code" ${old:+"$code/promote.sh"} || { note "$WORD" "refused (copy)"; return 126; }
+  promoter_head || return $?
+  # both files fetched before anything stops, so a fetch that fails leaves the chain running as it was
+  promoter_fetch tools/promote.py "$code/promote.py" && promoter_fetch grid/promote.sh "$code/promote.sh" \
+    || { rm -f "$code"/*.gate.tmp; return 1; }
+  # stop's answer decides nothing: a stop that failed part way may have cancelled some jobs, so the
+  # queue itself says whether the chain is gone
+  if [ -n "$old" ]; then promoter_run stop; rc=$?; [ $rc = 0 ] || echo "HPCW-GRID-GATE promoter restart: promote.sh stop answered $rc; reading the queue"; fi
+  promoter_gone || { rm -f "$code"/*.gate.tmp; note "$WORD" "failed (not gone)"; echo "HPCW-GRID-GATE promoter restart failed: squeue still lists the chain's jobs, or did not answer, after 90 seconds; the chain may still run on its old code; send promoter status, then promoter restart again"; return 75; }
+  for f in promote.py promote.sh; do
+    mv -f "$code/$f.gate.tmp" "$code/$f" || { rm -f "$code"/*.gate.tmp; note "$WORD" "failed (put $f)"; echo "HPCW-GRID-GATE promoter restart failed: cannot put $f in place; the chain is stopped"; return 1; }
+  done
+  held "$code/promote.py" "$code/promote.sh" || { note "$WORD" "refused (copy)"; echo "HPCW-GRID-GATE promoter restart refused: the chain is stopped"; return 126; }
+  promoter_run start "$sha"; rc=$?
+  if [ $rc = 0 ]; then note "$WORD" "ok ${sha:0:12}"; echo "HPCW-GRID-GATE promoter restart ok at ${sha:0:12}"
+  else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE promoter restart failed $rc; the chain is stopped"; fi
+  return $rc
+}
+promoter() { # status|start|stop|restart
+  local script="$PROMOTER_DIR/code/promote.sh" sha="" rc
   [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE promoter failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
   job_env
+  [ "$1" = restart ] && { promoter_restart; return $?; }
   if [ "$1" = start ]; then
-    gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE promoter failed: gh is not on this account's path"; return 1; }
-    sha=$(env -i "${JE[@]}" gh api "repos/$PROMOTER_REPO/commits/main" --jq .sha < /dev/null 2>/dev/null)
-    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { note "$WORD" "failed (main unread)"; echo "HPCW-GRID-GATE promoter failed: gh could not read the head of $PROMOTER_REPO's main"; return 1; }
+    promoter_head || return $?
     if [ ! -e "$script" ]; then
       ( umask 077; mkdir -p "$PROMOTER_DIR/code" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE promoter failed: cannot make $PROMOTER_DIR/code"; return 1; }
-      env -i "${JE[@]}" gh api -H "Accept: application/vnd.github.raw" "repos/$PROMOTER_REPO/contents/grid/promote.sh?ref=$sha" > "$script.tmp" < /dev/null 2>/dev/null \
-        && [ -s "$script.tmp" ] && mv -f "$script.tmp" "$script" || { rm -f "$script.tmp"; note "$WORD" "failed (script)"; echo "HPCW-GRID-GATE promoter failed: gh could not fetch grid/promote.sh at ${sha:0:12}"; return 1; }
+      promoter_fetch grid/promote.sh "$script" && mv -f "$script.gate.tmp" "$script" || { rm -f "$script.gate.tmp"; return 1; }
     fi
   fi
   held "$PROMOTER_DIR" "$PROMOTER_DIR/code" "$script" || { note "$WORD" "refused (copy)"; return 126; }
-  ( cd "$PROMOTER_DIR" && env -i "${JE[@]}" /bin/bash "$script" "$1" ${sha:+"$sha"} < /dev/null 2>&1 ); rc=$?
+  promoter_run "$1" ${sha:+"$sha"}; rc=$?
   if [ $rc = 0 ]; then note "$WORD" "ok${sha:+ ${sha:0:12}}"; echo "HPCW-GRID-GATE promoter $1 ok${sha:+ at ${sha:0:12}}"
   else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE promoter $1 failed $rc"; fi
   return $rc
