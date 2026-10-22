@@ -459,23 +459,33 @@ restart() { rm -f "$CH/jobs.last" "$CH/jobs.sched"; HPCW_GATE_POLL=0 PATH="$RB:$
 echo old > "$P/code/promote.py"; echo 2 > "$T/sq.left"; : > "$JOBS_CALLS"; restart
 t "promoter restart fetches promote.py and promote.sh at main's head" bash -c "grep -q 'contents/tools/promote.py?ref=$SHA' '$JOBS_CALLS' && grep -q 'contents/grid/promote.sh?ref=$SHA' '$JOBS_CALLS' && grep -qx '# promote.py at $SHA' '$P/code/promote.py'"
 t "  stops the chain, waits until squeue lists none of it, then starts it at that commit" bash -c "[ \"\$(grep -E '^(promote.sh|squeue)' '$JOBS_CALLS' | tr '\n' '|')\" = 'promote.sh stop|squeue -h -u $(id -un) -n spine-datasets-promoter -o %i|squeue -h -u $(id -un) -n spine-datasets-promoter -o %i|squeue -h -u $(id -un) -n spine-datasets-promoter -o %i|promote.sh start $SHA|' ]"
-t "  leaves no .tmp behind" bash -c "[ -z \"\$(ls '$P/code' | grep tmp)\" ]"
+t "  leaves no .gate.tmp behind" bash -c "[ -z \"\$(ls '$P/code' | grep tmp)\" ]"
 t "  and says so" has "^HPCW-GRID-GATE promoter restart ok at ${SHA:0:12}$"
 printf '#!/bin/bash\necho "promote.sh $* HPCWORKER=$HPCWORKER" >> "%s"\n' "$JOBS_CALLS" > "$P/code/promote.sh"; chmod go-w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE_ARGS[@]}"
 t "every promoter word gives promote.sh this clone's hpcworker" bash -c "grep -qx 'promote.sh status HPCWORKER=$S/framework/bin/hpcworker' '$JOBS_CALLS'"
 echo kept > "$P/code/promote.py"; echo 99 > "$T/sq.left"; : > "$JOBS_CALLS"; restart
 t "a chain still ending after the polls is not started again, 75" bash -c "[ '$RC' = 75 ] && ! grep -q 'promote.sh start' '$JOBS_CALLS' && grep -qx kept '$P/code/promote.py'"
-t "  says to send it again" has 'send promoter restart again in a minute'
+t "  says the chain may still run, and to read its status" has 'may still run on its old code; send promoter status'
+t "  having stopped it again while the queue still listed it" bash -c "[ \"\$(grep -c '^promote.sh stop' '$JOBS_CALLS')\" = 4 ]"
 rm -f "$T/sq.left"; cp "$JB/gh" "$T/gh.keep"; sed -i 's|\*contents/tools/promote.py?ref=|*nothing-matches|' "$JB/gh"; : > "$JOBS_CALLS"; restart
 t "a fetch that fails stops nothing and changes nothing" bash -c "[ '$RC' = 1 ] && ! grep -q '^promote.sh' '$JOBS_CALLS' && grep -qx kept '$P/code/promote.py' && [ -z \"\$(ls '$P/code' | grep tmp)\" ]"
 cp "$T/gh.keep" "$JB/gh"
+printf '#!/bin/bash\nexit 1\n' > "$RB/squeue.err"; cp "$RB/squeue" "$RB/squeue.keep"; cp "$RB/squeue.err" "$RB/squeue"; : > "$JOBS_CALLS"; restart
+t "a squeue that never answers starts nothing, 75" bash -c "[ '$RC' = 75 ] && ! grep -q 'promote.sh start' '$JOBS_CALLS' && grep -qx kept '$P/code/promote.py'"
+cp "$RB/squeue.keep" "$RB/squeue"
+printf '#!/bin/bash\necho "promote.sh $* HPCWORKER=$HPCWORKER" >> "%s"\n[ "$1" = stop ] && exit 123\nexit 0\n' "$JOBS_CALLS" > "$P/code/promote.sh"; chmod go-w "$P/code/promote.sh"
+echo self > "$P/code/promote.py.tmp"; : > "$JOBS_CALLS"; restart
+t "a stop that fails part way still restarts once the queue is empty" bash -c "[ '$RC' = 0 ] && grep -q '^promote.sh start $SHA' '$JOBS_CALLS'" && t "  saying what stop answered" has 'promote.sh stop answered 123'
+t "  with this clone's hpcworker given to stop and start alike" bash -c "grep -qx 'promote.sh stop HPCWORKER=$S/framework/bin/hpcworker' '$JOBS_CALLS'"
+t "  and a self-update's own .tmp left alone" bash -c "grep -qx self '$P/code/promote.py.tmp'"
+rm -f "$P/code/promote.py.tmp"
 chmod g+w "$P/code"; : > "$JOBS_CALLS"; restart
 t "a code folder the group may write is refused before anything is fetched" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 chmod g-w "$P/code"
 mv "$P/code/promote.sh" "$T/promote.away"; rm -f "$P/code/promote.py"; : > "$JOBS_CALLS"; restart
 t "a restart with no copy yet fetches both and starts, with nothing to stop" bash -c "[ '$RC' = 0 ] && [ \"\$(grep '^promote.sh' '$JOBS_CALLS')\" = 'promote.sh start $SHA' ] && [ -f '$P/code/promote.py' ]"
 chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; restart
-t "a promote.sh the group may write is never run to stop the chain" bash -c "[ '$RC' = 126 ] && ! grep -q '^promote.sh' '$JOBS_CALLS'"
+t "a promote.sh the group may write is refused before anything is fetched or run" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ] && [ -z \"\$(ls '$P/code' | grep tmp)\" ]"
 chmod g-w "$P/code/promote.sh"; rm -f "$T/promote.away"
 
 SN="$HOME/SchwingNet"; SNE=(env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t)
