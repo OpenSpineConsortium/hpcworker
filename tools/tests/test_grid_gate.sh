@@ -553,6 +553,82 @@ t "a clone with changed files is refused" bash -c "[ '$RC' = 126 ] && [ \"\$(cat
 git -C "$S" checkout -q -- framework/VERSION
 KEEP_CLOCK=1 job update "${LINE_ARGS[@]}"; rm -f "$CH/jobs.last"; KEEP_CLOCK=1 PATH="$JB:$PATH" gate update "${LINE_ARGS[@]}"
 t "update keeps the minute" has '^HPCW-GRID-GATE limit: one call a minute'
+
+echo "== the job word artifacts: both repositories' artifacts/ kept in ~/claude-artifacts"
+AE=(env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t)
+for r in symphony-template SchwingNet; do
+  git init -q -b main "$T/aw-$r" && mkdir -p "$T/aw-$r/artifacts/one" "$T/aw-$r/tools"
+  echo "# $r" > "$T/aw-$r/artifacts/README.md"; echo page > "$T/aw-$r/artifacts/one/index.html"; echo code > "$T/aw-$r/tools/x.py"
+  echo "claim every issue" > "$T/aw-$r/CLAUDE.md"; echo "# top" > "$T/aw-$r/README.md"
+  "${AE[@]}" git -C "$T/aw-$r" add . && "${AE[@]}" git -C "$T/aw-$r" commit -q -m one && git clone -q --bare "$T/aw-$r" "$T/ao-$r.git"
+  # a server that serves a partial clone and the files it fetches later, as GitHub does
+  git -C "$T/ao-$r.git" config uploadpack.allowFilter true && git -C "$T/ao-$r.git" config uploadpack.allowAnySHA1InWant true
+  git -C "$T/aw-$r" remote add origin "$T/ao-$r.git"
+done
+# gh clones from the bare repositories with the options the gate gives git after --
+cat > "$JB/gh" <<EOF2
+#!/bin/bash
+echo "gh \$*" >> "$JOBS_CALLS"
+case "\$*" in
+  "repo clone OpenSpineConsortium/symphony-template "*) d=\$4; shift 5; git clone "\$@" "file://$T/ao-symphony-template.git" "\$d"; exit \$?;;
+  "repo clone OpenSpineConsortium/SchwingNet "*) d=\$4; shift 5; git clone "\$@" "file://$T/ao-SchwingNet.git" "\$d"; exit \$?;;
+  *) exit 1;;
+esac
+EOF2
+# git as it is, but as an old login node's when \$T/git-old is there, and failing its checkout when
+# \$T/git-no-checkout is
+REALGIT=$(command -v git)
+cat > "$JB/git" <<EOF2
+#!/bin/bash
+[ -e "$T/git-old" ] && [ "\$1" = --version ] && { echo "git version 1.8.3.1"; exit 0; }
+if [ -e "$T/git-no-checkout" ]; then for a in "\$@"; do [ "\$a" = read-tree ] && exit 1; done; fi
+exec "$REALGIT" "\$@"
+EOF2
+chmod 755 "$JB/gh" "$JB/git"
+AD="$HOME/claude-artifacts"
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "artifacts clones both repositories with gh into ~/claude-artifacts" bash -c "[ '$RC' = 0 ] && grep -q '^gh repo clone OpenSpineConsortium/symphony-template $AD/symphony-template' '$JOBS_CALLS' && grep -q '^gh repo clone OpenSpineConsortium/SchwingNet $AD/SchwingNet' '$JOBS_CALLS'"
+t "  as partial clones with nothing checked out by the clone" bash -c "[ \$(grep -c -- '--no-checkout --filter=blob:none' '$JOBS_CALLS') = 2 ] && [ -n \"\$(git -C '$AD/SchwingNet' rev-list --objects --missing=print HEAD | grep '^?')\" ]"
+t "  checking out artifacts/ alone, no top-level file and no other folder" bash -c "[ -f '$AD/SchwingNet/artifacts/one/index.html' ] && [ ! -e '$AD/SchwingNet/tools' ] && [ ! -e '$AD/SchwingNet/CLAUDE.md' ] && [ ! -e '$AD/symphony-template/README.md' ]"
+t "  every fetch there through gh's sign-in" bash -c "git -C '$AD/SchwingNet' config --get-all credential.helper | grep -q 'gh auth git-credential\$' && [ \"\$(git -C '$AD/SchwingNet' config --get-all credential.helper | head -1)\" = '' ]"
+t "  in a folder kept to the account" bash -c "[ \"\$(stat -c %a '$AD')\" = 700 ]"
+t "  with its CLAUDE.md" bash -c "grep -q 'patent material' '$AD/CLAUDE.md'"
+t "  and says how many folders each holds" has '^HPCW-GRID-GATE artifacts SchwingNet 1 folders at [0-9a-f]{12}$' && t "  and that it is done" has '^HPCW-GRID-GATE artifacts ok '
+mkdir -p "$T/aw-SchwingNet/artifacts/two" && echo doc > "$T/aw-SchwingNet/artifacts/two/index.md"
+"${AE[@]}" git -C "$T/aw-SchwingNet" add . && "${AE[@]}" git -C "$T/aw-SchwingNet" commit -q -m two && git -C "$T/aw-SchwingNet" push -q origin main
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "artifacts again fast-forwards each clone, fetching the new file, cloning nothing" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$AD/SchwingNet/artifacts/two/index.md')\" = doc ] && ! grep -q 'repo clone' '$JOBS_CALLS'"
+t "  saying how far" has '^HPCW-GRID-GATE artifacts pull SchwingNet ok [0-9a-f]{12}\.\.[0-9a-f]{12}$' && t "  and the other is current" has '^HPCW-GRID-GATE artifacts pull symphony-template current '
+git -C "$AD/SchwingNet" remote set-url origin "file://$T/no-such-three.git"; job artifacts "${LINE_ARGS[@]}"
+t "a pull git cannot make fails" bash -c "[ '$RC' = 1 ]" && t "  saying so" has '^HPCW-GRID-GATE artifacts pull SchwingNet failed'
+t "  without git's own words, which may name the artifacts' files" bash -c "! printf '%s\n' \"\$OUT\" | grep -q 'no-such-three'"
+t "  the other's count still given" has '^HPCW-GRID-GATE artifacts symphony-template 1 folders'
+git -C "$AD/SchwingNet" remote set-url origin "file://$T/ao-SchwingNet.git"; job artifacts "${LINE_ARGS[@]}"
+t "  and the next call pulls again" bash -c "[ '$RC' = 0 ]"
+echo edited > "$AD/SchwingNet/artifacts/one/index.html"; job artifacts "${LINE_ARGS[@]}"
+t "a clone with a changed file is refused, the other still pulled" bash -c "[ '$RC' = 126 ]" && t "  saying so" has 'refused changes' && t "  the other's count still given" has '^HPCW-GRID-GATE artifacts symphony-template 1 folders'
+git -C "$AD/SchwingNet" checkout -q -- artifacts/one/index.html
+chmod g+w "$AD/SchwingNet"; job artifacts "${LINE_ARGS[@]}"
+t "a clone the group may write is refused" bash -c "[ '$RC' = 126 ]" && t "  saying so" has "refused copy: others may change $AD/SchwingNet"
+chmod g-w "$AD/SchwingNet"
+mv "$AD/symphony-template" "$T/st.away"; touch "$T/git-no-checkout"
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "a clone whose checkout fails is not left half made" bash -c "[ '$RC' = 1 ] && [ ! -e '$AD/symphony-template' ]" && t "  saying so" has '^HPCW-GRID-GATE artifacts failed: git could not check out'
+rm -f "$T/git-no-checkout"; job artifacts "${LINE_ARGS[@]}"
+t "  and the next call clones it whole" bash -c "[ '$RC' = 0 ] && [ -f '$AD/symphony-template/artifacts/one/index.html' ]"
+rm -rf "$AD/symphony-template"; touch "$T/git-old"
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "an older git clones the whole history, with no filter" bash -c "[ '$RC' = 0 ] && grep -q -- '--no-checkout\$' '$JOBS_CALLS' && ! grep -q -- '--filter' '$JOBS_CALLS'"
+t "  and still checks out artifacts/ alone" bash -c "[ -f '$AD/symphony-template/artifacts/one/index.html' ] && [ ! -e '$AD/symphony-template/CLAUDE.md' ] && [ ! -e '$AD/symphony-template/tools' ]"
+rm -f "$T/git-old"
+"${AE[@]}" git -C "$T/aw-SchwingNet" rm -q -r artifacts && "${AE[@]}" git -C "$T/aw-SchwingNet" commit -q -m gone && git -C "$T/aw-SchwingNet" push -q origin main
+job artifacts "${LINE_ARGS[@]}"
+t "a main with no artifacts/ fails, never says ok" bash -c "[ '$RC' = 1 ]" && t "  saying so" has 'could not check out the artifacts/' && t "  and not ok" bash -c "! printf '%s\n' \"\$OUT\" | grep -q '^HPCW-GRID-GATE artifacts ok'"
+for w in 'artifacts now' 'artifacts;id' 'artifacts SchwingNet'; do
+  : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
+  t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+done
+rm -f "$JB/git"
 unset HPCW_LAB_ROOT
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
