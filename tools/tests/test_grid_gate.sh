@@ -516,6 +516,47 @@ t "a clone with changed files is refused" bash -c "[ '$RC' = 126 ] && [ \"\$(cat
 git -C "$S" checkout -q -- framework/VERSION
 KEEP_CLOCK=1 job update "${LINE_ARGS[@]}"; rm -f "$CH/jobs.last"; KEEP_CLOCK=1 PATH="$JB:$PATH" gate update "${LINE_ARGS[@]}"
 t "update keeps the minute" has '^HPCW-GRID-GATE limit: one call a minute'
+
+echo "== the job word artifacts: both repositories' artifacts/ kept in ~/claude-artifacts"
+AE=(env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t)
+for r in symphony-template SchwingNet; do
+  git init -q -b main "$T/aw-$r" && mkdir -p "$T/aw-$r/artifacts/one" "$T/aw-$r/tools"
+  echo "# $r" > "$T/aw-$r/artifacts/README.md"; echo page > "$T/aw-$r/artifacts/one/index.html"; echo code > "$T/aw-$r/tools/x.py"
+  "${AE[@]}" git -C "$T/aw-$r" add . && "${AE[@]}" git -C "$T/aw-$r" commit -q -m one && git clone -q --bare "$T/aw-$r" "$T/ao-$r.git"
+  git -C "$T/aw-$r" remote add origin "$T/ao-$r.git"
+done
+cat > "$JB/gh" <<EOF2
+#!/bin/bash
+echo "gh \$*" >> "$JOBS_CALLS"
+case "\$*" in
+  "repo clone OpenSpineConsortium/symphony-template "*) git clone -q --no-local --filter=blob:none --sparse "file://$T/ao-symphony-template.git" "\$4"; exit \$?;;
+  "repo clone OpenSpineConsortium/SchwingNet "*) git clone -q --no-local --filter=blob:none --sparse "file://$T/ao-SchwingNet.git" "\$4"; exit \$?;;
+  *) exit 1;;
+esac
+EOF2
+chmod 755 "$JB/gh"
+AD="$HOME/claude-artifacts"
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "artifacts clones both repositories with gh into ~/claude-artifacts" bash -c "[ '$RC' = 0 ] && grep -q '^gh repo clone OpenSpineConsortium/symphony-template $AD/symphony-template' '$JOBS_CALLS' && grep -q '^gh repo clone OpenSpineConsortium/SchwingNet $AD/SchwingNet' '$JOBS_CALLS'"
+t "  checking out artifacts/ and not the rest" bash -c "[ -f '$AD/SchwingNet/artifacts/one/index.html' ] && [ ! -e '$AD/SchwingNet/tools' ]"
+t "  in a folder kept to the account" bash -c "[ \"\$(stat -c %a '$AD')\" = 700 ]"
+t "  with its CLAUDE.md" bash -c "grep -q 'patent material' '$AD/CLAUDE.md'"
+t "  and says how many folders each holds" has '^HPCW-GRID-GATE artifacts SchwingNet 1 folders at [0-9a-f]{12}$' && t "  and that it is done" has '^HPCW-GRID-GATE artifacts ok '
+mkdir -p "$T/aw-SchwingNet/artifacts/two" && echo doc > "$T/aw-SchwingNet/artifacts/two/index.md"
+"${AE[@]}" git -C "$T/aw-SchwingNet" add . && "${AE[@]}" git -C "$T/aw-SchwingNet" commit -q -m two && git -C "$T/aw-SchwingNet" push -q origin main
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "artifacts again fast-forwards each clone, cloning nothing" bash -c "[ '$RC' = 0 ] && [ -f '$AD/SchwingNet/artifacts/two/index.md' ] && ! grep -q 'repo clone' '$JOBS_CALLS'"
+t "  saying how far" has '^HPCW-GRID-GATE artifacts pull SchwingNet ok [0-9a-f]{12}\.\.[0-9a-f]{12}$' && t "  and the other is current" has '^HPCW-GRID-GATE artifacts pull symphony-template current '
+echo edited > "$AD/SchwingNet/artifacts/one/index.html"; job artifacts "${LINE_ARGS[@]}"
+t "a clone with a changed file is refused, the other still pulled" bash -c "[ '$RC' = 126 ]" && t "  saying so" has 'refused changes' && t "  the other's count still given" has '^HPCW-GRID-GATE artifacts symphony-template 1 folders'
+git -C "$AD/SchwingNet" checkout -q -- artifacts/one/index.html
+chmod g+w "$AD/SchwingNet"; job artifacts "${LINE_ARGS[@]}"
+t "a clone the group may write is refused" bash -c "[ '$RC' = 126 ]" && t "  saying so" has "refused copy: others may change $AD/SchwingNet"
+chmod g-w "$AD/SchwingNet"
+for w in 'artifacts now' 'artifacts;id' 'artifacts SchwingNet'; do
+  : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
+  t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+done
 unset HPCW_LAB_ROOT
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
