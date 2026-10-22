@@ -430,6 +430,7 @@ case "\$*" in
   *commits/main*) echo $SHA;;
   "repo clone OpenSpineConsortium/SchwingNet "*) git clone -q "$T/sn-origin.git" "\$4"; exit \$?;;
   *contents/grid/promote.sh?ref=$SHA*) printf '#!/bin/bash\necho "promote.sh \$*" >> "$JOBS_CALLS"\necho "promote said \$1"\n';;
+  *contents/tools/promote.py?ref=$SHA*) echo "# promote.py at $SHA";;
   *) exit 1;;
 esac
 EOF2
@@ -450,6 +451,32 @@ t "promoter stop runs promote.sh stop" bash -c "grep -qx 'promote.sh stop' '$JOB
 chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE_ARGS[@]}"
 t "a promote.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q promote.sh '$JOBS_CALLS'"
 chmod g-w "$P/code/promote.sh"
+
+# restart: a squeue of its own, which lists the chain's jobs for as many polls as $T/sq.left says
+RB="$T/restartbin"; mkdir -p "$RB"
+printf '#!/bin/bash\necho "squeue $*" >> "%s"\nn=$(cat "%s/sq.left" 2>/dev/null || echo 0)\n[ "$n" -gt 0 ] && echo 41001 && echo $((n - 1)) > "%s/sq.left"\nexit 0\n' "$JOBS_CALLS" "$T" "$T" > "$RB/squeue"; chmod 755 "$RB/squeue"
+restart() { rm -f "$CH/jobs.last" "$CH/jobs.sched"; HPCW_GATE_POLL=0 PATH="$RB:$JB:$PATH" gate "promoter restart" "${LINE_ARGS[@]}"; }
+echo old > "$P/code/promote.py"; echo 2 > "$T/sq.left"; : > "$JOBS_CALLS"; restart
+t "promoter restart fetches promote.py and promote.sh at main's head" bash -c "grep -q 'contents/tools/promote.py?ref=$SHA' '$JOBS_CALLS' && grep -q 'contents/grid/promote.sh?ref=$SHA' '$JOBS_CALLS' && grep -qx '# promote.py at $SHA' '$P/code/promote.py'"
+t "  stops the chain, waits until squeue lists none of it, then starts it at that commit" bash -c "[ \"\$(grep -E '^(promote.sh|squeue)' '$JOBS_CALLS' | tr '\n' '|')\" = 'promote.sh stop|squeue -h -u $(id -un) -n spine-datasets-promoter -o %i|squeue -h -u $(id -un) -n spine-datasets-promoter -o %i|squeue -h -u $(id -un) -n spine-datasets-promoter -o %i|promote.sh start $SHA|' ]"
+t "  leaves no .tmp behind" bash -c "[ -z \"\$(ls '$P/code' | grep tmp)\" ]"
+t "  and says so" has "^HPCW-GRID-GATE promoter restart ok at ${SHA:0:12}$"
+printf '#!/bin/bash\necho "promote.sh $* HPCWORKER=$HPCWORKER" >> "%s"\n' "$JOBS_CALLS" > "$P/code/promote.sh"; chmod go-w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE_ARGS[@]}"
+t "every promoter word gives promote.sh this clone's hpcworker" bash -c "grep -qx 'promote.sh status HPCWORKER=$S/framework/bin/hpcworker' '$JOBS_CALLS'"
+echo kept > "$P/code/promote.py"; echo 99 > "$T/sq.left"; : > "$JOBS_CALLS"; restart
+t "a chain still ending after the polls is not started again, 75" bash -c "[ '$RC' = 75 ] && ! grep -q 'promote.sh start' '$JOBS_CALLS' && grep -qx kept '$P/code/promote.py'"
+t "  says to send it again" has 'send promoter restart again in a minute'
+rm -f "$T/sq.left"; cp "$JB/gh" "$T/gh.keep"; sed -i 's|\*contents/tools/promote.py?ref=|*nothing-matches|' "$JB/gh"; : > "$JOBS_CALLS"; restart
+t "a fetch that fails stops nothing and changes nothing" bash -c "[ '$RC' = 1 ] && ! grep -q '^promote.sh' '$JOBS_CALLS' && grep -qx kept '$P/code/promote.py' && [ -z \"\$(ls '$P/code' | grep tmp)\" ]"
+cp "$T/gh.keep" "$JB/gh"
+chmod g+w "$P/code"; : > "$JOBS_CALLS"; restart
+t "a code folder the group may write is refused before anything is fetched" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
+chmod g-w "$P/code"
+mv "$P/code/promote.sh" "$T/promote.away"; rm -f "$P/code/promote.py"; : > "$JOBS_CALLS"; restart
+t "a restart with no copy yet fetches both and starts, with nothing to stop" bash -c "[ '$RC' = 0 ] && [ \"\$(grep '^promote.sh' '$JOBS_CALLS')\" = 'promote.sh start $SHA' ] && [ -f '$P/code/promote.py' ]"
+chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; restart
+t "a promote.sh the group may write is never run to stop the chain" bash -c "[ '$RC' = 126 ] && ! grep -q '^promote.sh' '$JOBS_CALLS'"
+chmod g-w "$P/code/promote.sh"; rm -f "$T/promote.away"
 
 SN="$HOME/SchwingNet"; SNE=(env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t)
 git init -q -b main "$T/snwork" && mkdir -p "$T/snwork/grid"
@@ -488,7 +515,7 @@ t "schwingnet chain_eval goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh
 : > "$JOBS_CALLS"; job "schwingnet samples" "${LINE_ARGS[@]}"
 t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ samples SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'promoter start abc' 'promoter restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
