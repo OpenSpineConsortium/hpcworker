@@ -553,6 +553,10 @@ git -C "$AD/SchwingNet" checkout -q -- artifacts/one/index.html
 chmod g+w "$AD/SchwingNet"; job artifacts "${LINE_ARGS[@]}"
 t "a clone the group may write is refused" bash -c "[ '$RC' = 126 ]" && t "  saying so" has "refused copy: others may change $AD/SchwingNet"
 chmod g-w "$AD/SchwingNet"
+mv "$AD/symphony-template" "$T/st.away"
+printf '#!/bin/bash\necho "gh $*" >> "%s"\ncase "$*" in *--sparse*) exit 129;; "repo clone OpenSpineConsortium/symphony-template "*) git clone -q "%s" "$4"; exit $?;; *) exit 1;; esac\n' "$JOBS_CALLS" "$T/ao-symphony-template.git" > "$JB/gh"
+: > "$JOBS_CALLS"; job artifacts "${LINE_ARGS[@]}"
+t "a git that refuses a sparse clone gets the whole tree" bash -c "[ '$RC' = 0 ] && [ -f '$AD/symphony-template/artifacts/one/index.html' ] && [ \$(grep -c 'repo clone' '$JOBS_CALLS') = 2 ]"
 for w in 'artifacts now' 'artifacts;id' 'artifacts SchwingNet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"

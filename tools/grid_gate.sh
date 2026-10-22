@@ -399,10 +399,14 @@ artifacts() {
     if [ ! -e "$d/.git" ]; then
       [ ! -e "$d" ] || { note "$WORD" "refused (not a clone)"; echo "HPCW-GRID-GATE refused copy: $d is there but is no git clone; move it aside first"; rc=126; continue; }
       gh_on_path || { note "$WORD" "failed (no gh)"; echo "HPCW-GRID-GATE artifacts failed: gh is not on this account's path"; return 1; }
+      # a partial clone with only artifacts/ checked out where git is 2.25 or later; an older git, as a
+      # login node may carry, refuses those options and takes the whole tree instead
       out=$( umask 077; env -i "${JE[@]}" GIT_TERMINAL_PROMPT=0 gh repo clone "$r" "$d" -- --quiet --branch main --filter=blob:none --sparse < /dev/null 2>&1 ) \
-        && out=$( env -i "${JE[@]}" git -C "$d" sparse-checkout set artifacts < /dev/null 2>&1 ) \
+        || { [ ! -e "$d" ] && out=$( umask 077; env -i "${JE[@]}" GIT_TERMINAL_PROMPT=0 gh repo clone "$r" "$d" -- --quiet --branch main < /dev/null 2>&1 ); } \
         || { note "$WORD" "failed (clone ${r#*/})"; printf '%s\n' "$out" | tail -3; echo "HPCW-GRID-GATE artifacts failed: could not clone $r"; rc=1; continue; }
-      echo "HPCW-GRID-GATE artifacts cloned $r into $d"
+      if env -i "${JE[@]}" git -C "$d" sparse-checkout set artifacts < /dev/null > /dev/null 2>&1; then
+        echo "HPCW-GRID-GATE artifacts cloned $r into $d"
+      else echo "HPCW-GRID-GATE artifacts cloned $r into $d, the whole tree (this git has no sparse checkout)"; fi
     else
       held "$d" || { note "$WORD" "refused (copy)"; rc=126; continue; }
       ff_pull "$d" "artifacts pull ${r#*/}" || { rc=$?; continue; }
