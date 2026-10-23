@@ -459,6 +459,8 @@ t "freeze pilot fetches freeze.py, freeze.sh and the plan at main's head" bash -
 t "  then runs freeze.sh pilot in its own folder" bash -c "grep -qx 'freeze.sh pilot FREEZE_HOME=$F' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE freeze pilot ok at ${SHA:0:12}$"
 : > "$JOBS_CALLS"; job "freeze start" "${LINE_ARGS[@]}"
 t "freeze start runs freeze.sh start, its count fixed in the repository" bash -c "grep -qx 'freeze.sh start FREEZE_HOME=$F' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "freeze report" "${LINE_ARGS[@]}"
+t "freeze report fetches the code at main's head and runs freeze.sh report" bash -c "grep -q 'contents/grid/freeze.sh?ref=$SHA' '$JOBS_CALLS' && grep -qx 'freeze.sh report FREEZE_HOME=$F' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE freeze report ok at ${SHA:0:12}$"
 : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
 t "freeze status runs freeze.sh status and fetches nothing" bash -c "grep -qx 'freeze.sh status FREEZE_HOME=$F' '$JOBS_CALLS' && ! grep -q contents '$JOBS_CALLS'"
 chmod g+w "$F/code/freeze.sh"; : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
@@ -543,7 +545,7 @@ t "schwingnet chain_eval goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh
 : > "$JOBS_CALLS"; job "schwingnet samples" "${LINE_ARGS[@]}"
 t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ samples SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
