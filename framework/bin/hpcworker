@@ -81,7 +81,7 @@ set -uo pipefail
 # the environment as the caller gave it, before this script sets a name of its own (SEED, the profile's
 # RUNTIME* and HPCW_* values): `hpcworker job submit` hands a job exactly this, as export -p wrote it
 HPCW_CALLER_EXPORTS=$(export -p)
-VERSION=27
+VERSION=28
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne

@@ -18,7 +18,11 @@
 #   hpcworker accounts usage [--wait S]       one short job reads every account's use (one word on
 #                                             Haiku each, which spends that word of its window)
 #   hpcworker accounts auto on|off            auto mode: a worker whose account reaches 90% of a window
-#                                             moves to the signed-in account with the most room
+#                                             moves to the signed-in account with the most room;
+#                                             framework 28: a workspace with the Symphony template's
+#                                             tools/handoff.py is asked for its handoff first
+#                                             (accounts/<N>.handoff-due, answered by <N>.handoff.json)
+#                                             and the move waits for it, at most HPCW_HANDOFF_GRACE_S (900)
 #   hpcworker accounts forget N               account N's folder moved aside under accounts/.forgotten;
 #                                             nothing is deleted, and the account in use is refused
 #   hpcworker accounts start N [NAME]         framework 22: a worker of its own on account N, kept to it
