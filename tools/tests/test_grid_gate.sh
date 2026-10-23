@@ -649,5 +649,58 @@ done
 rm -f "$JB/git"
 unset HPCW_LAB_ROOT
 
+echo "== the key word: one service key from stdin into its file"
+kw() { # WORD STDIN: the gate with its clock for keys forgotten
+  rm -f "$CH/keys.last"
+  OUT=$(printf '%s' "$2" | env SSH_ORIGINAL_COMMAND="$1" SSH_CONNECTION="192.0.2.7 50000 10.0.0.1 22" bash "$S/tools/grid_gate.sh" "${LINE_ARGS[@]}" 2>&1); RC=$?
+}
+mode() { stat -c %a "$1"; }
+KG=KGAT_0123456789abcdefTESTONLY
+kw "key kaggle" "$KG"$'\n'
+t "key kaggle writes ~/.fluorocap/credentials.env" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.fluorocap/credentials.env')\" = 'KAGGLE_API_TOKEN=$KG' ]"
+t "  the file 0600 and its folder 0700" bash -c "[ \"\$(stat -c %a '$HOME/.fluorocap/credentials.env')\" = 600 ] && [ \"\$(stat -c %a '$HOME/.fluorocap')\" = 700 ]"
+t "  says ok and names the file" has '^HPCW-GRID-GATE key kaggle ok ~/.fluorocap/credentials.env \(0600\)$'
+t "  and the key is in neither the answer nor the log" bash -c "! printf '%s' \"\$1\" | grep -q TESTONLY && ! grep -q TESTONLY '$CH/gate.log'" _ "$OUT"
+printf 'OTHER=keep\nexport KAGGLE_API_TOKEN=old\nKAGGLE_USERNAME=me\n' > "$HOME/.fluorocap/credentials.env"; chmod 644 "$HOME/.fluorocap/credentials.env"
+kw "key kaggle" "${KG}2"$'\n'
+t "a second key replaces only its own line, every other kept, and the file is 0600 again" bash -c "[ \"\$(cat '$HOME/.fluorocap/credentials.env')\" = \"\$(printf 'OTHER=keep\nKAGGLE_USERNAME=me\nKAGGLE_API_TOKEN=${KG}2')\" ] && [ \"\$(stat -c %a '$HOME/.fluorocap/credentials.env')\" = 600 ]"
+for kv in "hf .hf/token.env HF_TOKEN" "zenodo .zenodo/token.env ZENODO_TOKEN" "redivis .redivis/token.env REDIVIS_API_TOKEN" "wandb .wandb/token.env WANDB_API_KEY"; do
+  set -- $kv
+  kw "key $1" "tok_${1}_0123456789"$'\n'
+  t "key $1 writes ~/$2 as $3=" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/$2')\" = '$3=tok_${1}_0123456789' ]"
+done
+printf 'machine api.wandb.ai\n  login user\n  password wb\nmachine physionet.org login old password old\n' > "$HOME/.netrc"; chmod 600 "$HOME/.netrc"
+kw "key physionet" 'greg pass#Word!1'$'\n'
+t "key physionet replaces the physionet.org line of ~/.netrc, the others kept" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.netrc')\" = \"\$(printf 'machine api.wandb.ai\n  login user\n  password wb\nmachine physionet.org login greg password pass#Word!1')\" ]"
+printf 'machine physionet.org\n  login old\n  password old\n' > "$HOME/.netrc"
+kw "key physionet" 'greg newpass'$'\n'
+t "  and refuses an entry over several lines, the file untouched" bash -c "[ '$RC' = 126 ] && grep -q 'password old' '$HOME/.netrc' && ! grep -q newpass '$HOME/.netrc'"
+LINK='https://example-bucket.s3.amazonaws.com/ratic.zip?X-Amz-Algorithm=AWS4&X-Amz-Signature=ab%2Fcd'
+kw "key ratic" "$LINK"$'\n'
+t "key ratic writes the link as ~/.rsna/ratic_link's one line" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.rsna/ratic_link')\" = '$LINK' ]"
+for bad in "" "short" "has space in it" 'semi;colon_token' 'quote"token123' $'line\nbreak_and_more'; do
+  kw "key hf" "$bad"
+  t "a key not of its shape ($(printf '%q' "$bad")) is refused and the file kept" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'refused key' && [ \"\$(cat '$HOME/.hf/token.env')\" = 'HF_TOKEN=tok_hf_0123456789' ]" _ "$OUT"
+done
+kw "key physionet" 'greg pass"word'$'\n'
+t "a netrc password with a quote is refused" rc_is 126
+kw "key ratic" 'http://plain.example/x.zip'$'\n'
+t "a link that is not https is refused" rc_is 126
+for w in 'key' 'key kaggle extra' 'key foo' 'key ../x' 'key  hf' 'key hf;id'; do
+  kw "$w" "tok_0123456789"$'\n'
+  t "the word $(printf '%q' "$w") is refused" bash -c "[ '$RC' = 126 ] && printf '%s\n' \"\$1\" | grep -q '^HPCW-GRID-GATE refused word'" _ "$OUT"
+done
+printf 'other\n' > "$T/elsewhere"; rm -f "$HOME/.zenodo/token.env"; ln -s "$T/elsewhere" "$HOME/.zenodo/token.env"
+kw "key zenodo" "tok_zenodo_new0123"$'\n'
+t "a key file that is a link is refused and what it points at untouched" bash -c "[ '$RC' = 126 ] && [ \"\$(cat '$T/elsewhere')\" = other ]"
+rm -f "$HOME/.zenodo/token.env"
+rm -rf "$HOME/.redivis"; ln -s "$T" "$HOME/.redivis"
+kw "key redivis" "tok_redivis_0123"$'\n'
+t "a key folder that is a link is refused" bash -c "[ '$RC' = 126 ] && [ ! -e '$T/token.env' ]"
+rm -f "$HOME/.redivis"
+kw "key wandb" "tok_wandb_0123456789"$'\n'
+OUT=$(printf 'tok_wandb_9876543210\n' | env SSH_ORIGINAL_COMMAND="key wandb" bash "$S/tools/grid_gate.sh" "${LINE_ARGS[@]}" 2>&1); RC=$?
+t "keys keep a floor of a few seconds of their own" bash -c "[ '$RC' = 123 ] && printf '%s' \"\$1\" | grep -q 'every 3 seconds'" _ "$OUT"
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
