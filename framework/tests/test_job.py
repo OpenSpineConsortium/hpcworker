@@ -648,6 +648,48 @@ class Job(unittest.TestCase):
                 proc.kill()
         self.assertIn("auto mode: account 1 is at its limit; moving to account 3", out)
 
+    def test_auto_mode_waits_for_a_symphony_workspaces_handoff(self):
+        # framework 28: a workspace with the template's tools/handoff.py is asked first (accounts/1.handoff-due)
+        # and the link moves only once accounts/1.handoff.json is newer than that word
+        cfg, acc = self.accounts_layout(2)
+        with open(os.path.join(acc, "auto"), "w") as fh:
+            fh.write("on\n")
+        resets = datetime.fromtimestamp(time.time() + 7200, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(os.path.join(acc, "2.use.json"), "w") as fh:
+            fh.write(json.dumps({"windows": {"seven_day": {"utilization": 0.2, "resetsAt": resets}}}) + "\n")
+        probes = os.path.join(self.td, "probes"); os.makedirs(probes)
+        with open(os.path.join(probes, "1"), "w") as fh:
+            fh.write(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.91, "resetsAt": resets,
+                                 "unifiedWindows": {"seven_day": {"utilization": 0.91, "resetsAt": resets}}}}) + "\n")
+        open(self.logged_in, "w").close()
+        self.render()
+        with open(os.path.join(self.rd, "job.sbatch")) as fh:
+            ws = re.search(r"WORKSPACE='([^']+)'", fh.read()).group(1)
+        os.makedirs(os.path.join(ws, "tools"), exist_ok=True)
+        open(os.path.join(ws, "tools", "handoff.py"), "w").close()
+        self.queued_file()
+        os.environ.update(FAKE_CCD_LOG=os.path.join(self.td, "ccd.log"), FAKE_PROBE_DIR=probes, HPCW_HANDOFF_GRACE_S="600")
+        try:
+            proc = self.start_job()
+        finally:
+            del os.environ["FAKE_CCD_LOG"], os.environ["FAKE_PROBE_DIR"], os.environ["HPCW_HANDOFF_GRACE_S"]
+        due = os.path.join(acc, "1.handoff-due")
+        try:
+            self.assertTrue(self.wait_for(lambda: os.path.exists(due), 60), "the session is asked for its handoff")
+            time.sleep(12)
+            self.assertEqual(os.readlink(cfg), "accounts/1", "no move before the handoff")
+            with open(os.path.join(acc, "1.handoff.json"), "w") as fh:
+                fh.write('{"v":1,"path":"docs/checkpoints/x/handoff.md"}\n')
+            self.assertTrue(self.wait_for(lambda: os.readlink(cfg) == "accounts/2", 60), "the move once the handoff is recorded")
+            self.assertTrue(self.wait_for(lambda: not os.path.exists(due), 30), "the word is taken back after the move")
+            open(os.path.join(self.rd, "stop"), "w").close()
+            out, _ = proc.communicate(timeout=90)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertIn("asking the session for its handoff before moving to account 2", out)
+        self.assertIn("the session recorded its handoff", out)
+
     def test_a_chain_successor_is_a_renewal(self):
         # the predecessor (4241) queued this job: its status.json names 4241, next.id names this job first; SubmitTime from the scheduler
         self.render(LOGIN_ABANDON_S="3")

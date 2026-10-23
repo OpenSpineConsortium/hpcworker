@@ -555,8 +555,36 @@ auto_check() {
   : > "$f"
   to=$("$AUTO_PY" "$rd" pick "$ACCT_DIR" "$ACCOUNT" "$AUTO_HELD" 2>/dev/null)
   [[ "$to" =~ ^[0-9]{1,2}$ ]] && [ "$to" != "$ACCOUNT" ] || return 0
-  say "auto mode: account $ACCOUNT is at its limit; moving to account $to"
-  ln -s "accounts/$to" "$CCD_LINK.hpcw$$" 2>/dev/null && mv -Tf "$CCD_LINK.hpcw$$" "$CCD_LINK" 2>/dev/null || rm -f "$CCD_LINK.hpcw$$"
+  PENDING_TO="$to"; PENDING_FROM="$ACCOUNT"
+  auto_move
+}
+# framework 28, the handoff before a move: a workspace that carries the Symphony template's
+# tools/handoff.py is asked for its handoff first. accounts/<N>.handoff-due says the move is coming; the
+# session's own hook reads it and writes the page a fresh account resumes from, and its `handoff.py done`
+# writes accounts/<N>.handoff.json. The move waits for that file, newer than the word, or for
+# HANDOFF_GRACE_S after the word, checked on every turn of the loop; no other workspace waits at all
+HANDOFF_GRACE_S=${HPCW_HANDOFF_GRACE_S:-900}; PENDING_TO=""; PENDING_FROM=""
+handoff_ready() {
+  local due="$ACCT_DIR/$PENDING_FROM.handoff-due" done="$ACCT_DIR/$PENDING_FROM.handoff.json" since
+  [ "$HANDOFF_GRACE_S" -gt 0 ] 2>/dev/null && [ -f "$WORKSPACE/tools/handoff.py" ] || return 0
+  if [ ! -s "$due" ]; then
+    printf '{"v":1,"at":"%s","to":"%s"}\n' "$(date -u +%FT%TZ)" "$PENDING_TO" > "$due.part" && mv -f "$due.part" "$due"
+    say "auto mode: account $PENDING_FROM is at its limit; asking the session for its handoff before moving to account $PENDING_TO (at most ${HANDOFF_GRACE_S}s)"
+    return 1
+  fi
+  [ -s "$done" ] && [ "$done" -nt "$due" ] && { say "auto mode: the session recorded its handoff"; return 0; }
+  since=$(stat -c %Y "$due" 2>/dev/null || echo 0)
+  [ $(( $(now_s) - since )) -ge "$HANDOFF_GRACE_S" ] && { say "auto mode: no handoff within ${HANDOFF_GRACE_S}s; moving anyway"; return 0; }
+  return 1
+}
+auto_move() {
+  [ -n "$PENDING_TO" ] || return 0
+  # the account moved some other way meanwhile (the panel's Use): that move stands, and this one is dropped
+  if [ "$ACCOUNT" != "$PENDING_FROM" ]; then rm -f "$ACCT_DIR/$PENDING_FROM.handoff-due"; PENDING_TO=""; return 0; fi
+  handoff_ready || return 0
+  say "auto mode: account $ACCOUNT is at its limit; moving to account $PENDING_TO"
+  ln -s "accounts/$PENDING_TO" "$CCD_LINK.hpcw$$" 2>/dev/null && mv -Tf "$CCD_LINK.hpcw$$" "$CCD_LINK" 2>/dev/null || rm -f "$CCD_LINK.hpcw$$"
+  rm -f "$ACCT_DIR/$PENDING_FROM.handoff-due"; PENDING_TO=""
 }
 trap on_term TERM INT
 
@@ -651,6 +679,7 @@ while :; do
     if [ "$SIGNIN" = other ]; then rc_stop; write_status need_login "$(login_words)"; say "signed in, but not with a Claude subscription: Remote Control stopped"; fi
   fi
   if auto_due; then auto_check; fi
+  auto_move
   # after this look at Claude Code's output, so a link printed since the last look counts first
   if register_due; then register_missed; fi
   if [ $(( $(now_s) - LAST_BEAT )) -ge "$HEARTBEAT_S" ]; then write_status "$STATE" "$MESSAGE"; LAST_BEAT=$(now_s); fi
