@@ -55,6 +55,8 @@
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 #   artifacts                      the artifacts/ folders of symphony-template and SchwingNet at their
 #                                  main, kept in ~/claude-artifacts for every account's sessions (below)
+#   key NAME                       one of the owner's service keys, on standard input, written to its
+#                                  file (below)
 # N is 1 to 32. Each runs the clone's own framework/bin/hpcworker (so framework/bin is held to the
 # copy's rule too) and then prints the list as one line "HPCW-ACCOUNTS-JSON {...}". Words that only
 # read or write files have a floor of 3 seconds of their own; login and usage, which queue one job,
@@ -110,6 +112,25 @@
 #                                  clone of its own, since a changed file here stops the next pull.
 # Each folder and script they run is held to the clone's rule: this account's own, written by it alone.
 # The status words have the 3 second floor; the others queue jobs or run git and keep the minute.
+#
+# The word key puts one of the owner's service keys where SchwingNet's jobs read it (its grid/README.md,
+# "Tokens, each in a file only the owner can read"), so a key he keeps as a GitHub secret reaches the
+# grid without his shell (the owner's choice of 2026-10-23: "all my keys should go that route"). The
+# word names the key and nothing else; the key comes on standard input, one line read with a time
+# limit, and is never in the word, the log, the answer or any command's arguments (printf is bash's
+# own). Each name has one fixed file and one line in it:
+#   key kaggle       ~/.fluorocap/credentials.env   KAGGLE_API_TOKEN=<key>
+#   key hf           ~/.hf/token.env                HF_TOKEN=<key>
+#   key zenodo       ~/.zenodo/token.env            ZENODO_TOKEN=<key>
+#   key redivis      ~/.redivis/token.env           REDIVIS_API_TOKEN=<key>
+#   key wandb        ~/.wandb/token.env             WANDB_API_KEY=<key>
+#   key physionet    ~/.netrc                       machine physionet.org login <login> password <password>,
+#                                                   the input being "<login> <password>"
+#   key ratic        ~/.rsna/ratic_link             the presigned https link as the file's one line
+# Only that line is replaced, every other line of the file kept; the folder is made 0700 and the file
+# written 0600 through a new file renamed into place, and a folder or file that is a link or another
+# account's is refused. A ~/.netrc whose physionet.org entry spans several lines is refused, to be
+# edited by hand. The floor is 3 seconds.
 #
 #   tools/grid_gate.sh --check-copy [RUNNER_DIR [OWNER-NAME]]
 #                     read only: one line per such finding, then "ok" (0) or "refused" (8)
@@ -230,11 +251,12 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
+KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic)$'
 JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
-  if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
+  if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
-  else refuse word "one of start, status or stop (or an accounts or job word), and nothing else"; fi; fi;;
+  else refuse word "one of start, status or stop (or an accounts, job or key word), and nothing else"; fi; fi;;
 esac
 bin_problems() { # the hpcworker the accounts words run, held as tools/ is
   [ -d "$CLONE/framework/bin" ] && [ ! -L "$CLONE/framework/bin" ] || { echo "copy $CLONE/framework/bin (missing or a link)"; return 0; }
@@ -255,7 +277,7 @@ take_lock() { # a lock older than two minutes is a leftover
 }
 take_lock || { note "$WORD" "limit (another call holds the gate)"; echo "HPCW-GRID-GATE limit: another call is being taken; try again in a minute"; exit 123; }
 STAMP=gate.last
-case "$WORD" in accounts\ login\ *|accounts\ start\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; *\ status) STAMP=jobs.last; FLOOR=3;; update|artifacts|promoter\ *|schwingnet\ *) STAMP=jobs.sched;; esac
+case "$WORD" in accounts\ login\ *|accounts\ start\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; key\ *) STAMP=keys.last; FLOOR=3;; *\ status) STAMP=jobs.last; FLOOR=3;; update|artifacts|promoter\ *|schwingnet\ *) STAMP=jobs.sched;; esac
 now=$(date +%s); last=$(cat "$CHAIN/$STAMP" 2>/dev/null); [[ "$last" =~ ^[0-9]{1,12}$ ]] || last=0
 if [ $(( now - last )) -lt $FLOOR ] && [ $(( now - last )) -ge 0 ]; then
   rmdir "$LOCK" 2>/dev/null
@@ -526,6 +548,62 @@ artifacts() {
   else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE artifacts failed $rc"; fi
   return $rc
 }
+# ---- a service key into its file ---------------------------------------------------------------------
+key_place() { # NAME: KF, the file, and KV, its line's name (netrc and whole are the two other shapes)
+  case "$1" in
+    kaggle) KF="$HOME/.fluorocap/credentials.env"; KV=KAGGLE_API_TOKEN;;
+    hf) KF="$HOME/.hf/token.env"; KV=HF_TOKEN;;
+    zenodo) KF="$HOME/.zenodo/token.env"; KV=ZENODO_TOKEN;;
+    redivis) KF="$HOME/.redivis/token.env"; KV=REDIVIS_API_TOKEN;;
+    wandb) KF="$HOME/.wandb/token.env"; KV=WANDB_API_KEY;;
+    physionet) KF="$HOME/.netrc"; KV=netrc;;
+    ratic) KF="$HOME/.rsna/ratic_link"; KV=whole;;
+  esac
+}
+key_shape_ok() { # VALUE: the shape each kind of key has, so nothing else can ride into the file
+  local token='^[A-Za-z0-9_.+/=:~-]{8,1024}$' netrc='^[A-Za-z0-9._@+-]{1,128} [^[:space:]"'"'"'\\]{1,256}$'
+  local link='^https://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]{8,4096}$'
+  case "$KV" in netrc) [[ "$1" =~ $netrc ]];; whole) [[ "$1" =~ $link ]];; *) [[ "$1" =~ $token ]];; esac
+}
+mine() { [ -e "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = "$ME" ]; }
+key_lines() { # VALUE: the file's new text, every line but the key's own kept
+  local machine='^[[:space:]]*machine[[:space:]]+physionet\.org([[:space:]]|$)'
+  case "$KV" in
+    whole) printf '%s\n' "$1";;
+    netrc) [ ! -f "$KF" ] || grep -Ev "$machine" "$KF"
+           printf 'machine physionet.org login %s password %s\n' "${1%% *}" "${1#* }";;
+    *) [ ! -f "$KF" ] || grep -Ev "^[[:space:]]*(export[[:space:]]+)?$KV=" "$KF"
+       printf '%s=%s\n' "$KV" "$1";;
+  esac
+  return 0
+}
+key_write() { # VALUE -> 0 written, 2 refused (the reason on stdout), 1 failed
+  local d tmp
+  d=$(dirname "$KF")
+  [ "$d" = "$HOME" ] || [ -e "$d" ] || ( umask 077; mkdir "$d" ) 2>/dev/null || { echo "cannot make $d"; return 1; }
+  mine "$d" && [ -d "$d" ] || { echo "$d is a link, not a folder or not this account's"; return 2; }
+  [ "$d" = "$HOME" ] || chmod 700 "$d" 2>/dev/null || { echo "cannot make $d 0700"; return 1; }
+  if [ -e "$KF" ] || [ -L "$KF" ]; then
+    mine "$KF" && [ -f "$KF" ] && [ -r "$KF" ] || { echo "$KF is a link, not a file or not this account's"; return 2; }
+  fi
+  if [ "$KV" = netrc ] && [ -f "$KF" ] && grep -E '^[[:space:]]*machine[[:space:]]+physionet\.org([[:space:]]|$)' "$KF" | grep -qv 'password'; then
+    echo "$KF has a physionet.org entry over several lines; edit it by hand"; return 2
+  fi
+  tmp=$(umask 077; mktemp "$d/.key.XXXXXX" 2>/dev/null) || { echo "cannot write in $d"; return 1; }
+  if key_lines "$1" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$KF"; then return 0; fi
+  rm -f "$tmp"; echo "cannot write $KF"; return 1
+}
+if [ "$KIND" = key ]; then
+  KN=${WORD#key }; key_place "$KN"
+  VALUE=""; IFS= read -r -t 20 VALUE || true
+  key_shape_ok "$VALUE" || { VALUE=""; note "$WORD" "refused (no key of its shape on stdin)"; echo "HPCW-GRID-GATE refused key: send the $KN key on standard input, one line of the shape it has"; exit 126; }
+  why=$(key_write "$VALUE"); rc=$?; VALUE=""
+  case $rc in
+    0) note "$WORD" "ok"; echo "HPCW-GRID-GATE key $KN ok ~${KF#"$HOME"} (0600)"; exit 0;;
+    2) note "$WORD" "refused"; echo "HPCW-GRID-GATE refused key: $why"; exit 126;;
+    *) note "$WORD" "failed"; echo "HPCW-GRID-GATE key $KN failed: $why"; exit 1;;
+  esac
+fi
 if [ "$KIND" = jobs ]; then
   set -f; J=( $WORD ); set +f
   case "${J[0]}" in update) update_clone; exit $?;; artifacts) artifacts; exit $?;; promoter) promoter "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[@]:1}"; exit $?;; esac
