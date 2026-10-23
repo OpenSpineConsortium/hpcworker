@@ -51,7 +51,8 @@
 #   update                         this clone fast-forwarded to its origin's main (below)
 #   promoter status | start | stop | restart
 #                                  spine-datasets' promoter chain (below)
-#   freeze status | pilot | start  spine-datasets' grid/freeze.sh, the freeze of the sets already landed (below)
+#   freeze status | pilot | start | report
+#                                  spine-datasets' grid/freeze.sh, the freeze of the sets already landed (below)
 #   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | fetch ID | census ID | explore ID | dropzip ID | cancel JOB
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 #   artifacts                      the artifacts/ folders of symphony-template and SchwingNet at their
@@ -87,13 +88,17 @@
 #                                  It waits up to 90 seconds for squeue to list none of the chain's jobs.
 #                                  Every promoter word gives promote.sh HPCWORKER, this clone's hpcworker,
 #                                  whose `job submit` queues the chain's jobs, as the schwingnet words do.
-#   freeze status | pilot | start  OpenSpineConsortium/spine-datasets' grid/freeze.sh in
-#                                  <lab root>/spine-datasets-freeze: pilot and start first fetch
+#   freeze status | pilot | start | report
+#                                  OpenSpineConsortium/spine-datasets' grid/freeze.sh in
+#                                  <lab root>/spine-datasets-freeze: pilot, start and report first fetch
 #                                  tools/freeze.py, grid/freeze.sh and grid/freeze-plan.tsv at the head
 #                                  of that repository's main into code/, then queue one job for the set
 #                                  of the plan nearest 100 GB (pilot) or the plan's unfrozen sets as four
 #                                  jobs (start), the count the owner gave on 2026-10-23; status reads the
-#                                  queue and what is frozen. No argument of the client's: the plan and the
+#                                  queue and what is frozen; report queues nothing and sends the public
+#                                  copies kept so far to that repository's branch freeze-report with the
+#                                  account's own gh, a few API calls, since the tree hashes they carry
+#                                  cannot come back through this gate's cleaned log. No argument of the client's: the plan and the
 #                                  count are fixed in that repository, which takes them by pull request.
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
@@ -261,7 +266,7 @@ WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic)$'
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census|explore|dropzip|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census|explore|dropzip|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -434,9 +439,11 @@ promoter() { # status|start|stop|restart
   return $rc
 }
 FREEZE_DIR="$LAB_ROOT/spine-datasets-freeze"
-freeze() { # status|pilot|start
+freeze() { # status|pilot|start|report
   local code="$FREEZE_DIR/code" sha="" rc f
   [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE freeze failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
+  # report runs gh itself, so gh goes on the path freeze.sh is given
+  [ "$1" = status ] || gh_on_path || true
   job_env
   ( umask 077; mkdir -p "$code" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE freeze failed: cannot make $code"; return 1; }
   if [ "$1" != status ]; then
