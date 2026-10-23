@@ -51,6 +51,7 @@
 #   update                         this clone fast-forwarded to its origin's main (below)
 #   promoter status | start | stop | restart
 #                                  spine-datasets' promoter chain (below)
+#   freeze status | pilot | start  spine-datasets' grid/freeze.sh, the freeze of the sets already landed (below)
 #   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | fetch ID | census ID | cancel JOB
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 #   artifacts                      the artifacts/ folders of symphony-template and SchwingNet at their
@@ -84,6 +85,14 @@
 #                                  It waits up to 90 seconds for squeue to list none of the chain's jobs.
 #                                  Every promoter word gives promote.sh HPCWORKER, this clone's hpcworker,
 #                                  whose `job submit` queues the chain's jobs, as the schwingnet words do.
+#   freeze status | pilot | start  OpenSpineConsortium/spine-datasets' grid/freeze.sh in
+#                                  <lab root>/spine-datasets-freeze: pilot and start first fetch
+#                                  tools/freeze.py, grid/freeze.sh and grid/freeze-plan.tsv at the head
+#                                  of that repository's main into code/, then queue one job for the set
+#                                  of the plan nearest 100 GB (pilot) or the plan's unfrozen sets as four
+#                                  jobs (start), the count the owner gave on 2026-10-23; status reads the
+#                                  queue and what is frozen. No argument of the client's: the plan and the
+#                                  count are fixed in that repository, which takes them by pull request.
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
 #                                  long run's mark), then its grid/gate.sh WORD [ID]:
@@ -230,7 +239,7 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -255,7 +264,7 @@ take_lock() { # a lock older than two minutes is a leftover
 }
 take_lock || { note "$WORD" "limit (another call holds the gate)"; echo "HPCW-GRID-GATE limit: another call is being taken; try again in a minute"; exit 123; }
 STAMP=gate.last
-case "$WORD" in accounts\ login\ *|accounts\ start\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; *\ status) STAMP=jobs.last; FLOOR=3;; update|artifacts|promoter\ *|schwingnet\ *) STAMP=jobs.sched;; esac
+case "$WORD" in accounts\ login\ *|accounts\ start\ *|"accounts usage") STAMP=accounts.sched;; accounts*) STAMP=accounts.last; FLOOR=3;; *\ status) STAMP=jobs.last; FLOOR=3;; update|artifacts|promoter\ *|freeze\ *|schwingnet\ *) STAMP=jobs.sched;; esac
 now=$(date +%s); last=$(cat "$CHAIN/$STAMP" 2>/dev/null); [[ "$last" =~ ^[0-9]{1,12}$ ]] || last=0
 if [ $(( now - last )) -lt $FLOOR ] && [ $(( now - last )) -ge 0 ]; then
   rmdir "$LOCK" 2>/dev/null
@@ -402,6 +411,28 @@ promoter() { # status|start|stop|restart
   else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE promoter $1 failed $rc"; fi
   return $rc
 }
+FREEZE_DIR="$LAB_ROOT/spine-datasets-freeze"
+freeze() { # status|pilot|start
+  local code="$FREEZE_DIR/code" sha="" rc f
+  [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE freeze failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
+  job_env
+  ( umask 077; mkdir -p "$code" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE freeze failed: cannot make $code"; return 1; }
+  if [ "$1" != status ]; then
+    promoter_head || return $?
+    promoter_fetch tools/freeze.py "$code/freeze.py" && promoter_fetch grid/freeze.sh "$code/freeze.sh" \
+      && promoter_fetch grid/freeze-plan.tsv "$code/freeze-plan.tsv" || { rm -f "$code"/*.gate.tmp; return 1; }
+    for f in freeze.py freeze.sh freeze-plan.tsv; do
+      mv -f "$code/$f.gate.tmp" "$code/$f" || { rm -f "$code"/*.gate.tmp; note "$WORD" "failed (put $f)"; echo "HPCW-GRID-GATE freeze failed: cannot put $f in place"; return 1; }
+    done
+  fi
+  [ -e "$code/freeze.sh" ] || { note "$WORD" "none yet"; echo "HPCW-GRID-GATE freeze status: no freeze has been started"; return 0; }
+  held "$FREEZE_DIR" "$code" "$code/freeze.py" "$code/freeze.sh" "$code/freeze-plan.tsv" || { note "$WORD" "refused (copy)"; return 126; }
+  ( cd "$FREEZE_DIR" && env -i "${JE[@]}" FREEZE_HOME="$FREEZE_DIR" HPCWORKER="$CLONE/framework/bin/hpcworker" \
+      /bin/bash "$code/freeze.sh" "$1" < /dev/null 2>&1 ); rc=$?
+  if [ $rc = 0 ]; then note "$WORD" "ok${sha:+ ${sha:0:12}}"; echo "HPCW-GRID-GATE freeze $1 ok${sha:+ at ${sha:0:12}}"
+  else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE freeze $1 failed $rc"; fi
+  return $rc
+}
 SCHWINGNET_REPO=OpenSpineConsortium/SchwingNet
 schwingnet() { # WORD [ID]
   local S="$SCHWINGNET_DIR" rc out
@@ -528,7 +559,7 @@ artifacts() {
 }
 if [ "$KIND" = jobs ]; then
   set -f; J=( $WORD ); set +f
-  case "${J[0]}" in update) update_clone; exit $?;; artifacts) artifacts; exit $?;; promoter) promoter "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[@]:1}"; exit $?;; esac
+  case "${J[0]}" in update) update_clone; exit $?;; artifacts) artifacts; exit $?;; promoter) promoter "${J[1]}"; exit $?;; freeze) freeze "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[@]:1}"; exit $?;; esac
 fi
 if [ "$KIND" = accounts ]; then
   # the code comes on standard input: one line, read here with a time limit and checked as accounts code checks it
