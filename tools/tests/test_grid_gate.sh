@@ -431,6 +431,9 @@ case "\$*" in
   "repo clone OpenSpineConsortium/SchwingNet "*) git clone -q "$T/sn-origin.git" "\$4"; exit \$?;;
   *contents/grid/promote.sh?ref=$SHA*) printf '#!/bin/bash\necho "promote.sh \$*" >> "$JOBS_CALLS"\necho "promote said \$1"\n';;
   *contents/tools/promote.py?ref=$SHA*) echo "# promote.py at $SHA";;
+  *contents/grid/freeze.sh?ref=$SHA*) printf '#!/bin/bash\necho "freeze.sh \$* FREEZE_HOME=\$FREEZE_HOME" >> "$JOBS_CALLS"\necho "freeze said \$1"\n';;
+  *contents/tools/freeze.py?ref=$SHA*) echo "# freeze.py at $SHA";;
+  *contents/grid/freeze-plan.tsv?ref=$SHA*) printf 'amos22\t/data/amos22\t102600000000\n';;
   *) exit 1;;
 esac
 EOF2
@@ -448,6 +451,19 @@ job "promoter status" "${LINE_ARGS[@]}"
 t "promoter status runs promote.sh status and shows its output" bash -c "grep -qx 'promote.sh status' '$JOBS_CALLS'" && t "  its output" has '^promote said status$'
 job "promoter stop" "${LINE_ARGS[@]}"
 t "promoter stop runs promote.sh stop" bash -c "grep -qx 'promote.sh stop' '$JOBS_CALLS'"
+F="$HPCW_LAB_ROOT/spine-datasets-freeze"
+: > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
+t "freeze status before any freeze says none has started, and fetches nothing" bash -c "[ '$RC' = 0 ] && ! grep -q contents '$JOBS_CALLS'" && t "  says so" has '^HPCW-GRID-GATE freeze status: no freeze has been started$'
+: > "$JOBS_CALLS"; job "freeze pilot" "${LINE_ARGS[@]}"
+t "freeze pilot fetches freeze.py, freeze.sh and the plan at main's head" bash -c "for f in tools/freeze.py grid/freeze.sh grid/freeze-plan.tsv; do grep -q \"contents/\$f?ref=$SHA\" '$JOBS_CALLS' || exit 1; done; grep -qx '# freeze.py at $SHA' '$F/code/freeze.py'"
+t "  then runs freeze.sh pilot in its own folder" bash -c "grep -qx 'freeze.sh pilot FREEZE_HOME=$F' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE freeze pilot ok at ${SHA:0:12}$"
+: > "$JOBS_CALLS"; job "freeze start" "${LINE_ARGS[@]}"
+t "freeze start runs freeze.sh start, its count fixed in the repository" bash -c "grep -qx 'freeze.sh start FREEZE_HOME=$F' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
+t "freeze status runs freeze.sh status and fetches nothing" bash -c "grep -qx 'freeze.sh status FREEZE_HOME=$F' '$JOBS_CALLS' && ! grep -q contents '$JOBS_CALLS'"
+chmod g+w "$F/code/freeze.sh"; : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
+t "a freeze.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q freeze.sh '$JOBS_CALLS'"
+chmod g-w "$F/code/freeze.sh"
 chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE_ARGS[@]}"
 t "a promote.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q promote.sh '$JOBS_CALLS'"
 chmod g-w "$P/code/promote.sh"
@@ -527,7 +543,7 @@ t "schwingnet chain_eval goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh
 : > "$JOBS_CALLS"; job "schwingnet samples" "${LINE_ARGS[@]}"
 t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ samples SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
