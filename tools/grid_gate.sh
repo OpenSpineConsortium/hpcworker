@@ -51,7 +51,7 @@
 #   update                         this clone fast-forwarded to its origin's main (below)
 #   promoter status | start | stop | restart
 #                                  spine-datasets' promoter chain (below)
-#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | fetch ID | census ID
+#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | fetch ID | census ID | cancel JOB
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 #   artifacts                      the artifacts/ folders of symphony-template and SchwingNet at their
 #                                  main, kept in ~/claude-artifacts for every account's sessions (below)
@@ -87,8 +87,9 @@
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
 #                                  long run's mark), then its grid/gate.sh WORD [ID]:
-#                                  start, status, leaks, v1, latency, stop, prior, chain_eval or samples, or fetch
-#                                  or census with one id of lower-case letters, digits and _; gate.sh checks both again against its
+#                                  start, status, leaks, v1, latency, stop, prior, chain_eval or samples, or fetch,
+#                                  census or cancel with one id of lower-case letters, digits and _ (cancel's a job
+#                                  of the gate's own, digits alone); gate.sh checks both again against its
 #                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
 #                                  answers 64 for a word it refuses and 75 while another of its words runs;
 #                                  HPCWORKER names this clone's framework/bin/hpcworker, whose `job submit`
@@ -229,7 +230,7 @@ fi
 WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|(fetch|census|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
