@@ -550,8 +550,10 @@ t "schwingnet cancel passes its one job to gate.sh" bash -c "grep -Eqx 'gate.sh 
 t "schwingnet chain_eval goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ chain_eval SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet samples" "${LINE_ARGS[@]}"
 t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ samples SCHWINGNET=$SN' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "schwingnet nodequota" "${LINE_ARGS[@]}"
+t "schwingnet nodequota goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ nodequota SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
