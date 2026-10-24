@@ -435,6 +435,9 @@ case "\$*" in
   *contents/tools/freeze.py?ref=$SHA*) echo "# freeze.py at $SHA";;
   *contents/tools/lineage.py?ref=$SHA*) echo "# lineage.py at $SHA";;
   *contents/grid/freeze-plan.tsv?ref=$SHA*) printf 'amos22\t/data/amos22\t102600000000\n';;
+  *contents/grid/storage.sh?ref=$SHA*) printf '#!/bin/bash\necho "storage.sh \$* STORAGE_DIR=\$STORAGE_DIR" >> "$JOBS_CALLS"\necho "storage said \$1"\n';;
+  *contents/tools/retire.py?ref=$SHA*) echo "# retire.py at $SHA";;
+  *contents/storage/requests/20261024T210000Z.json?ref=$SHA*) echo '{"format": "spine-datasets/storage-request 1"}';;
   *) exit 1;;
 esac
 EOF2
@@ -474,6 +477,21 @@ t "freeze status runs freeze.sh status and fetches nothing" bash -c "grep -qx 'f
 chmod g+w "$F/code/freeze.sh"; : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
 t "a freeze.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q freeze.sh '$JOBS_CALLS'"
 chmod g-w "$F/code/freeze.sh"
+G="$HPCW_LAB_ROOT/spine-datasets-storage"
+: > "$JOBS_CALLS"; job "storage status" "${LINE_ARGS[@]}"
+t "storage status before any request says none has been planned, and fetches nothing" bash -c "[ '$RC' = 0 ] && ! grep -q contents '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "storage apply 20261024T210000Z" "${LINE_ARGS[@]}"
+t "storage apply fetches retire.py, freeze.py, storage.sh and the merged request at main's head" bash -c "for f in tools/retire.py tools/freeze.py grid/storage.sh storage/requests/20261024T210000Z.json; do grep -q \"contents/\$f?ref=$SHA\" '$JOBS_CALLS' || exit 1; done; [ -f '$G/code/requests/20261024T210000Z.json' ]"
+t "  then runs storage.sh apply in its own folder" bash -c "grep -qx 'storage.sh apply 20261024T210000Z STORAGE_DIR=$G' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE storage apply ok at ${SHA:0:12}$"
+: > "$JOBS_CALLS"; job "storage apply 20261024T999999Z" "${LINE_ARGS[@]}"
+t "storage apply of a request main does not hold fails and runs nothing" bash -c "[ '$RC' != 0 ] && ! grep -q '^storage.sh' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "storage report" "${LINE_ARGS[@]}"
+t "storage report runs storage.sh report" bash -c "grep -qx 'storage.sh report STORAGE_DIR=$G' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "storage retire 20261024T210000Z" "${LINE_ARGS[@]}"
+t "storage retire fetches the merged request too and runs storage.sh retire" bash -c "grep -q 'contents/storage/requests/20261024T210000Z.json?ref=$SHA' '$JOBS_CALLS' && grep -qx 'storage.sh retire 20261024T210000Z STORAGE_DIR=$G' '$JOBS_CALLS'"
+chmod g+w "$G/code/retire.py"; : > "$JOBS_CALLS"; job "storage status" "${LINE_ARGS[@]}"
+t "a retire.py the group may write is refused and storage.sh never run" bash -c "[ '$RC' = 126 ] && ! grep -q storage.sh '$JOBS_CALLS'"
+chmod g-w "$G/code/retire.py"
 chmod g+w "$P/code/promote.sh"; : > "$JOBS_CALLS"; job "promoter status" "${LINE_ARGS[@]}"
 t "a promote.sh the group may write is refused and never run" bash -c "[ '$RC' = 126 ] && ! grep -q promote.sh '$JOBS_CALLS'"
 chmod g-w "$P/code/promote.sh"
@@ -561,7 +579,7 @@ t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[
 : > "$JOBS_CALLS"; job "schwingnet nodequota" "${LINE_ARGS[@]}"
 t "schwingnet nodequota goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ nodequota SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'storage apply' 'storage apply ../x' 'storage apply 2026-10-24' 'storage retire x' 'storage retire' 'storage delete 20261024T210000Z' 'storage status x' 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
