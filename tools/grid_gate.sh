@@ -270,7 +270,7 @@ WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic)$'
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|(fetch|census|explore|dropzip|unpack|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|apply [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|(fetch|census|explore|dropzip|unpack|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -469,6 +469,34 @@ freeze() { # status|pilot|start|report|overlap
   else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE freeze $1 failed $rc"; fi
   return $rc
 }
+STORAGE_DIR="$LAB_ROOT/spine-datasets-storage"
+storage() { # status|report|apply STAMP: a merged storage request of spine-datasets, planned on the grid
+  local code="$STORAGE_DIR/code" sha="" rc f files
+  [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE storage failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
+  [ "$1" = status ] || gh_on_path || true
+  job_env
+  ( umask 077; mkdir -p "$code/requests" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE storage failed: cannot make $code"; return 1; }
+  if [ "$1" != status ]; then
+    promoter_head || return $?
+    files=(tools/retire.py:retire.py tools/freeze.py:freeze.py grid/storage.sh:storage.sh)
+    # only a request the default branch holds is read, so only one the owner merged is ever planned
+    [ "$1" = apply ] && files+=("storage/requests/$2.json:requests/$2.json")
+    for f in "${files[@]}"; do
+      promoter_fetch "${f%%:*}" "$code/${f#*:}" || { rm -f "$code"/*.gate.tmp "$code"/requests/*.gate.tmp; return 1; }
+    done
+    for f in "${files[@]}"; do
+      mv -f "$code/${f#*:}.gate.tmp" "$code/${f#*:}" || { rm -f "$code"/*.gate.tmp "$code"/requests/*.gate.tmp; note "$WORD" "failed (put ${f#*:})"; echo "HPCW-GRID-GATE storage failed: cannot put ${f#*:} in place"; return 1; }
+    done
+  fi
+  [ -e "$code/storage.sh" ] || { note "$WORD" "none yet"; echo "HPCW-GRID-GATE storage status: no request has been planned"; return 0; }
+  held "$STORAGE_DIR" "$code" "$code/requests" "$code/retire.py" "$code/freeze.py" "$code/storage.sh" \
+    ${2:+"$code/requests/$2.json"} || { note "$WORD" "refused (copy)"; return 126; }
+  ( cd "$STORAGE_DIR" && env -i "${JE[@]}" STORAGE_DIR="$STORAGE_DIR" HPCWORKER="$CLONE/framework/bin/hpcworker" \
+      /bin/bash "$code/storage.sh" "$@" < /dev/null 2>&1 ); rc=$?
+  if [ $rc = 0 ]; then note "$WORD" "ok${sha:+ ${sha:0:12}}"; echo "HPCW-GRID-GATE storage $1 ok${sha:+ at ${sha:0:12}}"
+  else note "$WORD" "failed $rc"; echo "HPCW-GRID-GATE storage $1 failed $rc"; fi
+  return $rc
+}
 SCHWINGNET_REPO=OpenSpineConsortium/SchwingNet
 schwingnet() { # WORD [ID]
   local S="$SCHWINGNET_DIR" rc out
@@ -651,7 +679,7 @@ if [ "$KIND" = key ]; then
 fi
 if [ "$KIND" = jobs ]; then
   set -f; J=( $WORD ); set +f
-  case "${J[0]}" in update) update_clone; exit $?;; artifacts) artifacts; exit $?;; promoter) promoter "${J[1]}"; exit $?;; freeze) freeze "${J[1]}"; exit $?;; schwingnet) schwingnet "${J[@]:1}"; exit $?;; esac
+  case "${J[0]}" in update) update_clone; exit $?;; artifacts) artifacts; exit $?;; promoter) promoter "${J[1]}"; exit $?;; freeze) freeze "${J[1]}"; exit $?;; storage) storage "${J[@]:1}"; exit $?;; schwingnet) schwingnet "${J[@]:1}"; exit $?;; esac
 fi
 if [ "$KIND" = accounts ]; then
   # the code comes on standard input: one line, read here with a time limit and checked as accounts code checks it
