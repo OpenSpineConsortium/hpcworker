@@ -270,7 +270,7 @@ WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic)$'
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|apply [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|(fetch|census|explore|dropzip|unpack|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|(apply|retire) [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|(fetch|census|explore|dropzip|unpack|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -470,7 +470,7 @@ freeze() { # status|pilot|start|report|overlap
   return $rc
 }
 STORAGE_DIR="$LAB_ROOT/spine-datasets-storage"
-storage() { # status|report|apply STAMP: a merged storage request of spine-datasets, planned on the grid
+storage() { # status|report|apply STAMP|retire STAMP: a merged storage request of spine-datasets on the grid
   local code="$STORAGE_DIR/code" sha="" rc f files
   [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE storage failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
   [ "$1" = status ] || gh_on_path || true
@@ -480,7 +480,7 @@ storage() { # status|report|apply STAMP: a merged storage request of spine-datas
     promoter_head || return $?
     files=(tools/retire.py:retire.py tools/freeze.py:freeze.py grid/storage.sh:storage.sh)
     # only a request the default branch holds is read, so only one the owner merged is ever planned
-    [ "$1" = apply ] && files+=("storage/requests/$2.json:requests/$2.json")
+    [ -n "${2:-}" ] && files+=("storage/requests/$2.json:requests/$2.json")
     for f in "${files[@]}"; do
       promoter_fetch "${f%%:*}" "$code/${f#*:}" || { rm -f "$code"/*.gate.tmp "$code"/requests/*.gate.tmp; return 1; }
     done

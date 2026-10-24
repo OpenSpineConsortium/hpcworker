@@ -487,6 +487,8 @@ t "  then runs storage.sh apply in its own folder" bash -c "grep -qx 'storage.sh
 t "storage apply of a request main does not hold fails and runs nothing" bash -c "[ '$RC' != 0 ] && ! grep -q '^storage.sh' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "storage report" "${LINE_ARGS[@]}"
 t "storage report runs storage.sh report" bash -c "grep -qx 'storage.sh report STORAGE_DIR=$G' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "storage retire 20261024T210000Z" "${LINE_ARGS[@]}"
+t "storage retire fetches the merged request too and runs storage.sh retire" bash -c "grep -q 'contents/storage/requests/20261024T210000Z.json?ref=$SHA' '$JOBS_CALLS' && grep -qx 'storage.sh retire 20261024T210000Z STORAGE_DIR=$G' '$JOBS_CALLS'"
 chmod g+w "$G/code/retire.py"; : > "$JOBS_CALLS"; job "storage status" "${LINE_ARGS[@]}"
 t "a retire.py the group may write is refused and storage.sh never run" bash -c "[ '$RC' = 126 ] && ! grep -q storage.sh '$JOBS_CALLS'"
 chmod g-w "$G/code/retire.py"
@@ -577,7 +579,7 @@ t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[
 : > "$JOBS_CALLS"; job "schwingnet nodequota" "${LINE_ARGS[@]}"
 t "schwingnet nodequota goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ nodequota SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'storage apply' 'storage apply ../x' 'storage apply 2026-10-24' 'storage retire x' 'storage status x' 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'storage apply' 'storage apply ../x' 'storage apply 2026-10-24' 'storage retire x' 'storage retire' 'storage delete 20261024T210000Z' 'storage status x' 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
