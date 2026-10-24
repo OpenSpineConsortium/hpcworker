@@ -433,6 +433,7 @@ case "\$*" in
   *contents/tools/promote.py?ref=$SHA*) echo "# promote.py at $SHA";;
   *contents/grid/freeze.sh?ref=$SHA*) printf '#!/bin/bash\necho "freeze.sh \$* FREEZE_HOME=\$FREEZE_HOME" >> "$JOBS_CALLS"\necho "freeze said \$1"\n';;
   *contents/tools/freeze.py?ref=$SHA*) echo "# freeze.py at $SHA";;
+  *contents/tools/lineage.py?ref=$SHA*) echo "# lineage.py at $SHA";;
   *contents/grid/freeze-plan.tsv?ref=$SHA*) printf 'amos22\t/data/amos22\t102600000000\n';;
   *) exit 1;;
 esac
@@ -455,12 +456,19 @@ F="$HPCW_LAB_ROOT/spine-datasets-freeze"
 : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
 t "freeze status before any freeze says none has started, and fetches nothing" bash -c "[ '$RC' = 0 ] && ! grep -q contents '$JOBS_CALLS'" && t "  says so" has '^HPCW-GRID-GATE freeze status: no freeze has been started$'
 : > "$JOBS_CALLS"; job "freeze pilot" "${LINE_ARGS[@]}"
-t "freeze pilot fetches freeze.py, freeze.sh and the plan at main's head" bash -c "for f in tools/freeze.py grid/freeze.sh grid/freeze-plan.tsv; do grep -q \"contents/\$f?ref=$SHA\" '$JOBS_CALLS' || exit 1; done; grep -qx '# freeze.py at $SHA' '$F/code/freeze.py'"
+t "freeze pilot fetches freeze.py, lineage.py, freeze.sh and the plan at main's head" bash -c "for f in tools/freeze.py tools/lineage.py grid/freeze.sh grid/freeze-plan.tsv; do grep -q \"contents/\$f?ref=$SHA\" '$JOBS_CALLS' || exit 1; done; grep -qx '# freeze.py at $SHA' '$F/code/freeze.py'"
 t "  then runs freeze.sh pilot in its own folder" bash -c "grep -qx 'freeze.sh pilot FREEZE_HOME=$F' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE freeze pilot ok at ${SHA:0:12}$"
 : > "$JOBS_CALLS"; job "freeze start" "${LINE_ARGS[@]}"
 t "freeze start runs freeze.sh start, its count fixed in the repository" bash -c "grep -qx 'freeze.sh start FREEZE_HOME=$F' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "freeze report" "${LINE_ARGS[@]}"
 t "freeze report fetches the code at main's head and runs freeze.sh report" bash -c "grep -q 'contents/grid/freeze.sh?ref=$SHA' '$JOBS_CALLS' && grep -qx 'freeze.sh report FREEZE_HOME=$F' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE freeze report ok at ${SHA:0:12}$"
+: > "$JOBS_CALLS"; job "freeze overlap" "${LINE_ARGS[@]}"
+t "freeze overlap fetches lineage.py at main's head and runs freeze.sh overlap" bash -c "grep -q 'contents/tools/lineage.py?ref=$SHA' '$JOBS_CALLS' && grep -qx 'freeze.sh overlap FREEZE_HOME=$F' '$JOBS_CALLS'" && t "  and says so" has "^HPCW-GRID-GATE freeze overlap ok at ${SHA:0:12}$"
+: > "$JOBS_CALLS"; job "freeze overlap now" "${LINE_ARGS[@]}"
+t "freeze overlap takes no argument" bash -c "! grep -q 'freeze.sh' '$JOBS_CALLS'"
+chmod g+w "$F/code/lineage.py"; : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
+t "a lineage.py the group may write is refused and freeze.sh never run" bash -c "[ '$RC' = 126 ] && ! grep -q freeze.sh '$JOBS_CALLS'"
+chmod g-w "$F/code/lineage.py"
 : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"
 t "freeze status runs freeze.sh status and fetches nothing" bash -c "grep -qx 'freeze.sh status FREEZE_HOME=$F' '$JOBS_CALLS' && ! grep -q contents '$JOBS_CALLS'"
 chmod g+w "$F/code/freeze.sh"; : > "$JOBS_CALLS"; job "freeze status" "${LINE_ARGS[@]}"

@@ -51,7 +51,7 @@
 #   update                         this clone fast-forwarded to its origin's main (below)
 #   promoter status | start | stop | restart
 #                                  spine-datasets' promoter chain (below)
-#   freeze status | pilot | start | report
+#   freeze status | pilot | start | report | overlap
 #                                  spine-datasets' grid/freeze.sh, the freeze of the sets already landed (below)
 #   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | nodequota | fetch ID | census ID | explore ID | dropzip ID | unpack ID | cancel JOB
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
@@ -88,17 +88,21 @@
 #                                  It waits up to 90 seconds for squeue to list none of the chain's jobs.
 #                                  Every promoter word gives promote.sh HPCWORKER, this clone's hpcworker,
 #                                  whose `job submit` queues the chain's jobs, as the schwingnet words do.
-#   freeze status | pilot | start | report
+#   freeze status | pilot | start | report | overlap
 #                                  OpenSpineConsortium/spine-datasets' grid/freeze.sh in
-#                                  <lab root>/spine-datasets-freeze: pilot, start and report first fetch
-#                                  tools/freeze.py, grid/freeze.sh and grid/freeze-plan.tsv at the head
+#                                  <lab root>/spine-datasets-freeze: pilot, start, report and overlap first
+#                                  fetch tools/freeze.py, tools/lineage.py, grid/freeze.sh and
+#                                  grid/freeze-plan.tsv at the head
 #                                  of that repository's main into code/, then queue one job for the set
 #                                  of the plan nearest 100 GB (pilot) or the plan's unfrozen sets as four
 #                                  jobs (start), the count the owner gave on 2026-10-23; status reads the
 #                                  queue and what is frozen; report queues nothing and sends the public
 #                                  copies kept so far to that repository's branch freeze-report with the
 #                                  account's own gh, a few API calls, since the tree hashes they carry
-#                                  cannot come back through this gate's cleaned log. No argument of the client's: the plan and the
+#                                  cannot come back through this gate's cleaned log; overlap queues one
+#                                  read-only job that reads every frozen set's file list and a few DICOM
+#                                  headers into lineage/ (the owner's word of 2026-10-24), whose counts
+#                                  report then carries back too. No argument of the client's: the plan and the
 #                                  count are fixed in that repository, which takes them by pull request.
 #   schwingnet WORD [ID]           ~/SchwingNet cloned with gh when missing, else fast-forwarded to its
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
@@ -266,7 +270,7 @@ WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic)$'
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|(fetch|census|explore|dropzip|unpack|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|(fetch|census|explore|dropzip|unpack|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -439,8 +443,8 @@ promoter() { # status|start|stop|restart
   return $rc
 }
 FREEZE_DIR="$LAB_ROOT/spine-datasets-freeze"
-freeze() { # status|pilot|start|report
-  local code="$FREEZE_DIR/code" sha="" rc f
+freeze() { # status|pilot|start|report|overlap
+  local code="$FREEZE_DIR/code" sha="" rc f extra
   [ -n "$LAB_ROOT" ] || { note "$WORD" "failed (no lab root)"; echo "HPCW-GRID-GATE freeze failed: the gate's line names no site whose profile gives shared_state_dir"; return 1; }
   # report runs gh itself, so gh goes on the path freeze.sh is given
   [ "$1" = status ] || gh_on_path || true
@@ -448,14 +452,17 @@ freeze() { # status|pilot|start|report
   ( umask 077; mkdir -p "$code" ) || { note "$WORD" "failed (folder)"; echo "HPCW-GRID-GATE freeze failed: cannot make $code"; return 1; }
   if [ "$1" != status ]; then
     promoter_head || return $?
-    promoter_fetch tools/freeze.py "$code/freeze.py" && promoter_fetch grid/freeze.sh "$code/freeze.sh" \
+    promoter_fetch tools/freeze.py "$code/freeze.py" && promoter_fetch tools/lineage.py "$code/lineage.py" \
+      && promoter_fetch grid/freeze.sh "$code/freeze.sh" \
       && promoter_fetch grid/freeze-plan.tsv "$code/freeze-plan.tsv" || { rm -f "$code"/*.gate.tmp; return 1; }
-    for f in freeze.py freeze.sh freeze-plan.tsv; do
+    for f in freeze.py lineage.py freeze.sh freeze-plan.tsv; do
       mv -f "$code/$f.gate.tmp" "$code/$f" || { rm -f "$code"/*.gate.tmp; note "$WORD" "failed (put $f)"; echo "HPCW-GRID-GATE freeze failed: cannot put $f in place"; return 1; }
     done
   fi
   [ -e "$code/freeze.sh" ] || { note "$WORD" "none yet"; echo "HPCW-GRID-GATE freeze status: no freeze has been started"; return 0; }
-  held "$FREEZE_DIR" "$code" "$code/freeze.py" "$code/freeze.sh" "$code/freeze-plan.tsv" || { note "$WORD" "refused (copy)"; return 126; }
+  # lineage.py is held too once a fetch has brought it; a status before the first such fetch has none
+  extra=(); [ -e "$code/lineage.py" ] && extra=("$code/lineage.py")
+  held "$FREEZE_DIR" "$code" "$code/freeze.py" "$code/freeze.sh" "$code/freeze-plan.tsv" ${extra[@]+"${extra[@]}"} || { note "$WORD" "refused (copy)"; return 126; }
   ( cd "$FREEZE_DIR" && env -i "${JE[@]}" FREEZE_HOME="$FREEZE_DIR" HPCWORKER="$CLONE/framework/bin/hpcworker" \
       /bin/bash "$code/freeze.sh" "$1" < /dev/null 2>&1 ); rc=$?
   if [ $rc = 0 ]; then note "$WORD" "ok${sha:+ ${sha:0:12}}"; echo "HPCW-GRID-GATE freeze $1 ok${sha:+ at ${sha:0:12}}"
