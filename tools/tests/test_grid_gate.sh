@@ -437,6 +437,7 @@ case "\$*" in
   *contents/grid/freeze-plan.tsv?ref=$SHA*) printf 'amos22\t/data/amos22\t102600000000\n';;
   *contents/grid/storage.sh?ref=$SHA*) printf '#!/bin/bash\necho "storage.sh \$* STORAGE_DIR=\$STORAGE_DIR" >> "$JOBS_CALLS"\necho "storage said \$1"\n';;
   *contents/tools/retire.py?ref=$SHA*) echo "# retire.py at $SHA";;
+  *contents/tools/survey.py?ref=$SHA*) echo "# survey.py at $SHA";;
   *contents/storage/requests/20261024T210000Z.json?ref=$SHA*) echo '{"format": "spine-datasets/storage-request 1"}';;
   *) exit 1;;
 esac
@@ -489,6 +490,13 @@ t "storage apply of a request main does not hold fails and runs nothing" bash -c
 t "storage report runs storage.sh report" bash -c "grep -qx 'storage.sh report STORAGE_DIR=$G' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "storage retire 20261024T210000Z" "${LINE_ARGS[@]}"
 t "storage retire fetches the merged request too and runs storage.sh retire" bash -c "grep -q 'contents/storage/requests/20261024T210000Z.json?ref=$SHA' '$JOBS_CALLS' && grep -qx 'storage.sh retire 20261024T210000Z STORAGE_DIR=$G' '$JOBS_CALLS'"
+rm -f "$G/code/survey.py" "$G/code/freeze-plan.tsv"; : > "$JOBS_CALLS"; job "storage status" "${LINE_ARGS[@]}"
+t "storage status runs on a copy fetched before the survey's files" bash -c "[ '$RC' = 0 ] && grep -qx 'storage.sh status STORAGE_DIR=$G' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "storage survey" "${LINE_ARGS[@]}"
+t "storage survey fetches survey.py and the freeze plan and runs storage.sh survey" bash -c "for f in tools/survey.py grid/freeze-plan.tsv grid/storage.sh; do grep -q \"contents/\$f?ref=$SHA\" '$JOBS_CALLS' || exit 1; done; [ -f '$G/code/freeze-plan.tsv' ] && grep -qx 'storage.sh survey STORAGE_DIR=$G' '$JOBS_CALLS'"
+chmod g+w "$G/code/survey.py"; : > "$JOBS_CALLS"; job "storage status" "${LINE_ARGS[@]}"
+t "a survey.py the group may write is refused too" bash -c "[ '$RC' = 126 ] && ! grep -q storage.sh '$JOBS_CALLS'"
+chmod g-w "$G/code/survey.py"
 chmod g+w "$G/code/retire.py"; : > "$JOBS_CALLS"; job "storage status" "${LINE_ARGS[@]}"
 t "a retire.py the group may write is refused and storage.sh never run" bash -c "[ '$RC' = 126 ] && ! grep -q storage.sh '$JOBS_CALLS'"
 chmod g-w "$G/code/retire.py"
@@ -585,7 +593,7 @@ t "schwingnet sweep passes its one plan to gate.sh" bash -c "grep -Eqx 'gate.sh 
 : > "$JOBS_CALLS"; job "schwingnet bank vindr_spinexr" "${LINE_ARGS[@]}"
 t "schwingnet bank passes its one dataset to gate.sh" bash -c "grep -Eqx 'gate.sh v[0-9]+ bank vindr_spinexr SCHWINGNET=$SN' '$JOBS_CALLS'"
 
-for w in 'storage apply' 'storage apply ../x' 'storage apply 2026-10-24' 'storage retire x' 'storage retire' 'storage delete 20261024T210000Z' 'storage status x' 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet experiment' 'schwingnet experiment 1 2' 'schwingnet experiment ../x' 'schwingnet experiment #250' 'schwingnet sweep' 'schwingnet sweep real synthetic' 'schwingnet sweep ../x' 'schwingnet sweep Two-Source' 'schwingnet bank' 'schwingnet bank a b' 'schwingnet bank ../x' 'schwingnet bank VinDr' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
+for w in 'storage apply' 'storage apply ../x' 'storage apply 2026-10-24' 'storage retire x' 'storage retire' 'storage delete 20261024T210000Z' 'storage status x' 'storage survey x' 'storage-survey' 'freeze start 9' 'freeze pilot amos22' 'freeze stop' 'freeze report now' 'promoter start abc' 'promoter restart now' 'promoter-restart' 'schwingnet xray-chain' 'schwingnet pull' 'schwingnet fetch VinDr' 'schwingnet fetch a b' 'schwingnet fetch' 'schwingnet census' 'schwingnet prior x' 'schwingnet samples x' 'schwingnet nodequota x' 'schwingnet chain-eval' 'schwingnet census a-b' 'schwingnet explore' 'schwingnet explore a b' 'schwingnet explore Kaggle-Set' 'schwingnet dropzip' 'schwingnet dropzip a b' 'schwingnet dropzip ../x' 'schwingnet unpack' 'schwingnet unpack a b' 'schwingnet unpack ../x' 'schwingnet experiment' 'schwingnet experiment 1 2' 'schwingnet experiment ../x' 'schwingnet experiment #250' 'schwingnet sweep' 'schwingnet sweep real synthetic' 'schwingnet sweep ../x' 'schwingnet sweep Two-Source' 'schwingnet bank' 'schwingnet bank a b' 'schwingnet bank ../x' 'schwingnet bank VinDr' 'schwingnet cancel' 'schwingnet cancel 1 2' 'schwingnet status x' 'update now' 'update;id' 'schwingnet'; do
   : > "$JOBS_CALLS"; job "$w" "${LINE_ARGS[@]}"
   t "refuses the word '$w'" bash -c "[ '$RC' = 126 ] && [ ! -s '$JOBS_CALLS' ]"
 done
