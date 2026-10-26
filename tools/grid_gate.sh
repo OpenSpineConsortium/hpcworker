@@ -53,7 +53,7 @@
 #                                  spine-datasets' promoter chain (below)
 #   freeze status | pilot | start | report | overlap
 #                                  spine-datasets' grid/freeze.sh, the freeze of the sets already landed (below)
-#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | nodequota | folders | fetch ID | census ID | explore ID | dropzip ID | unpack ID | experiment ISSUE | sweep PLAN | bank ID | bench NAME | anomaly STAGE | cancel JOB
+#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | nodequota | folders | fetch ID | census ID | explore ID | dropzip ID | unpack ID | experiment ISSUE | sweep PLAN | bank ID | bench NAME | anomaly STAGE | bordercall STAGE | cancel JOB
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 #   artifacts                      the artifacts/ folders of symphony-template and SchwingNet at their
 #                                  main, kept in ~/claude-artifacts for every account's sessions (below)
@@ -108,7 +108,7 @@
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
 #                                  long run's mark), then its grid/gate.sh WORD [ID]:
 #                                  start, status, leaks, v1, latency, stop, prior, chain_eval, samples, nodequota or folders, or fetch,
-#                                  census, explore, dropzip, unpack, experiment, sweep, bank, bench, anomaly or cancel with one id of lower-case letters, digits and _ (cancel's a job
+#                                  census, explore, dropzip, unpack, experiment, sweep, bank, bench, anomaly, bordercall or cancel with one id of lower-case letters, digits and _ (cancel's a job
 #                                  of the gate's own, digits alone); gate.sh checks both again against its
 #                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
 #                                  answers 64 for a word it refuses and 75 while another of its words runs;
@@ -270,7 +270,7 @@ WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic)$'
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|survey|(apply|retire) [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|folders|(fetch|census|explore|dropzip|unpack|experiment|sweep|bank|bench|anomaly|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|survey|(apply|retire) [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|folders|(fetch|census|explore|dropzip|unpack|experiment|sweep|bank|bench|anomaly|bordercall|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
