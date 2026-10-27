@@ -586,6 +586,8 @@ t "schwingnet chain_eval goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh
 t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ samples SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet nodequota" "${LINE_ARGS[@]}"
 t "schwingnet nodequota goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ nodequota SCHWINGNET=$SN' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "schwingnet literature synthetic_spine" "${LINE_ARGS[@]}"
+t "schwingnet literature passes its one list to gate.sh" bash -c "grep -Eqx 'gate.sh v[0-9]+ literature synthetic_spine SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet folders" "${LINE_ARGS[@]}"
 t "schwingnet folders goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ folders SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet experiment 250" "${LINE_ARGS[@]}"
@@ -736,6 +738,22 @@ t "  and refuses an entry over several lines, the file untouched" bash -c "[ '$R
 LINK='https://example-bucket.s3.amazonaws.com/ratic.zip?X-Amz-Algorithm=AWS4&X-Amz-Signature=ab%2Fcd'
 kw "key ratic" "$LINK"$'\n'
 t "key ratic writes the link as ~/.rsna/ratic_link's one line" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.rsna/ratic_link')\" = '$LINK' ]"
+EK=els_key_0123456789TESTONLY ET=els_tok_0123456789TESTONLY
+kw "key elsevier" "$EK $ET"$'\n'
+t "key elsevier writes ~/.elsevier/token.env, the key's line then the token's" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.elsevier/token.env')\" = \"\$(printf 'ELSEVIER_API_KEY=$EK\nELSEVIER_INSTTOKEN=$ET')\" ]"
+t "  the file 0600 and its folder 0700" bash -c "[ \"\$(stat -c %a '$HOME/.elsevier/token.env')\" = 600 ] && [ \"\$(stat -c %a '$HOME/.elsevier')\" = 700 ]"
+t "  says ok and names the file" has '^HPCW-GRID-GATE key elsevier ok ~/.elsevier/token.env \(0600\)$'
+t "  and neither value is in the answer or the log" bash -c "! printf '%s' \"\$1\" | grep -q TESTONLY && ! grep -q TESTONLY '$CH/gate.log'" _ "$OUT"
+printf 'OTHER=keep\nexport ELSEVIER_INSTTOKEN=old\nELSEVIER_API_KEY=old\n' > "$HOME/.elsevier/token.env"
+kw "key elsevier" "els_key_new0123456"$'\n'
+t "a key sent alone replaces both lines, so no token it no longer sends is left" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.elsevier/token.env')\" = \"\$(printf 'OTHER=keep\nELSEVIER_API_KEY=els_key_new0123456')\" ]"
+for bad in "els_key_0123 short" "els_key_0123 els_tok_0123 third_0123" "els_key_0123  els_tok_0123" " els_key_0123" 'els_key_0123 tok"en_0123'; do
+  kw "key elsevier" "$bad"$'\n'
+  t "an elsevier input not of its shape ($(printf '%q' "$bad")) is refused and the file kept" bash -c "[ '$RC' = 126 ] && [ \"\$(cat '$HOME/.elsevier/token.env')\" = \"\$(printf 'OTHER=keep\nELSEVIER_API_KEY=els_key_new0123456')\" ]"
+done
+kw "key s2" "s2_key_0123456789TESTONLY"$'\n'
+t "key s2 adds S2_API_KEY to ~/.fluorocap/credentials.env, the Kaggle lines kept" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.fluorocap/credentials.env')\" = \"\$(printf 'OTHER=keep\nKAGGLE_USERNAME=me\nKAGGLE_API_TOKEN=${KG}2\nS2_API_KEY=s2_key_0123456789TESTONLY')\" ]"
+t "  and the key is in neither the answer nor the log" bash -c "! printf '%s' \"\$1\" | grep -q TESTONLY && ! grep -q TESTONLY '$CH/gate.log'" _ "$OUT"
 for bad in "" "short" "has space in it" 'semi;colon_token' 'quote"token123' $'line\nbreak_and_more'; do
   kw "key hf" "$bad"
   t "a key not of its shape ($(printf '%q' "$bad")) is refused and the file kept" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'refused key' && [ \"\$(cat '$HOME/.hf/token.env')\" = 'HF_TOKEN=tok_hf_0123456789' ]" _ "$OUT"
