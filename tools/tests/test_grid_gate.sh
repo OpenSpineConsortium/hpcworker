@@ -588,6 +588,8 @@ t "schwingnet samples goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[
 t "schwingnet nodequota goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ nodequota SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet literature synthetic_spine" "${LINE_ARGS[@]}"
 t "schwingnet literature passes its one list to gate.sh" bash -c "grep -Eqx 'gate.sh v[0-9]+ literature synthetic_spine SCHWINGNET=$SN' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "schwingnet realism edit" "${LINE_ARGS[@]}"
+t "schwingnet realism passes its one stage to gate.sh, as the template's key route sends it" bash -c "grep -Eqx 'gate.sh v[0-9]+ realism edit SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet folders" "${LINE_ARGS[@]}"
 t "schwingnet folders goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ folders SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet experiment 250" "${LINE_ARGS[@]}"
@@ -751,8 +753,14 @@ for bad in "els_key_0123 short" "els_key_0123 els_tok_0123 third_0123" "els_key_
   kw "key elsevier" "$bad"$'\n'
   t "an elsevier input not of its shape ($(printf '%q' "$bad")) is refused and the file kept" bash -c "[ '$RC' = 126 ] && [ \"\$(cat '$HOME/.elsevier/token.env')\" = \"\$(printf 'OTHER=keep\nELSEVIER_API_KEY=els_key_new0123456')\" ]"
 done
+printf 'OTHER=keep\nELSEVIER_INSTTOKEN = spaced_old_token\n' > "$HOME/.elsevier/token.env"
+kw "key elsevier" "els_key_new0123456"$'\n'
+t "a token line with a space before = is replaced too, as the readers would take it" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.elsevier/token.env')\" = \"\$(printf 'OTHER=keep\nELSEVIER_API_KEY=els_key_new0123456')\" ]"
+kw "key elsevier" "els_key_0123456789"$'\n'" els_tok_0123456789"$'\n'
+t "a key and token split over two lines, a secret saved with a line break, is refused and the file kept" bash -c "[ '$RC' = 126 ] && printf '%s' \"\$1\" | grep -q 'more than one line' && [ \"\$(cat '$HOME/.elsevier/token.env')\" = \"\$(printf 'OTHER=keep\nELSEVIER_API_KEY=els_key_new0123456')\" ]" _ "$OUT"
 kw "key s2" "s2_key_0123456789TESTONLY"$'\n'
-t "key s2 adds S2_API_KEY to ~/.fluorocap/credentials.env, the Kaggle lines kept" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.fluorocap/credentials.env')\" = \"\$(printf 'OTHER=keep\nKAGGLE_USERNAME=me\nKAGGLE_API_TOKEN=${KG}2\nS2_API_KEY=s2_key_0123456789TESTONLY')\" ]"
+t "key s2 writes S2_API_KEY to ~/.s2/token.env, a file of its own" bash -c "[ '$RC' = 0 ] && [ \"\$(cat '$HOME/.s2/token.env')\" = 'S2_API_KEY=s2_key_0123456789TESTONLY' ] && [ \"\$(stat -c %a '$HOME/.s2/token.env')\" = 600 ]"
+t "  and leaves the Kaggle file alone, whose reader takes a first line where no Kaggle line is" bash -c "! grep -q S2_API_KEY '$HOME/.fluorocap/credentials.env'"
 t "  and the key is in neither the answer nor the log" bash -c "! printf '%s' \"\$1\" | grep -q TESTONLY && ! grep -q TESTONLY '$CH/gate.log'" _ "$OUT"
 for bad in "" "short" "has space in it" 'semi;colon_token' 'quote"token123' $'line\nbreak_and_more'; do
   kw "key hf" "$bad"

@@ -53,7 +53,7 @@
 #                                  spine-datasets' promoter chain (below)
 #   freeze status | pilot | start | report | overlap
 #                                  spine-datasets' grid/freeze.sh, the freeze of the sets already landed (below)
-#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | nodequota | folders | fetch ID | census ID | explore ID | dropzip ID | unpack ID | experiment ISSUE | sweep PLAN | bank ID | bench NAME | anomaly STAGE | bordercall STAGE | literature LIST | cancel JOB
+#   schwingnet start | status | leaks | v1 | latency | stop | prior | chain_eval | samples | nodequota | folders | fetch ID | census ID | explore ID | dropzip ID | unpack ID | experiment ISSUE | sweep PLAN | bank ID | bench NAME | anomaly STAGE | bordercall STAGE | realism STAGE | literature LIST | cancel JOB
 #                                  SchwingNet's own grid/gate.sh, at its main (below)
 #   artifacts                      the artifacts/ folders of symphony-template and SchwingNet at their
 #                                  main, kept in ~/claude-artifacts for every account's sessions (below)
@@ -108,7 +108,7 @@
 #                                  origin's main as update does here (not while grid/logs/HOLD stands, a
 #                                  long run's mark), then its grid/gate.sh WORD [ID]:
 #                                  start, status, leaks, v1, latency, stop, prior, chain_eval, samples, nodequota or folders, or fetch,
-#                                  census, explore, dropzip, unpack, experiment, sweep, bank, bench, anomaly, bordercall, literature or cancel with one id of lower-case letters, digits and _ (cancel's a job
+#                                  census, explore, dropzip, unpack, experiment, sweep, bank, bench, anomaly, bordercall, realism, literature or cancel with one id of lower-case letters, digits and _ (cancel's a job
 #                                  of the gate's own, digits alone); gate.sh checks both again against its
 #                                  own list, runs only sbatch, squeue, sacct, scancel and git here, and
 #                                  answers 64 for a word it refuses and 75 while another of its words runs;
@@ -149,7 +149,11 @@
 #                                                   it, ELSEVIER_INSTTOKEN=<token>, the input being
 #                                                   "<key>" or "<key> <token>"; both lines replaced,
 #                                                   so a token no longer sent leaves the file
-#   key s2           ~/.fluorocap/credentials.env   S2_API_KEY=<key>, Semantic Scholar's
+#   key s2           ~/.s2/token.env                S2_API_KEY=<key>, Semantic Scholar's, in a file of
+#                                                   its own, since a Kaggle reader that finds no
+#                                                   KAGGLE_API_TOKEN line takes a file's first line
+# The input is one line: a second line, as a secret saved with a line break inside it gives, is refused,
+# since the first line alone would be written as if it were the whole key.
 # Only that line is replaced, every other line of the file kept; the folder is made 0700 and the file
 # written 0600 through a new file renamed into place, and a folder or file that is a link or another
 # account's is refused. A ~/.netrc whose physionet.org entry spans several lines is refused, to be
@@ -275,7 +279,7 @@ WORD=$SSH_ORIGINAL_COMMAND
 ACCT_RE='^accounts(( (use|forget|login|code|link) ([1-9]|[12][0-9]|3[0-2]))| auto (on|off)| usage| start ([1-9]|[12][0-9]|3[0-2])( [A-Za-z0-9_-]{1,24})?| stop [A-Za-z0-9_-]{1,32}| log (login ([1-9]|[12][0-9]|3[0-2])|usage|worker [A-Za-z0-9_-]{1,32}))?$'
 KIND=runner
 KEY_RE='^key (kaggle|hf|zenodo|redivis|wandb|physionet|ratic|elsevier|s2)$'
-JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|survey|(apply|retire) [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|folders|(fetch|census|explore|dropzip|unpack|experiment|sweep|bank|bench|anomaly|bordercall|literature|cancel) [a-z0-9_]{1,40}))$'
+JOBS_RE='^(update|artifacts|promoter (status|start|stop|restart)|freeze (status|pilot|start|report|overlap)|storage (status|report|survey|(apply|retire) [0-9]{8}T[0-9]{6}Z)|schwingnet (start|status|leaks|v1|latency|stop|prior|chain_eval|samples|nodequota|folders|(fetch|census|explore|dropzip|unpack|experiment|sweep|bank|bench|anomaly|bordercall|realism|literature|cancel) [a-z0-9_]{1,40}))$'
 case "$WORD" in start|status|stop) ;; *)
   if [[ "$WORD" =~ $JOBS_RE ]]; then KIND=jobs; elif [[ "$WORD" =~ $KEY_RE ]]; then KIND=key; else
   if [ ${#WORD} -le 48 ] && [[ "$WORD" =~ $ACCT_RE ]]; then KIND=accounts
@@ -641,7 +645,7 @@ key_place() { # NAME: KF, the file, and KV, its line's name (netrc, whole and el
     physionet) KF="$HOME/.netrc"; KV=netrc;;
     ratic) KF="$HOME/.rsna/ratic_link"; KV=whole;;
     elsevier) KF="$HOME/.elsevier/token.env"; KV=elsevier;;
-    s2) KF="$HOME/.fluorocap/credentials.env"; KV=S2_API_KEY;;
+    s2) KF="$HOME/.s2/token.env"; KV=S2_API_KEY;;
   esac
 }
 key_shape_ok() { # VALUE: the shape each kind of key has, so nothing else can ride into the file
@@ -656,10 +660,10 @@ key_lines() { # VALUE: the file's new text, every line but the key's own kept
     whole) printf '%s\n' "$1";;
     netrc) [ ! -f "$KF" ] || grep -Ev "$machine" "$KF"
            printf 'machine physionet.org login %s password %s\n' "${1%% *}" "${1#* }";;
-    elsevier) [ ! -f "$KF" ] || grep -Ev '^[[:space:]]*(export[[:space:]]+)?ELSEVIER_(API_KEY|INSTTOKEN)=' "$KF"
+    elsevier) [ ! -f "$KF" ] || grep -Ev '^[[:space:]]*(export[[:space:]]+)?ELSEVIER_(API_KEY|INSTTOKEN)[[:space:]]*=' "$KF"
            printf 'ELSEVIER_API_KEY=%s\n' "${1%% *}"
            [ "${1#* }" = "$1" ] || printf 'ELSEVIER_INSTTOKEN=%s\n' "${1#* }";;
-    *) [ ! -f "$KF" ] || grep -Ev "^[[:space:]]*(export[[:space:]]+)?$KV=" "$KF"
+    *) [ ! -f "$KF" ] || grep -Ev "^[[:space:]]*(export[[:space:]]+)?$KV[[:space:]]*=" "$KF"
        printf '%s=%s\n' "$KV" "$1";;
   esac
   return 0
@@ -682,7 +686,9 @@ key_write() { # VALUE -> 0 written, 2 refused (the reason on stdout), 1 failed
 }
 if [ "$KIND" = key ]; then
   KN=${WORD#key }; key_place "$KN"
-  VALUE=""; IFS= read -r -t 20 VALUE || true
+  VALUE=""; MORE=""; IFS= read -r -t 20 VALUE || true
+  IFS= read -r -t 2 MORE || true
+  [ -z "$MORE" ] || { VALUE=""; MORE=""; note "$WORD" "refused (more than one line on stdin)"; echo "HPCW-GRID-GATE refused key: the $KN key came over more than one line; save its secret again with no line break"; exit 126; }
   key_shape_ok "$VALUE" || { VALUE=""; note "$WORD" "refused (no key of its shape on stdin)"; echo "HPCW-GRID-GATE refused key: send the $KN key on standard input, one line of the shape it has"; exit 126; }
   why=$(key_write "$VALUE"); rc=$?; VALUE=""
   case $rc in
