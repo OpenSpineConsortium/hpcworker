@@ -3,12 +3,13 @@
 # Sourced by bin/hpcworker after lib/adapters/common.sh. Bash 4.2 (EL7), coreutils, grep, sed and awk;
 # nothing here runs python3 or a container on the login node, and each verb is one scheduler call.
 #
-#   hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P] [--time T] [--cpus C]
+#   hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P[,P]...] [--time T] [--cpus C]
 #                        [--mem M] [--gpus G] [--gpu-type T] [--requeue|--no-requeue] [--after ID[:ok|any]]...
 #                        [--array SPEC] [--dir D] [--check] -- SCRIPT [ARG...]
 #                     SCRIPT queued with the partition, QoS, account and GPU request the deployment's
-#                     profile gives the class (--partition picks one of the class's own; the gpu class
-#                     may also name the batch partition, framework 29), its output
+#                     profile gives the class (--partition picks one or more of the class's own, the job
+#                     starting on whichever of them frees first; the gpu class may instead name the batch
+#                     partition alone, framework 29), its output
 #                     (stdout and stderr together) under the project's log folder, and one line in the
 #                     project's ledger; prints "HPCW-JOB submitted ..." or "HPCW-JOB refused ...".
 #                     --time, --cpus and --mem are passed when given; left out, the script's own
@@ -65,7 +66,7 @@ HPCW_JOB_MEM_RE='^[1-9][0-9]{0,5}[KMGT]?$'
 HPCW_JOB_ARRAY_RE='^[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?(,[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?){0,31}(%[1-9][0-9]{0,4})?$'
 
 job_usage() {
-  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P --time T --cpus C --mem M --gpus G --gpu-type T --requeue|--no-requeue --after ID[:ok|any] --array SPEC --dir D --check] -- SCRIPT [ARG...]
+  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P[,P]... --time T --cpus C --mem M --gpus G --gpu-type T --requeue|--no-requeue --after ID[:ok|any] --array SPEC --dir D --check] -- SCRIPT [ARG...]
        hpcworker job status --project P [--last K] [--json]
        hpcworker job log --project P ID [--task N] [--lines N]
        hpcworker job cancel --project P ID...|--all
@@ -100,18 +101,20 @@ job_class_options() { # CLASS GPUS [PARTITION] [REQUEUE yes|no|""] [GPU_TYPE] ->
     *) echo "the class is cpu, batch or gpu" >&2; return 1;;
   esac
   [ -z "$type" ] || [ "$class" = gpu ] || { echo "--gpu-type is for the gpu class" >&2; return 1; }
-  # --partition narrows the class to one of its own partitions, never to another class's, but for the
-  # gpu class's one way out: the batch partition, with the batch QoS (the header says why)
+  # --partition narrows the class to one or more of its own partitions, never to another class's; given
+  # several, Slurm starts the job on whichever of them frees first (29), as it does the class's whole list.
+  # The gpu class has one way out: the batch partition, named alone, with the batch QoS (the header says
+  # why); alone, since one job carries one QoS and the batch partition takes no other.
   if [ -n "$want" ]; then
-    case ",$part," in
-      *",$want,"*) part="$want";;
-      *) if [ "$class" = gpu ] && [ -n "${P_partition_cpu_batch:-}" ] && [ "$want" = "$P_partition_cpu_batch" ]; then
-           part="$want"; qos="$P_qos_batch"; on_batch=1
-         else
-           local also=""; [ "$class" = gpu ] && [ -n "${P_partition_cpu_batch:-}" ] && also=" or the batch partition $P_partition_cpu_batch"
-           echo "--partition $want is not one of the $class class's ($part)$also" >&2; return 1
-         fi;;
-    esac
+    if [ "$class" = gpu ] && [ -n "${P_partition_cpu_batch:-}" ] && [ "$want" = "$P_partition_cpu_batch" ]; then
+      part="$want"; qos="$P_qos_batch"; on_batch=1
+    else
+      local also=""; [ "$class" = gpu ] && [ -n "${P_partition_cpu_batch:-}" ] && also=", or the batch partition $P_partition_cpu_batch alone"
+      for g in ${want//,/ }; do
+        case ",$part," in *",$g,"*) ;; *) echo "--partition $g is not one of the $class class's ($part)$also" >&2; return 1;; esac
+      done
+      part="$want"
+    fi
   fi
   printf '%s\n' "--partition=$part"
   [ -n "$qos" ] && printf '%s\n' "--qos=$qos"
@@ -192,7 +195,7 @@ job_submit() {
   [ -z "$time" ] || [[ "$time" =~ $HPCW_JOB_TIME_RE ]] || die "--time is H:MM:SS or D-H:MM:SS"
   [ -z "$cpus" ] || [[ "$cpus" =~ ^[1-9][0-9]{0,2}$ ]] || die "--cpus is a whole number from 1 to 999"
   [ -z "$mem" ] || [[ "$mem" =~ $HPCW_JOB_MEM_RE ]] || die "--mem is a number with K, M, G or T after it"
-  [ -z "$want" ] || [[ "$want" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || die "--partition is one partition's name"
+  [ -z "$want" ] || [[ "$want" =~ ^[A-Za-z0-9_.-]{1,64}(,[A-Za-z0-9_.-]{1,64}){0,7}$ ]] || die "--partition is a partition's name, or up to eight joined by commas"
   [[ "$gpus" =~ ^[1-8]$ ]] || die "--gpus is 1 to 8"
   [ -z "$type" ] || [[ "$type" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || die "--gpu-type is one GPU type's name, as sinfo's GRES column gives it"
   [ -z "$array" ] || [[ "$array" =~ $HPCW_JOB_ARRAY_RE ]] || die "--array is task numbers and ranges (0-63, 1,3,5-9, 0-99:2) with an optional %N limit"
