@@ -202,6 +202,12 @@ class JobTest(unittest.TestCase):
         self.assertEqual(self.submit(cls="batch", name="long")[0], 0)
         self.assertIn("--partition=reqp --qos=requeue --requeue", self.sbatch_calls()[-1])
 
+    def test_several_partitions_of_the_class_start_on_whichever_frees_first(self):
+        rc, out, err = self.submit(cls="gpu", name="train", extra="--partition galhp,gmsap --no-requeue")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("--partition=galhp,gmsap --qos=gpu --gres=gpu:1 --no-requeue", self.sbatch_calls()[-1])
+        self.assertIn(" galhp,gmsap/gpu ", out)
+
     def test_one_partition_of_the_class_and_requeue_by_the_job(self):
         rc, out, err = self.submit(cls="gpu", name="train", extra="--partition gvohp --requeue")
         self.assertEqual(rc, 0, (out, err))
@@ -209,7 +215,9 @@ class JobTest(unittest.TestCase):
         self.assertEqual(self.submit(cls="batch", name="long", extra="--no-requeue")[0], 0)
         self.assertIn("--qos=requeue --no-requeue", self.sbatch_calls()[-1])
         n = len(self.sbatch_calls())
-        for extra, cls in (("--partition secp", "gpu"), ("--partition gmsap", "cpu"), ("--partition 'a b'", "cpu")):
+        for extra, cls in (("--partition secp", "gpu"), ("--partition gmsap", "cpu"), ("--partition 'a b'", "cpu"),
+                           ("--partition galhp,secp", "gpu"), ("--partition galhp,", "gpu"), ("--partition ,galhp", "gpu"),
+                           ("--partition 'galhp,*'", "gpu")):
             rc, out, err = self.submit(cls=cls, name="x", extra=extra)
             self.assertNotEqual(rc, 0, extra)
         self.assertEqual(len(self.sbatch_calls()), n)
