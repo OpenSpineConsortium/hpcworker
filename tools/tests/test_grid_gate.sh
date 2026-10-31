@@ -592,6 +592,8 @@ t "schwingnet literature passes its one list to gate.sh" bash -c "grep -Eqx 'gat
 t "schwingnet realism passes its one stage to gate.sh, as the template's key route sends it" bash -c "grep -Eqx 'gate.sh v[0-9]+ realism edit SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet morphometry enhance" "${LINE_ARGS[@]}"
 t "schwingnet morphometry passes its one set to gate.sh" bash -c "grep -Eqx 'gate.sh v[0-9]+ morphometry enhance SCHWINGNET=$SN' '$JOBS_CALLS'"
+: > "$JOBS_CALLS"; job "schwingnet prune round2" "${LINE_ARGS[@]}"
+t "schwingnet prune passes its one list to gate.sh" bash -c "grep -Eqx 'gate.sh v[0-9]+ prune round2 SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet folders" "${LINE_ARGS[@]}"
 t "schwingnet folders goes to gate.sh with no id" bash -c "grep -Eqx 'gate.sh v[0-9]+ folders SCHWINGNET=$SN' '$JOBS_CALLS'"
 : > "$JOBS_CALLS"; job "schwingnet experiment 250" "${LINE_ARGS[@]}"
