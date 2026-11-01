@@ -636,9 +636,12 @@ class GateLines(Base):
             fh.write('{"state":"stopped","claude_login":{"loggedIn": false}}\n')
         self.assertTrue(self.gate("version").stdout.endswith(" claude=no\n"))
         self.site_profile(browser_key_days=30)
-        self.seed((self.our_line(self.ed1, "2026-10-01") + "\n").encode())
+        # a key made yesterday, so the test never runs past its own key's expiry, as a fixed date did on 2026-11-01
+        made = time.time() - 86400
+        self.seed((self.our_line(self.ed1, time.strftime("%Y-%m-%d", time.gmtime(made))) + "\n").encode())
         r = self.gate("version")
-        self.assertEqual(r.stdout.split()[:4], ["HPCW-GATE", "ok", G.CURRENT_VERSION, "2026-10-31"], r.stdout + r.stderr)
+        until = time.strftime("%Y-%m-%d", time.gmtime(made + 30 * 86400))
+        self.assertEqual(r.stdout.split()[:4], ["HPCW-GATE", "ok", G.CURRENT_VERSION, until], r.stdout + r.stderr)
         self.no_trip()
 
     def test_expiry(self):
