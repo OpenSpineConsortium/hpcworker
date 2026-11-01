@@ -214,6 +214,23 @@ class JobTest(unittest.TestCase):
             self.assertNotEqual(rc, 0, extra)
         self.assertEqual(len(self.sbatch_calls()), n)
 
+    def test_a_gpu_job_on_the_batch_partition_takes_its_qos_and_a_card_by_type(self):
+        rc, out, err = self.submit(cls="gpu", name="flux", extra="--partition reqp --gpu-type nvidia_rtx_pro_4500_blackwell")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertRegex(out, r"^HPCW-JOB submitted \d+ flux reqp/requeue log ")
+        self.assertIn("--partition=reqp --qos=requeue --gres=gpu:nvidia_rtx_pro_4500_blackwell:1 --requeue --open-mode=append",
+                      self.sbatch_calls()[-1])
+        self.assertEqual(self.submit(cls="gpu", name="det", extra="--partition reqp --gpus 2 --no-requeue")[0], 0)
+        self.assertIn("--partition=reqp --qos=requeue --gres=gpu:2 --no-requeue", self.sbatch_calls()[-1])
+        self.assertEqual(self.submit(cls="gpu", name="train", extra="--gpu-type nvidia_l40s")[0], 0)
+        self.assertIn("--partition=gmsap,gvohp,galhp --qos=gpu --gres=gpu:nvidia_l40s:1 --no-requeue", self.sbatch_calls()[-1])
+        n = len(self.sbatch_calls())
+        for extra, cls in (("--gpu-type nvidia_a30", "batch"), ("--gpu-type 'a b'", "gpu"), ("--partition secp", "gpu")):
+            rc, out, err = self.submit(cls=cls, name="x", extra=extra)
+            self.assertNotEqual(rc, 0, extra)
+        self.assertIn("or the batch partition reqp", err)
+        self.assertEqual(len(self.sbatch_calls()), n)
+
     def test_the_job_gets_the_callers_environment_and_none_of_hpcworkers(self):
         # This grid is the test's own, so its fake sbatch is swapped for one that writes its environment down.
         dump = os.path.join(self.td, "env.txt")

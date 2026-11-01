@@ -4,10 +4,11 @@
 # nothing here runs python3 or a container on the login node, and each verb is one scheduler call.
 #
 #   hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P] [--time T] [--cpus C]
-#                        [--mem M] [--gpus G] [--requeue|--no-requeue] [--after ID[:ok|any]]... [--array SPEC]
-#                        [--dir D] [--check] -- SCRIPT [ARG...]
+#                        [--mem M] [--gpus G] [--gpu-type T] [--requeue|--no-requeue] [--after ID[:ok|any]]...
+#                        [--array SPEC] [--dir D] [--check] -- SCRIPT [ARG...]
 #                     SCRIPT queued with the partition, QoS, account and GPU request the deployment's
-#                     profile gives the class (--partition picks one of the class's own), its output
+#                     profile gives the class (--partition picks one of the class's own; the gpu class
+#                     may also name the batch partition, framework 29), its output
 #                     (stdout and stderr together) under the project's log folder, and one line in the
 #                     project's ledger; prints "HPCW-JOB submitted ..." or "HPCW-JOB refused ...".
 #                     --time, --cpus and --mem are passed when given; left out, the script's own
@@ -43,6 +44,15 @@
 # project's script carries no partition, QoS or output line of its own: sbatch takes its command
 # line over a script's #SBATCH lines, so whatever an older script still carries, the profile wins.
 #
+# The batch partition for GPUs (29): a site's GPU partitions can be held for weeks by long jobs while
+# its batch partition, where that spans every node, has cards idle and takes only its own QoS (the
+# GPU QoS is an invalid QoS there); SchwingNet's films ran on such cards by plain sbatch, outside the
+# ledger, on 2026-10-31. So the gpu class may name the batch partition with --partition: the job takes
+# the batch QoS, is requeued when preempted as any job there is, and may ask for a card by its type
+# with --gpu-type (Slurm's GRES type, as sinfo's GRES column gives it), since such a partition can
+# also hold MIG slices and older cards a bare gpu:1 may land on. A site whose batch partition holds
+# no GPU refuses the job in the scheduler's own words, which --check shows before anything is queued.
+#
 # The ledger is <shared_state_dir>/jobs/<project>/jobs.tsv, one line per job: id, name, class,
 # partition, qos, submitted (UTC), log, folder, script, array spec, the ids it waits on. Logs are <shared_state_dir>/jobs/<project>/logs/
 # <name>_<id>.out. Only the account itself writes there (umask 077 folders).
@@ -55,7 +65,7 @@ HPCW_JOB_MEM_RE='^[1-9][0-9]{0,5}[KMGT]?$'
 HPCW_JOB_ARRAY_RE='^[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?(,[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?){0,31}(%[1-9][0-9]{0,4})?$'
 
 job_usage() {
-  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P --time T --cpus C --mem M --gpus G --requeue|--no-requeue --after ID[:ok|any] --array SPEC --dir D --check] -- SCRIPT [ARG...]
+  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P --time T --cpus C --mem M --gpus G --gpu-type T --requeue|--no-requeue --after ID[:ok|any] --array SPEC --dir D --check] -- SCRIPT [ARG...]
        hpcworker job status --project P [--last K] [--json]
        hpcworker job log --project P ID [--task N] [--lines N]
        hpcworker job cancel --project P ID...|--all
@@ -78,30 +88,40 @@ job_site_placement() { # the deployment's own partitions, QoS and account over t
   return 0
 }
 
-job_class_options() { # CLASS GPUS [PARTITION] [REQUEUE yes|no|""] -> one sbatch option per line; exit 1 with why on stderr
-  local class="$1" gpus="$2" want="${3:-}" requeue="${4:-}" part="" qos="" g all=""
+job_class_options() { # CLASS GPUS [PARTITION] [REQUEUE yes|no|""] [GPU_TYPE] -> one sbatch option per line; exit 1 with why on stderr
+  local class="$1" gpus="$2" want="${3:-}" requeue="${4:-}" type="${5:-}" part="" qos="" g on_batch=0
   case "$class" in
     cpu) part="$P_partition_cpu"; qos="$P_qos_cpu";;
-    batch) part="${P_partition_cpu_batch:-$P_partition_cpu}"
+    batch) part="${P_partition_cpu_batch:-$P_partition_cpu}"; on_batch=1
            if [ -n "$P_partition_cpu_batch" ]; then qos="$P_qos_batch"; else qos="$P_qos_cpu"; fi;;
     gpu) for g in $P_partitions_gpu; do part="${part:+$part,}$g"; done
          [ -n "$part" ] || { echo "this site's profile names no GPU partition (partitions_gpu)" >&2; return 1; }
          qos="${P_qos_gpu:-}";;
     *) echo "the class is cpu, batch or gpu" >&2; return 1;;
   esac
-  # --partition narrows the class to one of its own partitions, never to another class's
+  [ -z "$type" ] || [ "$class" = gpu ] || { echo "--gpu-type is for the gpu class" >&2; return 1; }
+  # --partition narrows the class to one of its own partitions, never to another class's, but for the
+  # gpu class's one way out: the batch partition, with the batch QoS (the header says why)
   if [ -n "$want" ]; then
-    case ",$part," in *",$want,"*) part="$want";; *) echo "--partition $want is not one of the $class class's ($part)" >&2; return 1;; esac
+    case ",$part," in
+      *",$want,"*) part="$want";;
+      *) if [ "$class" = gpu ] && [ -n "${P_partition_cpu_batch:-}" ] && [ "$want" = "$P_partition_cpu_batch" ]; then
+           part="$want"; qos="$P_qos_batch"; on_batch=1
+         else
+           local also=""; [ "$class" = gpu ] && [ -n "${P_partition_cpu_batch:-}" ] && also=" or the batch partition $P_partition_cpu_batch"
+           echo "--partition $want is not one of the $class class's ($part)$also" >&2; return 1
+         fi;;
+    esac
   fi
   printf '%s\n' "--partition=$part"
   [ -n "$qos" ] && printf '%s\n' "--qos=$qos"
   [ -n "${P_account:-}" ] && printf '%s\n' "--account=$P_account"
-  [ "$class" = gpu ] && printf '%s\n' "--gres=gpu:$gpus"
+  [ "$class" = gpu ] && printf '%s\n' "--gres=gpu:${type:+$type:}$gpus"
   # Beethoven for VS Code's worker rule, read as the profile's job header reads it (profile.py's REQUEUE):
   # the batch QoS named requeue may stop a job and start it again, so such a job says it may be requeued
   # and its log is appended to rather than started over; every other job says it may not be
   # --requeue or --no-requeue says so for this job alone, whatever the class's QoS
-  if [ "$requeue" = yes ] || { [ -z "$requeue" ] && [ "$class" = batch ] && [ -n "$qos" ] && [ "$qos" = "$P_qos_batch" ] && [ "$P_qos_batch" = requeue ]; }; then
+  if [ "$requeue" = yes ] || { [ -z "$requeue" ] && [ $on_batch = 1 ] && [ -n "$qos" ] && [ "$qos" = "$P_qos_batch" ] && [ "$P_qos_batch" = requeue ]; }; then
     printf '%s\n' "--requeue" "--open-mode=append"
   else
     printf '%s\n' "--no-requeue"
@@ -146,7 +166,7 @@ job_caller_env() { # in the subshell that runs sbatch: every exported name off, 
 job_clean() { tr -d '\000-\010\013\014\016-\037\177' | tr '\t' ' '; }
 
 job_submit() {
-  local project="" name="" class="" time="" cpus="" mem="" gpus=1 dir="$PWD" check=0 afters=() array="" want="" requeue=""
+  local project="" name="" class="" time="" cpus="" mem="" gpus=1 dir="$PWD" check=0 afters=() array="" want="" requeue="" type=""
   while [ $# -gt 0 ]; do case "$1" in
     --project) project="${2:-}"; shift 2 || job_usage;;
     --name) name="${2:-}"; shift 2 || job_usage;;
@@ -155,6 +175,7 @@ job_submit() {
     --cpus) cpus="${2:-}"; shift 2 || job_usage;;
     --mem) mem="${2:-}"; shift 2 || job_usage;;
     --gpus) gpus="${2:-}"; shift 2 || job_usage;;
+    --gpu-type) type="${2:-}"; shift 2 || job_usage;;
     --partition) want="${2:-}"; shift 2 || job_usage;;
     --requeue) requeue=yes; shift;;
     --no-requeue) requeue=no; shift;;
@@ -173,6 +194,7 @@ job_submit() {
   [ -z "$mem" ] || [[ "$mem" =~ $HPCW_JOB_MEM_RE ]] || die "--mem is a number with K, M, G or T after it"
   [ -z "$want" ] || [[ "$want" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || die "--partition is one partition's name"
   [[ "$gpus" =~ ^[1-8]$ ]] || die "--gpus is 1 to 8"
+  [ -z "$type" ] || [[ "$type" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || die "--gpu-type is one GPU type's name, as sinfo's GRES column gives it"
   [ -z "$array" ] || [[ "$array" =~ $HPCW_JOB_ARRAY_RE ]] || die "--array is task numbers and ranges (0-63, 1,3,5-9, 0-99:2) with an optional %N limit"
   case "$dir" in /*) [ -d "$dir" ] || die "--dir $dir is not a folder";; *) die "--dir must be an absolute path";; esac
   [ -n "$script" ] || job_usage
@@ -186,7 +208,7 @@ job_submit() {
   [ -n "$cpus" ] || job_script_sets "$script" '--cpus-per-task|-c' || cpus=1
   [ -n "$mem" ] || job_script_sets "$script" '--mem|--mem-per-cpu|--mem-per-gpu' || mem=4G
   local opts dep
-  opts=$(job_class_options "$class" "$gpus" "$want" "$requeue" 2>&1) || die "$opts"
+  opts=$(job_class_options "$class" "$gpus" "$want" "$requeue" "$type" 2>&1) || die "$opts"
   dep=$(job_after_option ${afters[@]+"${afters[@]}"}) || die "--after is a job id, then :ok or :any (any when left out)"
   local jd; jd=$(job_dir "$project")
   ( umask 077; mkdir -p "$jd/logs" ) || die "could not make $jd/logs"
