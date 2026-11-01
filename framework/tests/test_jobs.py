@@ -202,6 +202,12 @@ class JobTest(unittest.TestCase):
         self.assertEqual(self.submit(cls="batch", name="long")[0], 0)
         self.assertIn("--partition=reqp --qos=requeue --requeue", self.sbatch_calls()[-1])
 
+    def test_several_partitions_of_the_class_start_on_whichever_frees_first(self):
+        rc, out, err = self.submit(cls="gpu", name="train", extra="--partition galhp,gmsap --no-requeue")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("--partition=galhp,gmsap --qos=gpu --gres=gpu:1 --no-requeue", self.sbatch_calls()[-1])
+        self.assertIn(" galhp,gmsap/gpu ", out)
+
     def test_one_partition_of_the_class_and_requeue_by_the_job(self):
         rc, out, err = self.submit(cls="gpu", name="train", extra="--partition gvohp --requeue")
         self.assertEqual(rc, 0, (out, err))
@@ -209,9 +215,30 @@ class JobTest(unittest.TestCase):
         self.assertEqual(self.submit(cls="batch", name="long", extra="--no-requeue")[0], 0)
         self.assertIn("--qos=requeue --no-requeue", self.sbatch_calls()[-1])
         n = len(self.sbatch_calls())
-        for extra, cls in (("--partition secp", "gpu"), ("--partition gmsap", "cpu"), ("--partition 'a b'", "cpu")):
+        for extra, cls in (("--partition secp", "gpu"), ("--partition gmsap", "cpu"), ("--partition 'a b'", "cpu"),
+                           ("--partition galhp,secp", "gpu"), ("--partition galhp,", "gpu"), ("--partition ,galhp", "gpu"),
+                           ("--partition 'galhp,*'", "gpu")):
             rc, out, err = self.submit(cls=cls, name="x", extra=extra)
             self.assertNotEqual(rc, 0, extra)
+        self.assertEqual(len(self.sbatch_calls()), n)
+
+    def test_a_gpu_job_on_the_batch_partition_takes_its_qos_and_a_card_by_type(self):
+        rc, out, err = self.submit(cls="gpu", name="flux", extra="--partition reqp --gpu-type nvidia_rtx_pro_4500_blackwell")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertRegex(out, r"^HPCW-JOB submitted \d+ flux reqp/requeue log ")
+        self.assertIn("--partition=reqp --qos=requeue --gres=gpu:nvidia_rtx_pro_4500_blackwell:1 --requeue --open-mode=append",
+                      self.sbatch_calls()[-1])
+        self.assertEqual(self.submit(cls="gpu", name="det", extra="--partition reqp --gpus 2 --no-requeue")[0], 0)
+        self.assertIn("--partition=reqp --qos=requeue --gres=gpu:2 --no-requeue", self.sbatch_calls()[-1])
+        self.assertEqual(self.submit(cls="gpu", name="train", extra="--gpu-type nvidia_l40s")[0], 0)
+        self.assertIn("--partition=gmsap,gvohp,galhp --qos=gpu --gres=gpu:nvidia_l40s:1 --no-requeue", self.sbatch_calls()[-1])
+        n = len(self.sbatch_calls())
+        # the batch partition goes alone: one job carries one QoS, and the batch partition takes only its own
+        for extra, cls in (("--gpu-type nvidia_a30", "batch"), ("--gpu-type 'a b'", "gpu"), ("--partition reqp,galhp", "gpu"),
+                           ("--partition secp", "gpu")):
+            rc, out, err = self.submit(cls=cls, name="x", extra=extra)
+            self.assertNotEqual(rc, 0, extra)
+        self.assertIn("or the batch partition reqp", err)
         self.assertEqual(len(self.sbatch_calls()), n)
 
     def test_the_job_gets_the_callers_environment_and_none_of_hpcworkers(self):
