@@ -203,7 +203,7 @@ t "the wall time and the margin are read from the start time and --hours" has 'w
 t "the container was given the node's GPU, which --gres asked for" has "image 2.338.0, with the node's GPU"
 t "three registrations were minted, one at a time" [ "$(n_jit)" = 3 ]
 t "  named after the site, the job and their turn" [ "$(jit_requests | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | tr '\n' ' ')" = "grid-wayne-$C1-1 grid-wayne-$C1-2 grid-wayne-$C1-3 " ]
-t "  with the chain's labels" [ "$(jit_requests | grep -c '"labels":\["grid","wayne","gpu"\]')" = 3 ]
+t "  with GitHub's own three labels, which a just-in-time registration is not given, then the chain's" [ "$(jit_requests | grep -c '"labels":\["self-hosted","linux","x64","grid","wayne","gpu"\]')" = 3 ]
 t "  and the work folder" [ "$(jit_requests | grep -c '"work_folder":"_work"')" = 3 ]
 t "the runner ran three times on files of mode 0600" [ "$(runs | grep -c "^run grid-wayne-$C1-[123] files ok ")" = 3 ]
 t "  seeing nothing of the job's or the shell's environment, its trace on stdout off" [ "$(runs | grep -c ' env=ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false$')" = 3 ]
