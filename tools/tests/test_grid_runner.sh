@@ -466,6 +466,65 @@ t "a chain still starts beside it" [ -n "$L4" ]; gr --stop --repo OpenSpineConso
 gr --autoscale --repos "$GH_REPO" --site wayne; t "--autoscale after a stop starts again" rc_is 0; t "  and takes STOP away" [ ! -e "$AU/STOP" ]
 gr --autoscale-stop --site wayne --now; t "--autoscale-stop --now cancels the running controller too" has 'cancelled job'
 
+echo "== the merge train"
+TR="$R/train"; sha() { printf '%040d' "$1"; }
+gr --train --site wayne; t "--train needs --repos" has '--train needs --repos'
+gr --train --repos "$GH_REPO" --site wayne
+t "--train queues the train's job" rc_is 0; TJ=$(newest '^hpcw_train$')
+t "  a small singleton" bash -c "[ '$(J "$TJ" dependency)' = singleton ] && [ '$(J "$TJ" cpus)' = 1 ] && [ '$(J "$TJ" mem)' = 1G ] && [ '$(J "$TJ" time)' = 8:00:00 ]"
+t "  handed its repositories" [ "$(J "$TJ" args | tr '[:space:]' ' ' | grep -c -- "--train-job --repos $GH_REPO ")" = 1 ]
+gr --train --repos "$GH_REPO" --site wayne; t "a second train is refused while one is queued" has "the train is already queued or running \(job $TJ PENDING\)"
+pr() { # NUMBER CREATED STATE DRAFT ARMED LABELS(JSON) ISSUE_LABELS(JSON)
+  printf '{"number":%s,"isDraft":%s,"createdAt":"%s","headRefOid":"%s","baseRefName":"main","mergeStateStatus":"%s","autoMergeRequest":%s,"labels":{"nodes":%s},"closingIssuesReferences":{"nodes":[{"labels":{"nodes":%s}}]}}' \
+    "$1" "$4" "$2" "$(sha "$1")" "$3" "$([ "$5" = 1 ] && echo '{"enabledAt":"2026-11-03T20:00:00Z"}' || echo null)" "$6" "$7"
+}
+nodes() { printf '{"data":{"repository":{"defaultBranchRef":{"name":"main"},"pullRequests":{"nodes":[%s]}}}}\n' "$(IFS=,; echo "$*")" > "$T/gh/graphql/$TPL"; }
+green() { printf '{"total_count":3,"check_runs":[{"name":"check","status":"completed","conclusion":"success"},{"name":"gate","status":"completed","conclusion":"success"},{"name":"owner-ok","status":"completed","conclusion":"skipped"}]}\n' > "$T/gh/checks/$(sha "$1")"; }
+mkdir -p "$T/gh/graphql" "$T/gh/rules" "$T/gh/checks"
+echo '[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"check"},{"context":"gate"},{"context":"owner-ok"}]}}]' > "$T/gh/rules/$TPL-main"
+nodes "$(pr 5 2026-11-03T10:00:00Z CLEAN true 1 '[]' '[]')" "$(pr 6 2026-11-03T10:01:00Z CLEAN false 0 '[]' '[]')" \
+  "$(pr 7 2026-11-03T10:02:00Z CLEAN false 1 '[]' '[]')" "$(pr 8 2026-11-03T11:00:00Z BLOCKED false 1 '[]' '[{"name":"blocker"}]')" \
+  "$(pr 9 2026-11-03T09:00:00Z DIRTY false 1 '[]' '[]')" "$(pr 10 2026-11-03T09:30:00Z BEHIND false 1 '[]' '[]')" \
+  "$(pr 11 2026-11-03T09:40:00Z UNSTABLE false 1 '[]' '[]')" "$(pr 12 2026-11-03T09:50:00Z CLEAN false 1 '[]' '[]')"
+green 5; green 6; green 7; green 8
+echo '{"total_count":2,"check_runs":[{"name":"check","status":"completed","conclusion":"failure"},{"name":"gate","status":"completed","conclusion":"success"}]}' > "$T/gh/checks/$(sha 11)"
+echo '{"total_count":1,"check_runs":[{"name":"check","status":"completed","conclusion":"success"},{"name":"owner-ok","status":"completed","conclusion":"skipped"}]}' > "$T/gh/checks/$(sha 12)"
+rm -f "$T/gh/merged" "$T/gh/updated" "$T/gh/comments"
+run_job "$TJ" HPCW_AUTOSCALE_LOOKS=1
+t "the train's job ends well" rc_is 0
+TJ2=$(newest '^hpcw_train$')
+t "  after queuing its successor with the same arguments" bash -c "[ '$TJ2' != '$TJ' ] && [ '$(J "$TJ2" dependency)' = 'afterany:$TJ,singleton' ] && [ \"\$(cat '$T/slurm/jobs/$TJ2/args')\" = \"\$(cat '$T/slurm/jobs/$TJ/args')\" ]"
+t "  it merges the blocker first, though it is the newest, at the head it judged" [ "$(cat "$T/gh/merged" 2>/dev/null)" = "8 $(sha 8)" ]
+t "  says so" has "merged #8 at 000000000000, a blocker"
+t "  and ends the look there, the default branch having moved" bash -c "[ ! -e '$T/gh/updated' ] && [ ! -e '$T/gh/comments' ]"
+nodes "$(pr 5 2026-11-03T10:00:00Z CLEAN true 1 '[]' '[]')" "$(pr 6 2026-11-03T10:01:00Z CLEAN false 0 '[]' '[]')" \
+  "$(pr 7 2026-11-03T10:02:00Z CLEAN false 1 '[]' '[]')" \
+  "$(pr 9 2026-11-03T09:00:00Z DIRTY false 1 '[]' '[]')" "$(pr 10 2026-11-03T09:30:00Z BEHIND false 1 '[]' '[]')" \
+  "$(pr 11 2026-11-03T09:40:00Z UNSTABLE false 1 '[]' '[]')" "$(pr 12 2026-11-03T09:50:00Z CLEAN false 1 '[]' '[]')"
+run_job "$TJ2" HPCW_AUTOSCALE_LOOKS=1
+t "the next look tells the oldest, in conflict, once" bash -c "[ \"\$(cut -f1 '$T/gh/comments')\" = 9 ] && grep -q 'conflicts with main at 000000000000' '$T/gh/comments'"
+t "  brings the default branch into the one GitHub calls behind" [ "$(cat "$T/gh/updated" 2>/dev/null)" = "10 $(sha 10)" ]
+t "  passes by a failed check and a required check missing, and merges the oldest green one, the draft and the unarmed left alone" [ "$(tail -1 "$T/gh/merged")" = "7 $(sha 7)" ]
+t "  one a look" [ "$(wc -l < "$T/gh/merged")" = 2 ]
+nodes "$(pr 9 2026-11-03T09:00:00Z DIRTY false 1 '[]' '[]')" "$(pr 10 2026-11-03T09:30:00Z BEHIND false 1 '[]' '[]')" \
+  "$(pr 11 2026-11-03T09:40:00Z UNSTABLE false 1 '[]' '[]')" "$(pr 12 2026-11-03T09:50:00Z CLEAN false 1 '[]' '[]')"
+TJ3=$(newest '^hpcw_train$'); run_job "$TJ3" HPCW_AUTOSCALE_LOOKS=1
+t "a look with nothing green merges nothing" [ "$(wc -l < "$T/gh/merged")" = 2 ]
+t "  and tells or updates no second time for the same head" bash -c "[ \$(wc -l < '$T/gh/comments') = 1 ] && [ \$(wc -l < '$T/gh/updated') = 1 ]"
+echo '{"total_count":1,"check_runs":[{"name":"check","status":"completed","conclusion":"success"},{"name":"gate","status":"in_progress","conclusion":null},{"name":"owner-ok","status":"completed","conclusion":"skipped"}]}' > "$T/gh/checks/$(sha 12)"
+TJ4=$(newest '^hpcw_train$'); run_job "$TJ4" HPCW_AUTOSCALE_LOOKS=1
+t "  nor a check still going" [ "$(wc -l < "$T/gh/merged")" = 2 ]
+green 12; touch "$T/gh/refuse-merge"
+TJ5=$(newest '^hpcw_train$'); run_job "$TJ5" HPCW_AUTOSCALE_LOOKS=1
+t "a merge GitHub refuses is said, not counted" bash -c "printf '%s\n' \"\$1\" | grep -q '#12 is green but the merge was refused' && [ \$(wc -l < '$TR/merged') = 2 ]" _ "$OUT"
+rm -f "$T/gh/refuse-merge"
+gr --status
+t "--status shows the train and what it landed in the last hour" all "merge train: $GH_REPO" "train job $(newest '^hpcw_train$') PENDING" 'merged in the last hour: 2, in all: 2'
+TJ6=$(newest '^hpcw_train$')
+gr --train-stop --site wayne; t "--train-stop cancels the train's queued job" has "cancelled job $TJ6"; t "  and writes STOP" [ -e "$TR/STOP" ]
+run_job "$TJ6" HPCW_AUTOSCALE_LOOKS=1
+t "a train job that meets STOP ends, merging nothing" bash -c "printf '%s\n' \"\$1\" | grep -q 'STOP is set' && [ \$(wc -l < '$T/gh/merged') = 2 ]" _ "$OUT"
+
 echo "== the end"
 t "every job the test submitted had a wall time and ran from the runner folder" bash -c "[ ! -e '$T/slurm/refused' ]"
 t "no stand-in was asked for what it does not know" bash -c "[ ! -e '$T/apptainer/refused' ]"
