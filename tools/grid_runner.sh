@@ -1122,6 +1122,9 @@ TRAIN_ARGS=() TRAIN_FLAGS=() TRAIN_MERGED=0 TRAIN_SUMMARY=""
 train_args() {
   job_args
   TRAIN_ARGS=(--train-job --repos "$REPOS" "${SITE_ARGS[@]}" --every "$EVERY")
+  # the queue rides on each job's command line, since a job reads no site profile and its successor needs one
+  [ -n "${HPCW_RUNNER_PARTITION:-}" ] && TRAIN_ARGS+=(--partition "$HPCW_RUNNER_PARTITION")
+  [ -n "${HPCW_RUNNER_QOS:-}" ] && TRAIN_ARGS+=(--qos "$HPCW_RUNNER_QOS")
   TRAIN_FLAGS=(--time "$CONTROL_HOURS:00:00" ${QUEUE[@]+"${QUEUE[@]}"} --cpus-per-task 1 --mem 1G)
 }
 train_start() {

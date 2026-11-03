@@ -472,7 +472,7 @@ gr --train --site wayne; t "--train needs --repos" has '--train needs --repos'
 gr --train --repos "$GH_REPO" --site wayne
 t "--train queues the train's job" rc_is 0; TJ=$(newest '^hpcw_train$')
 t "  a small singleton" bash -c "[ '$(J "$TJ" dependency)' = singleton ] && [ '$(J "$TJ" cpus)' = 1 ] && [ '$(J "$TJ" mem)' = 1G ] && [ '$(J "$TJ" time)' = 8:00:00 ]"
-t "  handed its repositories" [ "$(J "$TJ" args | tr '[:space:]' ' ' | grep -c -- "--train-job --repos $GH_REPO ")" = 1 ]
+t "  handed its repositories and the queue its successor needs" [ "$(J "$TJ" args | tr '[:space:]' ' ' | grep -c -- "--train-job --repos $GH_REPO .*--every 60 --partition $DEF_PART --qos $DEF_QOS ")" = 1 ]
 gr --train --repos "$GH_REPO" --site wayne; t "a second train is refused while one is queued" has "the train is already queued or running \(job $TJ PENDING\)"
 pr() { # NUMBER CREATED STATE DRAFT ARMED LABELS(JSON) ISSUE_LABELS(JSON)
   printf '{"number":%s,"isDraft":%s,"createdAt":"%s","headRefOid":"%s","baseRefName":"main","mergeStateStatus":"%s","autoMergeRequest":%s,"labels":{"nodes":%s},"closingIssuesReferences":{"nodes":[{"labels":{"nodes":%s}}]}}' \
