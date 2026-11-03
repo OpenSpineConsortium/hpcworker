@@ -326,7 +326,14 @@ margin, or the wall time cuts it off and GitHub reports it lost. The third job i
 serve writes `STOP` with the reason, and so does a runner that asks for a newer version than the
 image holds, which each actions/runner release brings: `--install`, then `--start`. `--stop --repo
 OWNER/NAME --site wayne` ends the chain once the job in flight is done, `--now` at once, and `--status
---site wayne` shows the folder, the image and each chain. Everything is designed and tested against
+--site wayne` shows the folder, the image and each chain. A chain serves one GitHub job at a time,
+so a repository whose pushes start more jobs than one runner clears waits behind itself (OpenSpineConsortium/SchwingNet,
+measured 2026-11-03: a check waited 42 minutes behind a full proof, a board job 40); `--lane N`
+(2 to 9) starts a further chain for the same repository, with a Slurm name and a folder of its own
+(`+laneN` after the first's, a character no GitHub repository's name holds) and the same labels, so
+GitHub hands each job to whichever lane is idle. Each lane is one more job of the size `--start` gives it
+held on the worker queue for as long as the lane runs; `--status --repo` shows every lane, `--stop`
+ends the lane it names, and the ssh gate speaks for the first alone. Everything is designed and tested against
 stand-ins (`tools/tests/test_grid_runner.sh`); what the grid has not yet shown is in
 `docs/OPEN_QUESTIONS.md`.
 The ssh gate lets a workflow on GitHub's own machine start, read and end that chain, so the chain need

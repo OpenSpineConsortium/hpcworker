@@ -360,6 +360,45 @@ t "  says the chain ends" has 'no successor could be queued, so the chain ends h
 t "  and ends with a failure a person sees" rc_is 1
 rm -f "$T/slurm/refuse-$NAME"
 
+echo "== lanes: a second chain for one repository"
+OCH="$R/OpenSpineConsortium-other"; L1NAME='^hpcw_runner_OpenSpineConsortium-other$'; L2NAME='^hpcw_runner_OpenSpineConsortium-other\+lane2$'
+gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne; P1=$(newest "$L1NAME"); set_state "$P1" RUNNING
+for bad in 0 10 x 1x; do
+  gr --start --repo OpenSpineConsortium/other --site wayne --lane "$bad"; t "--lane $bad is refused" has '--lane is the number of one of a repository.s chains, 1 to 9'
+done
+t "  and nothing was submitted for it" [ "$(count "$L2NAME")" = 0 ]
+gr --start --repo OpenSpineConsortium/other --site wayne --lane 1; t "--lane 1 is the chain a command without it names, already running" has "a chain for OpenSpineConsortium/other is already queued or running \(job $P1 RUNNING\)"
+gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --lane 2
+t "--lane 2 starts a second chain beside the running first" rc_is 0; t "  and says which lane" has 'runner chain for OpenSpineConsortium/other, lane 2: job'
+t "  with the same labels, so GitHub hands a job to either" has 'runs-on: \[self-hosted, grid, wayne, a, b\]'
+L2=$(newest "$L2NAME")
+t "  under a Slurm name of its own, a singleton of it" bash -c "[ -n '$L2' ] && [ '$(J "$L2" dependency)' = singleton ]"
+t "  logging under a folder of its own" [ "$(J "$L2" out)" = "$OCH+lane2/runner-$L2.log" ]
+t "  whose config names the lane" grep -qx 'lane=2' "$OCH+lane2/config"
+t "  and whose job is handed the lane" [ "$(J "$L2" args | tr '[:space:]' ' ' | grep -c -- '--margin 60 --lane 2 --labels a,b ')" = 1 ]
+gr --start --repo OpenSpineConsortium/other --site wayne --lane 2; t "a second --lane 2 is refused while the lane is queued" has "a chain for OpenSpineConsortium/other --lane 2 is already queued or running \(job $L2 PENDING\)"
+t "  naming the stop that ends it" has 'grid_runner.sh --stop --repo OpenSpineConsortium/other --lane 2 ends it'
+gr --status --repo OpenSpineConsortium/other
+t "--status --repo shows every lane of the repository" all 'chain OpenSpineConsortium/other: labels grid,wayne,a,b' 'chain OpenSpineConsortium/other, lane 2: labels grid,wayne,a,b' "job $P1 RUNNING" "job $L2 PENDING"
+gr --status --repo OpenSpineConsortium/other --lane 2
+t "--status --lane 2 shows that lane alone" bash -c "printf '%s\n' \"\$1\" | grep -q 'lane 2: labels' && ! printf '%s\n' \"\$1\" | grep -q 'other: labels'" _ "$OUT"
+gr --gate-off --repo OpenSpineConsortium/other --site wayne --lane 2; t "the ssh gate refuses a lane past the first" has 'the ssh gate speaks for a repository.s first chain alone'
+gr --stop --repo OpenSpineConsortium/other --lane 2; t "--stop --lane 2 cancels that lane's queued job" has "cancelled job $L2"
+t "  writing the lane's STOP, not the first chain's" bash -c "[ -e '$OCH+lane2/STOP' ] && [ ! -e '$OCH/STOP' ]"
+t "  and leaves the first chain's job running" [ "$(J "$P1" state)" = RUNNING ]
+gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --lane 2; L3=$(newest "$L2NAME")
+t "the lane starts again" bash -c "[ '$L3' != '$L2' ] && [ ! -e '$OCH+lane2/STOP' ]"
+echo "$OCH+lane2" > "$T/apptainer/chain"; clear_runs; plan stop
+run_job "$L3"
+t "a lane's job ends well" rc_is 0; t "  registering its runner with the chain's labels" has 'registered runner grid-wayne-[0-9]+-1 \(id [0-9]+, labels self-hosted,linux,x64,grid,wayne,a,b\)'
+L4=$(newest "$L2NAME")
+t "  after queuing its successor under the lane's name, with the lane" bash -c "[ '$L4' != '$L3' ] && [ '$(J "$L4" dependency)' = 'afterany:$L3,singleton' ] && [ \"\$(cat '$T/slurm/jobs/$L4/args')\" = \"\$(cat '$T/slurm/jobs/$L3/args')\" ]"
+t "  and the STOP it was given is the lane's, not the first chain's" bash -c "[ -e '$OCH+lane2/STOP' ] && [ ! -e '$OCH/STOP' ]"
+run_job "$L4"
+t "the successor meets the lane's STOP" has 'STOP is set'; t "  and says how to start that lane again" has 'tools/grid_runner.sh --start --repo OpenSpineConsortium/other --lane 2 starts it again'
+t "  queuing nothing more" [ "$(count "$L2NAME")" = 3 ]
+gr --stop --repo OpenSpineConsortium/other --now; t "the first chain stops on its own word" has "cancelled job $P1"
+
 echo "== the end"
 t "every job the test submitted had a wall time and ran from the runner folder" bash -c "[ ! -e '$T/slurm/refused' ]"
 t "no stand-in was asked for what it does not know" bash -c "[ ! -e '$T/apptainer/refused' ]"

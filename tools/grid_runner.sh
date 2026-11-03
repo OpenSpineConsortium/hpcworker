@@ -15,9 +15,9 @@
 #
 #   tools/grid_runner.sh --install --site S [--version 2.338.0]
 #   tools/grid_runner.sh --start --repo OWNER/NAME --site S [--labels a,b] [--hours 8] [--margin 60]
-#                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q]
-#   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--now]
-#   tools/grid_runner.sh --status --site S [--repo OWNER/NAME]
+#                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q] [--lane N]
+#   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--lane N] [--now]
+#   tools/grid_runner.sh --status --site S [--repo OWNER/NAME [--lane N]]
 #   tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA... [comment]' --repo OWNER/NAME --site S [the --start options]
 #   tools/grid_runner.sh --gate-off --repo OWNER/NAME --site S
 #   tools/grid_runner.sh --gate-setup --repo OWNER/NAME --site S [the --start options]
@@ -28,6 +28,16 @@
 # --partition and --qos override) and where the runner's folder is, beside the account's state on
 # the lab volume (shared_state_dir with -runner added). --runner-dir DIR, or HPCW_RUNNER_DIR, names
 # the folder instead, and a command with neither a site nor a folder is refused.
+#
+# --lane N (1 to 9, 1 unless given) names one of several chains for the same repository. A chain
+# serves one GitHub job at a time, so a repository whose pushes start more jobs than one runner
+# clears waits behind itself; each lane is a chain of its own, with its own Slurm job name
+# (hpcw_runner_OWNER-NAME, then +laneN past the first) that --dependency=singleton keys on, its own
+# folder (<runner dir>/OWNER-NAME, then +laneN) and its own runner registered one job at a time,
+# all with the same labels, so GitHub hands a job to whichever lane is idle. '+' is in no GitHub
+# repository's name, so no lane's name can be another repository's. Lane 1 is the chain a command
+# without --lane has always named; --status --repo shows every lane of the repository, and --stop
+# ends the lane it names. The ssh gate speaks for lane 1 alone.
 #
 # --install: one job on a compute node (tools/grid_runner_install.sbatch) pulls GitHub's own runner
 # image, ghcr.io/actions/actions-runner:<version> (latest unless --version says), as a SIF into
@@ -41,7 +51,7 @@
 #
 # --start: on the login node file work, one `gh api` (the repository must be private or internal;
 # GitHub advises against self-hosted runners on a public repository, whose forks' pull requests
-# could run code on the grid), one squeue (one chain per repository and account: a job of the
+# could run code on the grid), one squeue (one chain per repository, lane and account: a job of the
 # chain's name already queued or running is refused) and one sbatch. The chain is
 # tools/grid_runner.sbatch, --hours of wall time on the site's worker queue (the profile's
 # partition_cpu_batch and qos_batch, or --partition and --qos; --cpus, --mem and --gres size it),
@@ -116,12 +126,13 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'grid_runner: %s\n' "$*" >&2; exit 1; }
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
 
-MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0
+MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0 LANE=1 LANE_GIVEN=0
 RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=()
 while [ $# -gt 0 ]; do case "$1" in
   --install) MODE=install; shift;; --start) MODE=start; shift;; --stop) MODE=stop; shift;; --status) MODE=status; shift;;
   --repo) need "$@"; REPO="$2"; shift 2;; --version) need "$@"; VERSION="$2"; shift 2;;
   --site) need "$@"; SITE="$2"; shift 2;;
+  --lane) need "$@"; LANE="$2"; LANE_GIVEN=1; shift 2;;
   # the options that size a chain, kept as given too: --gate-key writes them into the gate's line
   --labels|--hours|--margin|--cpus|--mem|--gres|--partition|--qos) need "$@"; STARTOPTS+=("$1" "$2")
     case "$1" in
@@ -145,6 +156,8 @@ case ",$LABELS," in *,self-hosted,*|*,linux,*|*,x64,*|*,grid,*) die "--labels: s
 { [[ "$HOURS" =~ ^[0-9]+$ ]] && [ "$HOURS" -ge 1 ] && [ "$HOURS" -le 336 ]; } || die "--hours is a job's wall time in hours, 1 to 336: $HOURS"
 { [[ "$MARGIN" =~ ^[0-9]+$ ]] && [ "$MARGIN" -ge 1 ] && [ "$MARGIN" -lt $((HOURS * 60)) ]; } || die "--margin is minutes before the wall time, 1 to under the wall time: $MARGIN"
 [ -z "$CPUS" ] || [[ "$CPUS" =~ ^[0-9]+$ ]] || die "bad --cpus $CPUS"
+[[ "$LANE" =~ ^[1-9]$ ]] || die "--lane is the number of one of a repository's chains, 1 to 9: $LANE"
+case "$MODE" in gatekey|gateoff|gatesetup) [ "$LANE" = 1 ] || die "the ssh gate speaks for a repository's first chain alone; --lane $LANE is started from the grid's shell";; esac
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
 case "$MODE" in start|stop|serve|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
@@ -199,8 +212,10 @@ net() { if command -v timeout >/dev/null 2>&1; then timeout ${NET_FG:+--foregrou
 
 ROOT="$HPCW_RUNNER_DIR"
 IMAGES="$ROOT/image"
-CHAIN="$ROOT/${REPO//\//-}"          # one folder per repository: STOP, next, status.json, the jobs' logs
-JOB_NAME="hpcw_runner_${REPO//\//-}"  # unique per repository and account: --dependency=singleton keys on it
+LANE_SUFFIX=""; [ "$LANE" = 1 ] || LANE_SUFFIX="+lane$LANE"   # '+' is in no repository's name
+LANE_OPT=""; [ "$LANE" = 1 ] || LANE_OPT=" --lane $LANE"        # the lane, as a command names it
+CHAIN="$ROOT/${REPO//\//-}$LANE_SUFFIX"          # one folder per repository and lane: STOP, next, status.json, the jobs' logs
+JOB_NAME="hpcw_runner_${REPO//\//-}$LANE_SUFFIX"  # unique per repository, lane and account: --dependency=singleton keys on it
 IMAGE_REF=ghcr.io/actions/actions-runner
 
 # what the install job and every job of a chain are handed: grid_runner.sh's own options on the job's
@@ -213,6 +228,7 @@ job_args() {
   [ -n "$RUNTIME_BIN_GIVEN" ] && SITE_ARGS+=(--runtime-bin "$RUNTIME_BIN_GIVEN")
   [ -n "$RUNTIME_MODULE_GIVEN" ] && SITE_ARGS+=(--runtime-module "$RUNTIME_MODULE_GIVEN")
   JOB_ARGS=(--repo "$REPO" "${SITE_ARGS[@]}" --hours "$HOURS" --margin "$MARGIN")
+  [ "$LANE" = 1 ] || JOB_ARGS+=(--lane "$LANE")
   [ -n "$LABELS" ] && JOB_ARGS+=(--labels "$LABELS")
   [ -n "$CPUS" ] && JOB_ARGS+=(--cpus "$CPUS")
   [ -n "$MEM" ] && JOB_ARGS+=(--mem "$MEM")
@@ -282,17 +298,17 @@ chain_start() {
   refuse_public || die "nothing started"
   mkdir -p "$CHAIN" || die "cannot create $CHAIN"
   q=$(SQ -h -u "$USER" -n "$JOB_NAME" -o '%i %T' 2>&1) || die "squeue did not answer: $q"
-  [ -z "$q" ] || die "a chain for $REPO is already queued or running (job $(printf '%s' "$q" | tr '\n' ' ' | sed 's/ *$//')); tools/grid_runner.sh --stop --repo $REPO ends it"
+  [ -z "$q" ] || die "a chain for $REPO$LANE_OPT is already queued or running (job $(printf '%s' "$q" | tr '\n' ' ' | sed 's/ *$//')); tools/grid_runner.sh --stop --repo $REPO$LANE_OPT ends it"
   install_bin "$HERE" || die "nothing started"
   rm -f "$CHAIN/STOP" "$CHAIN/next" "$CHAIN/next.submitting" "$CHAIN/failures"
   job_args
-  { printf 'repo=%s\nversion=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nstarted=%s\n' "$REPO" "$v" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$(date -u +%FT%TZ)"
+  { printf 'repo=%s\nlane=%s\nversion=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nstarted=%s\n' "$REPO" "$LANE" "$v" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$(date -u +%FT%TZ)"
     printf 'sbatch=%s\n' "${SB_FLAGS[*]}"; } > "$CHAIN/config" || die "cannot write $CHAIN/config"
   out=$(SB --parsable --job-name "$JOB_NAME" --dependency=singleton "${SB_FLAGS[@]}" -D "$ROOT" --output "$CHAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${JOB_ARGS[@]}" 2>&1) \
     || die "sbatch refused the chain's first job: $out"
-  say "runner chain for $REPO: job $(job_id "$out" || printf '%s' "$out"), $HOURS h of wall time a job, a successor queued by each; runner image $v"
+  say "runner chain for $REPO${LANE_OPT:+, lane $LANE}: job $(job_id "$out" || printf '%s' "$out"), $HOURS h of wall time a job, a successor queued by each; runner image $v"
   say "a workflow job reaches it with: runs-on: [self-hosted, grid${SITE:+, $SITE}${LABELS:+, ${LABELS//,/, }}]  (linux and x64 are registered with them); each of its jobs must end within $MARGIN minutes"
-  say "logs are $CHAIN/runner-<job>.log; tools/grid_runner.sh --status --repo $REPO shows the chain; --stop --repo $REPO ends it"
+  say "logs are $CHAIN/runner-<job>.log; tools/grid_runner.sh --status --repo $REPO shows the chain; --stop --repo $REPO$LANE_OPT ends it"
 }
 
 chain_stop() {
@@ -311,7 +327,7 @@ chain_stop() {
   if [ -n "$running" ] && [ $NOW = 0 ]; then
     say "job $running keeps running: a GitHub job on it finishes first, an idle runner ends within a minute; --now would cancel it and fail the GitHub job"
   fi
-  say "STOP written: no job of this chain registers a runner again until tools/grid_runner.sh --start --repo $REPO"
+  say "STOP written: no job of this chain registers a runner again until tools/grid_runner.sh --start --repo $REPO$LANE_OPT"
 }
 
 last_word() { # FILE: the one line status_write wrote, read with awk (no python3 on a login node)
@@ -343,8 +359,8 @@ chain_status() {
   q=$(SQ -h -u "$USER" -o '%i %T %j %M %N' 2>&1) || die "squeue did not answer: $q"
   for d in "$ROOT"/*/; do
     d=${d%/}; [ -f "$d/config" ] || continue
-    [ -z "$REPO" ] || [ "$d" = "$CHAIN" ] || continue
-    say "chain $(sed -n 's/^repo=//p' "$d/config"): labels $(sed -n 's/^labels=//p' "$d/config"), started $(sed -n 's/^started=//p' "$d/config")$([ -e "$d/STOP" ] && printf ', STOP written %s' "$(cat "$d/STOP")")"
+    [ -z "$REPO" ] || [ "$d" = "$CHAIN" ] || { [ $LANE_GIVEN = 0 ] && [[ "$d" == "$ROOT/${REPO//\//-}+lane"[1-9] ]]; } || continue
+    say "chain $(sed -n 's/^repo=//p' "$d/config")$(sed -n 's/^lane=\([2-9]\)$/, lane \1/p' "$d/config"): labels $(sed -n 's/^labels=//p' "$d/config"), started $(sed -n 's/^started=//p' "$d/config")$([ -e "$d/STOP" ] && printf ', STOP written %s' "$(cat "$d/STOP")")"
     printf '%s\n' "$q" | awk -v n="hpcw_runner_$(basename "$d")" '$3 == n { printf "  job %s %s, %s on %s\n", $1, $2, $4, ($5 == "" ? "no node yet" : $5) }'
     if [ -f "$d/status.json" ]; then
       last_word "$d/status.json" || say "  status.json unreadable"
@@ -773,7 +789,7 @@ serve() {
   SINCE=$(date -u +%FT%TZ); IMAGE_VERSION=$(cat "$IMAGES/current" 2>/dev/null | tr -d '[:space:]')
   log "== runner job $SLURM_JOB_ID for $REPO on $(hostname -s), kernel $(uname -r)"
   mkdir -p "$CHAIN"
-  if [ -e "$CHAIN/STOP" ]; then log "STOP is set ($CHAIN/STOP): the chain ends here; tools/grid_runner.sh --start --repo $REPO starts it again"; status_write stopped "STOP was set"; return 0; fi
+  if [ -e "$CHAIN/STOP" ]; then log "STOP is set ($CHAIN/STOP): the chain ends here; tools/grid_runner.sh --start --repo $REPO$LANE_OPT starts it again"; status_write stopped "STOP was set"; return 0; fi
   job_args
   successor || chained=0
   DEADLINE=$(( $(end_time) - MARGIN * 60 ))
@@ -840,7 +856,7 @@ serve() {
     stopped) ;;
     *) status_write "$end_state" "$JOBS_DONE GitHub jobs ran in this job";;
   esac
-  log "== job $SLURM_JOB_ID ends: $JOBS_DONE GitHub jobs ran${end_note:+; $end_note}$([ $chained = 0 ] && echo "; no successor could be queued, so the chain ends here: tools/grid_runner.sh --start --repo $REPO starts it again")"
+  log "== job $SLURM_JOB_ID ends: $JOBS_DONE GitHub jobs ran${end_note:+; $end_note}$([ $chained = 0 ] && echo "; no successor could be queued, so the chain ends here: tools/grid_runner.sh --start --repo $REPO$LANE_OPT starts it again")"
   [ $chained = 1 ]
 }
 
