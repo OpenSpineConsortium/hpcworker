@@ -50,8 +50,12 @@
 # In the job: the repository's visibility is read again (a public one writes STOP); the runner's
 # files are copied out of the image onto the node's disk; then, until --margin minutes before the
 # wall time, one registration at a time: `gh api` mints a just-in-time runner
-# (name grid-<site>-<job>-<n>; labels grid, the site's name and --labels, beside the self-hosted,
-# linux and x64 GitHub adds) into a 0600 file on the node's disk, the three files it carries are
+# (name grid-<site>-<job>-<n>; labels self-hosted, linux and x64, which GitHub gives a runner
+# config.sh registers but not one registered just in time, whose labels are exactly the list sent
+# (measured at wayne: 2026-11-03, a job asking self-hosted waited for ever beside an idle runner
+# labelled grid and the site's name alone), then grid, the site's name and --labels) into a 0600
+# file on the node's disk,
+# the three files it carries are
 # written 0600 into the runner's folder, that file goes, and the runner listens for one job. A job
 # that completes ends the runner (GitHub removes the registration itself), the work folder and the
 # registration's files go, and the next registration follows. A runner still idle at the margin,
@@ -287,7 +291,7 @@ chain_start() {
   out=$(SB --parsable --job-name "$JOB_NAME" --dependency=singleton "${SB_FLAGS[@]}" -D "$ROOT" --output "$CHAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${JOB_ARGS[@]}" 2>&1) \
     || die "sbatch refused the chain's first job: $out"
   say "runner chain for $REPO: job $(job_id "$out" || printf '%s' "$out"), $HOURS h of wall time a job, a successor queued by each; runner image $v"
-  say "a workflow job reaches it with: runs-on: [self-hosted, grid${SITE:+, $SITE}${LABELS:+, ${LABELS//,/, }}]  (GitHub adds linux and x64); each of its jobs must end within $MARGIN minutes"
+  say "a workflow job reaches it with: runs-on: [self-hosted, grid${SITE:+, $SITE}${LABELS:+, ${LABELS//,/, }}]  (linux and x64 are registered with them); each of its jobs must end within $MARGIN minutes"
   say "logs are $CHAIN/runner-<job>.log; tools/grid_runner.sh --status --repo $REPO shows the chain; --stop --repo $REPO ends it"
 }
 
@@ -671,7 +675,9 @@ HOME_DIR="" IMAGE=""   # the runner's folder on the node's disk (/home/runner in
 mint() { # N: one just-in-time registration; its three files 0600 in the runner's folder, nothing on a command line
   local n=$1 req="$NT/jit-request.json" resp="$NT/jit-response.json" labels l
   RUNNER_NAME="grid-${SITE:-$(hostname -s)}-$SLURM_JOB_ID-$n"
-  labels='"grid"'; for l in ${SITE:+"$SITE"} ${LABELS//,/ }; do labels="$labels,\"$l\""; done
+  # GitHub's own three first: a just-in-time registration carries exactly the labels it is sent, and
+  # a job's runs-on names self-hosted (the header says what was measured)
+  labels='"self-hosted","linux","x64","grid"'; for l in ${SITE:+"$SITE"} ${LABELS//,/ }; do labels="$labels,\"$l\""; done
   ( umask 077; printf '{"name":"%s","runner_group_id":1,"labels":[%s],"work_folder":"_work"}\n' "$RUNNER_NAME" "$labels" > "$req" ) || return 1
   rm -f "$resp"
   if ! ( umask 077; GH api -X POST "repos/$REPO/actions/runners/generate-jitconfig" --input "$req" > "$resp" 2> "$NT/gh.err" ); then
