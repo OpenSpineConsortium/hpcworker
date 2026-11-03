@@ -17,6 +17,10 @@
 #       refused (403) while $SHIM_GH/refuse-jit exists. The request comes from the job's node-local
 #       temp, whose home/ is the runner's folder: any of the three files an earlier registration
 #       left there is named in $SHIM_GH/jit/over, since a new registration must find none
+#   gh api repos/O/N/actions/runs?status=S[&...] [--jq EXPR]
+#       a repository's workflow runs in state S: $SHIM_GH/runs/O-N/S (GitHub's JSON), or none
+#   gh api repos/O/N/actions/runs/ID/jobs[?query] [--jq EXPR]
+#       a run's jobs: $SHIM_GH/runs/O-N/jobs-ID (GitHub's JSON), or none
 #   gh api -X DELETE repos/O/N/actions/runners/ID --silent
 #       appends ID to $SHIM_GH/deleted; 404 while $SHIM_GH/delete-404 exists
 # While $SHIM_GH/offline exists every call fails as gh does without a network. Anything else is refused.
@@ -104,6 +108,17 @@ answer = {"runner": {"id": n, "name": req["name"], "os": "Linux", "status": "off
 print(json.dumps(answer))
 PY
   exit $?
+fi
+if [[ "$ep" =~ ^repos/([^/]+)/([^/]+)/actions/runs\?(.*)$ ]]; then
+  st=$(printf '%s' "${BASH_REMATCH[3]}" | tr '&' '\n' | sed -n 's/^status=//p' | head -1)
+  f="$G/runs/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}/$st"; json='{"total_count":0,"workflow_runs":[]}'
+  [ -n "$st" ] && [ -f "$f" ] && json=$(cat "$f")
+  answer "$json"; exit $?
+fi
+if [[ "$ep" =~ ^repos/([^/]+)/([^/]+)/actions/runs/([0-9]+)/jobs(\?.*)?$ ]]; then
+  f="$G/runs/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}/jobs-${BASH_REMATCH[3]}"; json='{"total_count":0,"jobs":[]}'
+  [ -f "$f" ] && json=$(cat "$f")
+  answer "$json"; exit $?
 fi
 if [[ "$ep" =~ ^repos/[^/]+/[^/]+/actions/runners/([0-9]+)$ ]]; then
   [ "$method" = DELETE ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep): only a DELETE is known here" >&2; exit 1; }

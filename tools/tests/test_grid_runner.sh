@@ -399,6 +399,73 @@ t "the successor meets the lane's STOP" has 'STOP is set'; t "  and says how to 
 t "  queuing nothing more" [ "$(count "$L2NAME")" = 3 ]
 gr --stop --repo OpenSpineConsortium/other --now; t "the first chain stops on its own word" has "cancelled job $P1"
 
+echo "== autoscale: one runner job for each queued job"
+pending() { local j; for j in $(ids "$1"); do [ "$(J "$j" state)" = PENDING ] && echo "$j"; done; return 0; }
+AU="$R/autoscale"; TPL=OpenSpineConsortium-symphony-template; RN="^hpcw_auto_$TPL\$"; ON='^hpcw_auto_OpenSpineConsortium-other$'
+gr --autoscale --site wayne; t "--autoscale needs --repos" has '--autoscale needs --repos'
+gr --autoscale --repos "OpenSpineConsortium" --site wayne; t "  each OWNER/NAME" has '--repos is OWNER/NAME'
+gr --autoscale --repos "$GH_REPO" --site wayne --max-total 0; t "  and caps of one at least" has '--max-total is 1 to 200'
+echo public > "$T/gh/visibility"
+gr --autoscale --repos "$GH_REPO" --site wayne; t "a public repository is refused" has 'refused: .* is public'
+t "  and no controller is queued" [ "$(count '^hpcw_autoscale$')" = 0 ]
+echo private > "$T/gh/visibility"
+gr --autoscale --repos "$GH_REPO,OpenSpineConsortium/other" --site wayne --max-per-repo 2 --max-total 3 --cpus 4 --mem 16G
+t "--autoscale queues the controller" rc_is 0; t "  and says what it does" all 'autoscale controller: job' 'at most 2 for one repository and 3 in all'
+AC=$(newest '^hpcw_autoscale$')
+t "  a singleton of its name" [ "$(J "$AC" dependency)" = singleton ]
+t "  small, on the site's worker queue" bash -c "[ '$(J "$AC" cpus)' = 1 ] && [ '$(J "$AC" mem)' = 2G ] && [ '$(J "$AC" time)' = 8:00:00 ] && [ '$(J "$AC" partition)' = '$DEF_PART' ]"
+t "  logging under the controller's folder" [ "$(J "$AC" out)" = "$AU/runner-$AC.log" ]
+t "  handed its repositories, caps and the runner jobs' size" [ "$(J "$AC" args | tr '[:space:]' ' ' | grep -c -- "--control --repos $GH_REPO,OpenSpineConsortium/other .*--hours 2 --margin 60 --max-per-repo 2 --max-total 3 --every 60 --idle 10 --cpus 4 --mem 16G")" = 1 ]
+t "  with its caps written where a person can change them" bash -c "grep -qx 'max_per_repo=2' '$AU/autoscale.conf' && grep -qx 'max_total=3' '$AU/autoscale.conf'"
+gr --autoscale --repos "$GH_REPO" --site wayne; t "a second controller is refused while one is queued" has "the controller is already queued or running \(job $AC PENDING\)"
+# the queue: two grid jobs and one asking for GitHub's machines in a queued run, one grid job left in a run in progress
+mkdir -p "$T/gh/runs/$TPL"
+echo '{"workflow_runs":[{"id":11}]}' > "$T/gh/runs/$TPL/queued"
+echo '{"workflow_runs":[{"id":12}]}' > "$T/gh/runs/$TPL/in_progress"
+echo '{"jobs":[{"status":"queued","labels":["self-hosted","grid"]},{"status":"queued","labels":["self-hosted","grid"]},{"status":"queued","labels":["ubuntu-latest"]}]}' > "$T/gh/runs/$TPL/jobs-11"
+echo '{"jobs":[{"status":"completed","labels":["self-hosted","grid"]},{"status":"queued","labels":["self-hosted","grid","wayne"]},{"status":"queued","labels":["self-hosted","gpu"]}]}' > "$T/gh/runs/$TPL/jobs-12"
+clear_runs
+run_job "$AC" HPCW_AUTOSCALE_LOOKS=1
+t "the controller's job ends well" rc_is 0
+AC2=$(newest '^hpcw_autoscale$')
+t "  after queuing its successor with the same arguments" bash -c "[ '$AC2' != '$AC' ] && [ '$(J "$AC2" dependency)' = 'afterany:$AC,singleton' ] && [ \"\$(cat '$T/slurm/jobs/$AC2/args')\" = \"\$(cat '$T/slurm/jobs/$AC/args')\" ]"
+t "  it counts the three queued jobs these runners can take, not GitHub's machine's or a GPU's" has "$GH_REPO: 3 queued, 0 runner jobs \(0 yet to take one\), 2 submitted"
+t "  and submits one runner job for each, up to the repository's cap" [ "$(count "$RN")" = 2 ]
+t "  none for a repository with nothing queued" [ "$(count "$ON")" = 0 ]
+U1=$(pending "$RN" | head -1)
+t "  each runner job sized as asked, with no dependency" bash -c "[ '$(J "$U1" cpus)' = 4 ] && [ '$(J "$U1" mem)' = 16G ] && [ '$(J "$U1" time)' = 2:00:00 ] && [ -z '$(J "$U1" dependency)' ]"
+t "  and handed one GitHub job's work" [ "$(J "$U1" args | tr '[:space:]' ' ' | grep -c -- "--once --repo $GH_REPO .*--hours 2 --margin 60 --cpus 4 --mem 16G .*--idle 10 ")" = 1 ]
+t "  logging under its repository's folder" [ "$(J "$U1" out)" = "$AU/$TPL/runner-$U1.log" ]
+run_job "$AC2" HPCW_AUTOSCALE_LOOKS=1
+t "a second look, the two still pending, submits nothing past the cap" [ "$(count "$RN")" = 2 ]
+sed -i 's/^max_per_repo=2$/max_per_repo=5/' "$AU/autoscale.conf"
+AC3=$(newest '^hpcw_autoscale$'); run_job "$AC3" HPCW_AUTOSCALE_LOOKS=1
+t "a cap raised in autoscale.conf counts at the next look, under the cap over all" [ "$(count "$RN")" = 3 ]
+gr --status
+t "--status shows the controller" all 'autoscale: OpenSpineConsortium/symphony-template,OpenSpineConsortium/other, at most 5 runner jobs a repository and 3 in all' "controller job $(newest '^hpcw_autoscale$') PENDING" "runner jobs for $TPL: 0 running, 3 pending"
+echo "== autoscale: a runner job serves one GitHub job, or none"
+echo "$AU/$TPL/jobs/$U1" > "$T/apptainer/chain"; clear_runs; plan done
+run_job "$U1"
+t "a runner job ends well" rc_is 0; t "  having registered one runner" has "registered runner grid-wayne-$U1-1 "
+t "  and run one GitHub job" has "== job $U1 ends: 1 GitHub jobs ran"
+t "  queuing nothing after it" [ "$(count "$RN")" = 3 ]
+t "  its state in a folder of its own" grep -q "\"job\":\"$U1\"" "$AU/$TPL/jobs/$U1/status.json"
+U2=$(pending "$RN" | head -1); echo 1000000 > "$T/clock"; clear_runs; plan "clock=$((1000000 + 11 * 60))"
+run_job "$U2"
+t "a runner job that takes no job within its idle minutes ends" rc_is 0; t "  ending its idle runner" has "ending the idle runner grid-wayne-$U2-1"
+t "  with its registration deleted and no GitHub job counted" bash -c "[ -n '$(deleted)' ] && grep -q '0 GitHub jobs ran' '$AU/$TPL/runner-$U2.log'"
+echo "== autoscale: stopping it"
+U3=$(pending "$RN" | tail -1); AC4=$(newest '^hpcw_autoscale$')
+gr --autoscale-stop --site wayne
+t "--autoscale-stop cancels the controller's queued job and the runner jobs not started" has "cancelled job $AC4, $U3"
+t "  and writes STOP" [ -e "$AU/STOP" ]
+run_job "$AC4" HPCW_AUTOSCALE_LOOKS=1
+t "a controller job that meets STOP ends" has 'STOP is set'; t "  queuing no successor" [ -z "$(pending '^hpcw_autoscale$')" ]
+gr --start --repo OpenSpineConsortium/other --site wayne --lane 4; L4=$(newest '^hpcw_runner_OpenSpineConsortium-other\+lane4$')
+t "a chain still starts beside it" [ -n "$L4" ]; gr --stop --repo OpenSpineConsortium/other --lane 4 --now
+gr --autoscale --repos "$GH_REPO" --site wayne; t "--autoscale after a stop starts again" rc_is 0; t "  and takes STOP away" [ ! -e "$AU/STOP" ]
+gr --autoscale-stop --site wayne --now; t "--autoscale-stop --now cancels the running controller too" has 'cancelled job'
+
 echo "== the end"
 t "every job the test submitted had a wall time and ran from the runner folder" bash -c "[ ! -e '$T/slurm/refused' ]"
 t "no stand-in was asked for what it does not know" bash -c "[ ! -e '$T/apptainer/refused' ]"

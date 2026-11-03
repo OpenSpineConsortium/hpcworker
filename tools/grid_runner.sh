@@ -18,6 +18,9 @@
 #                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q] [--lane N]
 #   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--lane N] [--now]
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME [--lane N]]
+#   tools/grid_runner.sh --autoscale --repos OWNER/NAME[,OWNER/NAME...] --site S [--max-per-repo 6]
+#                        [--max-total 12] [--every 60] [--idle 10] [--hours 2] [the --start sizes]
+#   tools/grid_runner.sh --autoscale-stop --site S [--now]
 #   tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA... [comment]' --repo OWNER/NAME --site S [the --start options]
 #   tools/grid_runner.sh --gate-off --repo OWNER/NAME --site S
 #   tools/grid_runner.sh --gate-setup --repo OWNER/NAME --site S [the --start options]
@@ -38,6 +41,29 @@
 # repository's name, so no lane's name can be another repository's. Lane 1 is the chain a command
 # without --lane has always named; --status --repo shows every lane of the repository, and --stop
 # ends the lane it names. The ssh gate speaks for lane 1 alone.
+#
+# --autoscale starts one runner per queued job instead of a fixed number of chains. A controller,
+# one small Slurm job (1 CPU, 2 GB, 8 hours, on the chains' queue, never a loop on the login node),
+# looks every --every seconds (60 unless given) at each repository --repos names: its queued and
+# running workflow runs, and in them the jobs still queued whose runs-on labels a runner of this
+# site carries (self-hosted, linux, x64, grid, the site's name and --labels). For each such job no
+# runner job of the controller's is yet waiting to take, it submits one runner job of the size the
+# --start options give (--hours 2 unless given), named hpcw_auto_OWNER-NAME, which registers one
+# just-in-time runner exactly as a chain's job does, runs one GitHub job and ends, queuing nothing;
+# a runner job that has taken no job within --idle minutes (10 unless given) deletes its
+# registration and ends, since a chain or another runner may have taken the job it was started for.
+# It never runs more than --max-per-repo runner jobs for one repository (6 unless given, or
+# HPCW_AUTOSCALE_MAX_PER_REPO) nor more than --max-total in all (12, or HPCW_AUTOSCALE_MAX_TOTAL),
+# pending ones included, so it never fills the queue; both are read again at every look from
+# <runner dir>/autoscale/autoscale.conf, where a person may change them while it runs. Three runner
+# jobs of one repository that fail within 15 minutes hold that repository's submissions for 15
+# minutes. The controller queues its own successor first (afterany, singleton), as a chain's job
+# does, and writes status for --status in <runner dir>/autoscale/. GitHub is reached with the
+# account's own gh sign-in, as the chains reach it, and nothing is written into a repository.
+# --autoscale-stop writes STOP there, cancels the controller's queued job and every runner job not yet
+# started; a runner job busy with a GitHub job finishes it, an idle one ends within a minute, and
+# --now cancels the running controller too. The chains and the controller may serve one repository
+# at once: a job goes to whichever runner GitHub hands it to.
 #
 # --install: one job on a compute node (tools/grid_runner_install.sbatch) pulls GitHub's own runner
 # image, ghcr.io/actions/actions-runner:<version> (latest unless --version says), as a SIF into
@@ -127,16 +153,23 @@ die() { printf 'grid_runner: %s\n' "$*" >&2; exit 1; }
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
 
 MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0 LANE=1 LANE_GIVEN=0
+HOURS_GIVEN=0 REPOS="" MAX_PER_REPO=${HPCW_AUTOSCALE_MAX_PER_REPO:-6} MAX_TOTAL=${HPCW_AUTOSCALE_MAX_TOTAL:-12} EVERY=60 IDLE=10 CONTROL_HOURS=8
 RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=()
 while [ $# -gt 0 ]; do case "$1" in
   --install) MODE=install; shift;; --start) MODE=start; shift;; --stop) MODE=stop; shift;; --status) MODE=status; shift;;
   --repo) need "$@"; REPO="$2"; shift 2;; --version) need "$@"; VERSION="$2"; shift 2;;
   --site) need "$@"; SITE="$2"; shift 2;;
   --lane) need "$@"; LANE="$2"; LANE_GIVEN=1; shift 2;;
+  --autoscale) MODE=autoscale; shift;; --autoscale-stop) MODE=autostop; shift;;
+  --repos) need "$@"; REPOS="$2"; shift 2;;
+  --max-per-repo) need "$@"; MAX_PER_REPO="$2"; shift 2;; --max-total) need "$@"; MAX_TOTAL="$2"; shift 2;;
+  --every) need "$@"; EVERY="$2"; shift 2;; --idle) need "$@"; IDLE="$2"; shift 2;;
+  # the controller's own job and a runner job it submits, as each is handed its options
+  --control) MODE=control; shift;; --once) MODE=once; shift;;
   # the options that size a chain, kept as given too: --gate-key writes them into the gate's line
   --labels|--hours|--margin|--cpus|--mem|--gres|--partition|--qos) need "$@"; STARTOPTS+=("$1" "$2")
     case "$1" in
-      --labels) LABELS="$2";; --hours) HOURS="$2";; --margin) MARGIN="$2";; --cpus) CPUS="$2";; --mem) MEM="$2";; --gres) GRES="$2";;
+      --labels) LABELS="$2";; --hours) HOURS="$2"; HOURS_GIVEN=1;; --margin) MARGIN="$2";; --cpus) CPUS="$2";; --mem) MEM="$2";; --gres) GRES="$2";;
       --partition) HPCW_RUNNER_PARTITION="$2";; --qos) HPCW_RUNNER_QOS="$2";;
     esac; shift 2;;
   --gate-key) need "$@"; MODE=gatekey; GATE_KEY="$2"; shift 2;; --gate-off) MODE=gateoff; shift;;
@@ -158,14 +191,25 @@ case ",$LABELS," in *,self-hosted,*|*,linux,*|*,x64,*|*,grid,*) die "--labels: s
 [ -z "$CPUS" ] || [[ "$CPUS" =~ ^[0-9]+$ ]] || die "bad --cpus $CPUS"
 [[ "$LANE" =~ ^[1-9]$ ]] || die "--lane is the number of one of a repository's chains, 1 to 9: $LANE"
 case "$MODE" in gatekey|gateoff|gatesetup) [ "$LANE" = 1 ] || die "the ssh gate speaks for a repository's first chain alone; --lane $LANE is started from the grid's shell";; esac
+# a runner job of the controller's lives for one GitHub job: two hours unless --hours says otherwise
+case "$MODE" in autoscale) [ $HOURS_GIVEN = 1 ] || HOURS=2;; esac
+{ [ "$MARGIN" -lt $((HOURS * 60)) ]; } || die "--margin is minutes before the wall time, under the wall time: $MARGIN"
+[[ "$MAX_PER_REPO" =~ ^[0-9]+$ ]] && [ "$MAX_PER_REPO" -ge 1 ] && [ "$MAX_PER_REPO" -le 50 ] || die "--max-per-repo is 1 to 50: $MAX_PER_REPO"
+[[ "$MAX_TOTAL" =~ ^[0-9]+$ ]] && [ "$MAX_TOTAL" -ge 1 ] && [ "$MAX_TOTAL" -le 200 ] || die "--max-total is 1 to 200: $MAX_TOTAL"
+[[ "$EVERY" =~ ^[0-9]+$ ]] && [ "$EVERY" -ge 15 ] && [ "$EVERY" -le 3600 ] || die "--every is seconds between two looks, 15 to 3600: $EVERY"
+[[ "$IDLE" =~ ^[0-9]+$ ]] && [ "$IDLE" -ge 1 ] && [ "$IDLE" -le 120 ] || die "--idle is minutes a runner job waits for a GitHub job, 1 to 120: $IDLE"
+if [ -n "$REPOS" ]; then
+  [[ "$REPOS" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+/[A-Za-z0-9._-]+){0,19}$ ]] || die "--repos is OWNER/NAME,OWNER/NAME, at most 20: $REPOS"
+fi
+case "$MODE" in autoscale|control) [ -n "$REPOS" ] || die "--$MODE needs --repos OWNER/NAME[,OWNER/NAME...]";; esac
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
-case "$MODE" in start|stop|serve|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
+case "$MODE" in start|stop|serve|once|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
 USER=${USER:-$(id -un)}; export USER   # the profile reader expands $USER in the lab volume's path
 HERE=$(cd "$(dirname "$0")" && pwd) || die "cannot find the folder of $0"
 # python3 only inside a job, on a compute node (the registration's files are decoded there); a login
 # node's banner may ban it by name, so a person's command never looks for it
-PY=""; case "$MODE" in pull|serve) PY=$(command -v python3 || echo /usr/bin/python3);; esac
+PY=""; case "$MODE" in pull|serve|once) PY=$(command -v python3 || echo /usr/bin/python3);; esac
 
 # the site profile, for a person's command on the login node, read with the framework's own awk
 # reader and handed to the jobs as options (--runner-dir, --runtime-bin, --runtime-module,
@@ -184,7 +228,7 @@ site_profile() {
   [ -n "${HPCW_RUNNER_QOS:-}" ] || HPCW_RUNNER_QOS=$(prof_get qos_batch) || die "profile $f unreadable"
   STATE_DIR=$(prof_get shared_state_dir) || die "profile $f unreadable"
 }
-case "$MODE" in install|start|stop|status|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
+case "$MODE" in install|start|stop|status|autoscale|autostop|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
 [[ "${HPCW_RUNNER_PARTITION:-}${HPCW_RUNNER_QOS:-}" =~ ^[A-Za-z0-9._,-]*$ ]] || die "bad --partition or --qos"
 [[ "$RUNTIME_BIN_GIVEN$RUNTIME_MODULE_GIVEN" =~ ^[A-Za-z0-9._/-]*$ ]] || die "bad --runtime-bin or --runtime-module"
 if [ -z "${HPCW_RUNNER_DIR:-}" ]; then
@@ -202,7 +246,7 @@ slurm_bin() { command -v "$1" || echo "/opt/hpcw/slurm/bin/$1"; }
 SBATCH=$(slurm_bin sbatch) SQUEUE=$(slurm_bin squeue) SCANCEL=$(slurm_bin scancel)
 # sbatch hands a job the environment it was typed in (--export=ALL): never a token with it, and
 # from inside a job never this node's per-job temp either (each job makes its own)
-SB_ENV=(env -u GITHUB_TOKEN -u GH_TOKEN); case "$MODE" in serve|pull) SB_ENV+=(-u TMPDIR);; esac
+SB_ENV=(env -u GITHUB_TOKEN -u GH_TOKEN); case "$MODE" in serve|pull|once|control) SB_ENV+=(-u TMPDIR);; esac
 SB() { "${SB_ENV[@]}" "$SBATCH" "$@"; }
 SQ() { "${SB_ENV[@]}" "$SQUEUE" "$@"; }
 SC() { "${SB_ENV[@]}" "$SCANCEL" "$@"; }
@@ -216,6 +260,14 @@ LANE_SUFFIX=""; [ "$LANE" = 1 ] || LANE_SUFFIX="+lane$LANE"   # '+' is in no rep
 LANE_OPT=""; [ "$LANE" = 1 ] || LANE_OPT=" --lane $LANE"        # the lane, as a command names it
 CHAIN="$ROOT/${REPO//\//-}$LANE_SUFFIX"          # one folder per repository and lane: STOP, next, status.json, the jobs' logs
 JOB_NAME="hpcw_runner_${REPO//\//-}$LANE_SUFFIX"  # unique per repository, lane and account: --dependency=singleton keys on it
+AUTO="$ROOT/autoscale"           # the controller's folder: autoscale.conf, STOP, next, status, its log, a folder per repository
+AUTO_JOB_NAME=hpcw_autoscale     # the controller's Slurm name, a singleton like a chain's
+auto_name() { printf 'hpcw_auto_%s' "${1//\//-}"; }   # OWNER/NAME -> the Slurm name of the controller's runner jobs for it
+case "$MODE" in
+  autoscale|autostop|control) CHAIN="$AUTO" JOB_NAME="$AUTO_JOB_NAME";;
+  # a runner job's own folder, so that runner jobs of one repository running at once never share a registration's record
+  once) CHAIN="$AUTO/${REPO//\//-}/jobs/${SLURM_JOB_ID:-none}" JOB_NAME=$(auto_name "$REPO");;
+esac
 IMAGE_REF=ghcr.io/actions/actions-runner
 
 # what the install job and every job of a chain are handed: grid_runner.sh's own options on the job's
@@ -366,6 +418,15 @@ chain_status() {
       last_word "$d/status.json" || say "  status.json unreadable"
     else say "  no job has written status.json yet"; fi
   done
+  if [ -f "$AUTO/autoscale.conf" ]; then
+    say "autoscale: ${REPOS:-$(conf_get repos)}, at most $(conf_get max_per_repo) runner jobs a repository and $(conf_get max_total) in all, labels $(conf_get labels), started $(conf_get started)$([ -e "$AUTO/STOP" ] && printf ', STOP written %s' "$(head -1 "$AUTO/STOP")")"
+    printf '%s\n' "$q" | awk -v n="$AUTO_JOB_NAME" '$3 == n { printf "  controller job %s %s, %s on %s\n", $1, $2, $4, ($5 == "" ? "no node yet" : $5) }'
+    printf '%s\n' "$q" | awk '$3 ~ /^hpcw_auto_/ { k = substr($3, 11); if ($2 == "PENDING") p[k]++; else r[k]++; s[k] = 1 }
+      END { for (k in s) printf "  runner jobs for %s: %d running, %d pending\n", k, r[k], p[k] }'
+    if [ -f "$AUTO/status" ]; then
+      say "  last word: $(sed -n 's/^state=//p' "$AUTO/status"), job $(sed -n 's/^job=//p' "$AUTO/status") on $(sed -n 's/^node=//p' "$AUTO/status"), last look $(sed -n 's/^look=//p' "$AUTO/status"), queued/runner jobs by repository: $(sed -n 's/^queue=//p' "$AUTO/status"), $(sed -n 's/^submitted=//p' "$AUTO/status") submitted since $(sed -n 's/^since=//p' "$AUTO/status")"
+    else say "  the controller has not written its status yet"; fi
+  fi
   return 0
 }
 
@@ -652,7 +713,7 @@ end_time() {
   printf '%s' $((start + HOURS * 3600))
 }
 iso() { date -u -d "@$1" +%FT%TZ 2>/dev/null || printf '%s' "$1"; }
-over() { [ "$(now)" -ge "$DEADLINE" ] || [ -e "$CHAIN/STOP" ]; }   # no new registration, and an idle runner ends
+over() { [ "$(now)" -ge "$DEADLINE" ] || [ -e "$CHAIN/STOP" ] || { [ "$MODE" = once ] && [ -e "$AUTO/STOP" ]; }; }   # no new registration, and an idle runner ends
 
 JOBS_DONE=0 RUNNER_ID="" RUNNER_NAME="" DEADLINE=0 SINCE="" IMAGE_VERSION="" LAST_STATE=""
 status_write() { # STATE [NOTE]: <chain dir>/status.json, what --status and a person read; the job asks the scheduler nothing
@@ -790,10 +851,12 @@ serve() {
   log "== runner job $SLURM_JOB_ID for $REPO on $(hostname -s), kernel $(uname -r)"
   mkdir -p "$CHAIN"
   if [ -e "$CHAIN/STOP" ]; then log "STOP is set ($CHAIN/STOP): the chain ends here; tools/grid_runner.sh --start --repo $REPO$LANE_OPT starts it again"; status_write stopped "STOP was set"; return 0; fi
+  if [ "$MODE" = once ] && [ -e "$AUTO/STOP" ]; then log "the controller's STOP is set ($AUTO/STOP): this runner job registers nothing"; status_write stopped "the controller's STOP was set"; return 0; fi
   job_args
-  successor || chained=0
+  if [ "$MODE" = once ]; then log "one GitHub job, then this job ends; no successor"; else successor || chained=0; fi
   DEADLINE=$(( $(end_time) - MARGIN * 60 ))
-  log "wall time ends $(iso "$(end_time)"); the last registration is made before $(iso "$DEADLINE") ($MARGIN minutes of margin)"
+  if [ "$MODE" = once ] && [ $(( $(now) + IDLE * 60 )) -lt "$DEADLINE" ]; then DEADLINE=$(( $(now) + IDLE * 60 )); fi
+  log "wall time ends $(iso "$(end_time)"); the last registration is made before $(iso "$DEADLINE") ($([ "$MODE" = once ] && echo "$IDLE minutes to take a job, " )$MARGIN minutes of margin)"
   status_write starting
   refuse_public; case $? in
     0) ;;
@@ -828,7 +891,9 @@ serve() {
       # an exit 0 with no worker's log ran no job: the registration gone, or the runner ended from outside
       [ "$RC" = 0 ] && ! busy && RC=nojob
       case "$RC" in
-        0) JOBS_DONE=$((JOBS_DONE + 1)); fails=0; chain_served; log "runner $RUNNER_NAME ended after its job ($JOBS_DONE done in this job)"; rm -f "$CHAIN/registered"; fresh_work; status_write idle; break;;
+        0) JOBS_DONE=$((JOBS_DONE + 1)); fails=0; chain_served; log "runner $RUNNER_NAME ended after its job ($JOBS_DONE done in this job)"; rm -f "$CHAIN/registered"; fresh_work; status_write idle
+           [ "$MODE" = once ] && ended=1
+           break;;
         2)
           fails=$((fails + 1)); keep_diag "$n"; log "the runner asked to be started again (a retryable error)"
           [ $fails -le 3 ] || { log "four times in a row: this job ends"; unregister "$RUNNER_ID"; fresh_work; end_state=failed end_note="the runner failed four times in a row"; ended=1; break; }
@@ -840,6 +905,8 @@ serve() {
           # registration would ask again until the image is newer
           keep_diag "$n"; unregister "$RUNNER_ID"; fresh_work
           stop_chain "the runner asks for a newer version than the image's $IMAGE_VERSION: tools/grid_runner.sh --install, then --start"
+          # every runner job the controller submits would ask the same, so the controller stops too
+          [ "$MODE" = once ] && printf '%s %s\n' "$(date -u +%FT%TZ)" "a runner asked for a newer version than the image's $IMAGE_VERSION: tools/grid_runner.sh --install, then --autoscale" > "$AUTO/STOP"
           end_state=stopped; ended=1; break;;
         *)
           fails=$((fails + 1)); keep_diag "$n"; unregister "$RUNNER_ID"; fresh_work
@@ -851,6 +918,8 @@ serve() {
     done
   done
   RUNNER_NAME=""
+  # a runner job that could not serve is counted for its repository, so the controller holds back
+  [ "$MODE" = once ] && [ "$end_state" = failed ] && printf '%s %s %s\n' "$(now)" "$SLURM_JOB_ID" "$end_note" >> "$AUTO/${REPO//\//-}/failed"
   case "$end_state" in
     failed) chain_failed "$end_note";;
     stopped) ;;
@@ -860,9 +929,173 @@ serve() {
   [ $chained = 1 ]
 }
 
+# ---- autoscaling: the controller and its runner jobs -----------------------------------------------------
+CONTROL_ARGS=() CONTROL_FLAGS=()
+control_args() { # what the controller's job is handed, and hands its successor
+  job_args
+  CONTROL_ARGS=(--control --repos "$REPOS" "${SITE_ARGS[@]}" --hours "$HOURS" --margin "$MARGIN"
+    --max-per-repo "$MAX_PER_REPO" --max-total "$MAX_TOTAL" --every "$EVERY" --idle "$IDLE")
+  [ -n "$LABELS" ] && CONTROL_ARGS+=(--labels "$LABELS")
+  [ -n "$CPUS" ] && CONTROL_ARGS+=(--cpus "$CPUS")
+  [ -n "$MEM" ] && CONTROL_ARGS+=(--mem "$MEM")
+  [ -n "$GRES" ] && CONTROL_ARGS+=(--gres "$GRES")
+  [ -n "${HPCW_RUNNER_PARTITION:-}" ] && CONTROL_ARGS+=(--partition "$HPCW_RUNNER_PARTITION")
+  [ -n "${HPCW_RUNNER_QOS:-}" ] && CONTROL_ARGS+=(--qos "$HPCW_RUNNER_QOS")
+  # the controller itself is small: it asks GitHub and the scheduler and runs nothing of a workflow's
+  CONTROL_FLAGS=(--time "$CONTROL_HOURS:00:00" ${QUEUE[@]+"${QUEUE[@]}"} --cpus-per-task 1 --mem 2G)
+}
+conf_get() { sed -n "s/^$1=//p" "$AUTO/autoscale.conf" 2>/dev/null | head -1; }
+auto_start() {
+  local v q out r
+  [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once)"
+  v=$(installed_version) || die "no runner image is installed under $IMAGES: tools/grid_runner.sh --install first, and wait for its job"
+  for r in ${REPOS//,/ }; do REPO=$r refuse_public || die "nothing started ($r)"; done
+  mkdir -p "$AUTO" || die "cannot create $AUTO"
+  q=$(SQ -h -u "$USER" -n "$AUTO_JOB_NAME" -o '%i %T' 2>&1) || die "squeue did not answer: $q"
+  [ -z "$q" ] || die "the controller is already queued or running (job $(printf '%s' "$q" | tr '\n' ' ' | sed 's/ *$//')); tools/grid_runner.sh --autoscale-stop ends it"
+  install_bin "$HERE" || die "nothing started"
+  rm -f "$AUTO/STOP" "$AUTO/next" "$AUTO/next.submitting"
+  control_args
+  { printf 'repos=%s\nmax_per_repo=%s\nmax_total=%s\nevery=%s\nidle=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nversion=%s\nstarted=%s\n' \
+      "$REPOS" "$MAX_PER_REPO" "$MAX_TOTAL" "$EVERY" "$IDLE" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$v" "$(date -u +%FT%TZ)"
+    printf 'runner_sbatch=%s\n' "${SB_FLAGS[*]}"; } > "$AUTO/autoscale.conf" || die "cannot write $AUTO/autoscale.conf"
+  out=$(SB --parsable --job-name "$AUTO_JOB_NAME" --dependency=singleton "${CONTROL_FLAGS[@]}" -D "$ROOT" --output "$AUTO/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${CONTROL_ARGS[@]}" 2>&1) \
+    || die "sbatch refused the controller's job: $out"
+  say "autoscale controller: job $(job_id "$out" || printf '%s' "$out"), $CONTROL_HOURS h a job, a successor queued by each; it looks every $EVERY s at ${REPOS//,/, }"
+  say "for each queued job asking runs-on: [self-hosted, grid${SITE:+, $SITE}${LABELS:+, ${LABELS//,/, }}] it submits one runner job (${SB_FLAGS[*]}), at most $MAX_PER_REPO for one repository and $MAX_TOTAL in all; each GitHub job must end within $MARGIN minutes of a runner job's wall time"
+  say "the caps are max_per_repo= and max_total= in $AUTO/autoscale.conf, read at every look; tools/grid_runner.sh --status shows it; --autoscale-stop ends it"
+}
+auto_stop() {
+  local q ids running cancel
+  mkdir -p "$AUTO" && date -u +%FT%TZ > "$AUTO/STOP" || die "cannot write $AUTO/STOP"
+  q=$(SQ -h -u "$USER" -o '%i %T %j' 2>&1) || die "squeue did not answer ($q); STOP is written, so the controller submits nothing more and ends at its next look"
+  [[ "$q" =~ ^[0-9A-Za-z_.+[:space:]-]*$ ]] || die "squeue answered something else than jobs: $q"
+  ids=$(printf '%s\n' "$q" | awk -v n="$AUTO_JOB_NAME" '$3 == n && $2 == "PENDING" { print $1 }' | tr '\n' ' ' | sed 's/ *$//')
+  running=$(printf '%s\n' "$q" | awk -v n="$AUTO_JOB_NAME" '$3 == n && $2 != "PENDING" && NF { print $1 }' | tr '\n' ' ' | sed 's/ *$//')
+  [ $NOW = 1 ] && ids="$ids${ids:+ }$running"
+  # runner jobs that have not started have taken no GitHub job: cancelling them fails nothing
+  cancel=$(printf '%s\n' "$q" | awk '$3 ~ /^hpcw_auto_/ && $2 == "PENDING" { print $1 }' | tr '\n' ' ' | sed 's/ *$//')
+  ids="$ids${cancel:+${ids:+ }$cancel}"
+  if [ -n "${ids// /}" ]; then
+    # shellcheck disable=SC2086
+    SC $ids || die "scancel failed; STOP is written, so the controller submits nothing more"
+    say "cancelled job ${ids// /, }"
+  else say "no job of the controller's was queued"; fi
+  if [ -n "$running" ] && [ $NOW = 0 ]; then say "the controller's job $running ends at its next look"; fi
+  say "STOP written: runner jobs busy with a GitHub job finish it, idle ones end within a minute; tools/grid_runner.sh --autoscale starts the controller again"
+}
+
+AUTO_LABELS=""   # the labels a runner of this site carries, as a JSON list, for matching a queued job's runs-on
+queued_jobs() { # OWNER/NAME -> how many of its jobs are queued asking only for labels these runners carry
+  local ids id c n=0
+  ids=$(GH api "repos/$1/actions/runs?status=queued&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null) || return 1
+  ids="$ids $(GH api "repos/$1/actions/runs?status=in_progress&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null)" || return 1
+  for id in $ids; do
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    c=$(GH api "repos/$1/actions/runs/$id/jobs?filter=latest&per_page=100" \
+      --jq "[.jobs[] | select(.status == \"queued\") | select((.labels - $AUTO_LABELS) | length == 0)] | length" 2>/dev/null) || continue
+    [[ "$c" =~ ^[0-9]+$ ]] && n=$((n + c))
+  done
+  printf '%s' "$n"
+}
+recent_failures() { # OWNER/NAME -> runner jobs of it that failed in the last 15 minutes
+  local f="$AUTO/${1//\//-}/failed" t; t=$(( $(now) - 900 ))
+  [ -f "$f" ] || { printf 0; return 0; }
+  awk -v t="$t" '$1 ~ /^[0-9]+$/ && $1 >= t { n++ } END { print n + 0 }' "$f"
+}
+prune_auto() { # a runner job's folder and log, two days after it ended
+  local d="$AUTO/${1//\//-}"
+  [ -d "$d" ] || return 0
+  find "$d/jobs" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -mtime +2 -exec rm -rf {} + 2>/dev/null
+  find "$d" -maxdepth 1 -type f -name 'runner-[0-9]*.log' -mtime +2 -delete 2>/dev/null
+  return 0
+}
+SUBMITTED=0 TOTAL_ALL=0 SUMMARY=""
+auto_look() { # OWNER/NAME: one look at its queue, and the runner jobs it needs within the caps
+  local r=$1 name queued q total waiting id st k i out failed d
+  name=$(auto_name "$r") d="$AUTO/${r//\//-}"
+  queued=$(queued_jobs "$r") || { log "$r: GitHub did not list its queued jobs; nothing submitted for it at this look"; SUMMARY="$SUMMARY $r=?"; return 0; }
+  q=$(SQ -h -u "$USER" -n "$name" -o '%i %T' 2>/dev/null) || { log "$r: squeue did not answer; nothing submitted for it at this look"; return 0; }
+  total=0 waiting=0
+  while read -r id st; do
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    total=$((total + 1))
+    # a pending job, or a running one whose runner has not taken a GitHub job, will take a queued one
+    if [ "$st" = PENDING ] || ! grep -q '"state":"busy"' "$d/jobs/$id/status.json" 2>/dev/null; then waiting=$((waiting + 1)); fi
+  done <<< "$q"
+  k=$((queued - waiting))
+  [ $k -le $((MAX_PER_REPO - total)) ] || k=$((MAX_PER_REPO - total))
+  [ $k -le $((MAX_TOTAL - TOTAL_ALL)) ] || k=$((MAX_TOTAL - TOTAL_ALL))
+  failed=$(recent_failures "$r")
+  if [ $k -gt 0 ] && [ "$failed" -ge 3 ]; then
+    log "$r: $failed of its runner jobs failed in the last 15 minutes; nothing submitted for it until fewer have"; k=0
+  fi
+  [ $k -gt 0 ] || k=0
+  i=0
+  if [ $k -gt 0 ]; then
+    mkdir -p "$d/jobs" || { log "cannot create $d"; return 0; }
+    REPO=$r; job_args
+    while [ $i -lt $k ]; do
+      out=$(SB --parsable --job-name "$name" "${SB_FLAGS[@]}" -D "$ROOT" --output "$d/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --once "${JOB_ARGS[@]}" --idle "$IDLE" 2>&1) \
+        || { log "$r: sbatch refused a runner job: $(printf '%s' "$out" | tail -1)"; break; }
+      i=$((i + 1))
+    done
+  fi
+  TOTAL_ALL=$((TOTAL_ALL + i)) SUBMITTED=$((SUBMITTED + i))
+  [ "$queued" = 0 ] && [ $i = 0 ] || log "$r: $queued queued, $total runner jobs ($waiting yet to take one), $i submitted"
+  SUMMARY="$SUMMARY $r=$queued/$((total + i))"
+}
+auto_status() { # STATE [NOTE]: <runner dir>/autoscale/status, what --status reads
+  printf 'state=%s\njob=%s\nnode=%s\nsince=%s\nlook=%s\nsubmitted=%s\nqueue=%s\nnote=%s\n' "$1" "${SLURM_JOB_ID:-}" "$(hostname -s)" "$SINCE" \
+    "$(date -u +%FT%TZ)" "$SUBMITTED" "${SUMMARY# }" "${2:-}" > "$AUTO/status.new" && mv -f "$AUTO/status.new" "$AUTO/status"
+}
+control() {
+  local chained=1 looks=0 r all v l repos=""
+  [ -n "${SLURM_JOB_ID:-}" ] || die "--control runs inside the controller's job; start it with --autoscale"
+  say() { log "$@"; }
+  [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once)"
+  SINCE=$(date -u +%FT%TZ)
+  log "== autoscale controller job $SLURM_JOB_ID on $(hostname -s), for ${REPOS//,/, }"
+  mkdir -p "$AUTO"
+  if [ -e "$AUTO/STOP" ]; then log "STOP is set ($AUTO/STOP): the controller ends here; tools/grid_runner.sh --autoscale starts it again"; auto_status stopped "STOP was set"; return 0; fi
+  control_args
+  JOB_ARGS=("${CONTROL_ARGS[@]}") SB_FLAGS=("${CONTROL_FLAGS[@]}")
+  successor || chained=0
+  DEADLINE=$(( $(HOURS=$CONTROL_HOURS; end_time) - 5 * 60 ))
+  AUTO_LABELS='["self-hosted","linux","x64","grid"'; for l in ${SITE:+"$SITE"} ${LABELS//,/ }; do AUTO_LABELS="$AUTO_LABELS,\"$l\""; done; AUTO_LABELS="$AUTO_LABELS]"
+  # a public repository gets no runner (GitHub's own advice: its forks' pull requests could run on the grid)
+  for r in ${REPOS//,/ }; do
+    v=$(REPO=$r visibility) || { log "$r: gh could not read its visibility; it is looked at all the same, and each runner job reads it again"; repos="$repos $r"; continue; }
+    [ "$v" = public ] && { log "$r is public: no runner for it"; continue; }
+    repos="$repos $r"
+  done
+  log "looking every $EVERY s until $(iso "$DEADLINE") at$repos; runner jobs: ${SB_FLAGS[*]:-} (one GitHub job each, $IDLE minutes to take one)"
+  auto_status running
+  while ! over; do
+    v=$(conf_get max_per_repo); [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 0 ] && [ "$v" -le 50 ] && MAX_PER_REPO=$v
+    v=$(conf_get max_total); [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 0 ] && [ "$v" -le 200 ] && MAX_TOTAL=$v
+    all=$(SQ -h -u "$USER" -o '%j' 2>/dev/null) || { log "squeue did not answer; this look submits nothing"; sleep "$EVERY"; continue; }
+    TOTAL_ALL=$(printf '%s\n' "$all" | grep -c '^hpcw_auto_') SUMMARY=""
+    for r in $repos; do auto_look "$r"; done
+    auto_status running "at most $MAX_PER_REPO a repository, $MAX_TOTAL in all"
+    looks=$((looks + 1))
+    [ $((looks % 60)) = 1 ] && for r in $repos; do prune_auto "$r"; done
+    # the tests' bound on the looks of one job (their sleep returns at once)
+    [ -n "${HPCW_AUTOSCALE_LOOKS:-}" ] && [ "$looks" -ge "$HPCW_AUTOSCALE_LOOKS" ] && break
+    sleep "$EVERY"
+  done
+  auto_status "$([ -e "$AUTO/STOP" ] && echo stopped || echo ending)" "$looks looks, $SUBMITTED runner jobs submitted in this job"
+  log "== controller job $SLURM_JOB_ID ends: $looks looks, $SUBMITTED runner jobs submitted$([ $chained = 0 ] && echo "; no successor could be queued, so the controller ends here: tools/grid_runner.sh --autoscale starts it again")"
+  [ $chained = 1 ]
+}
+
 case "$MODE" in
   install) install_start;;
   start) chain_start;;
+  autoscale) auto_start;;
+  autostop) auto_stop;;
+  control) control;;
+  once) serve;;
   stop) chain_stop;;
   status) chain_status;;
   gatekey) gate_on;;

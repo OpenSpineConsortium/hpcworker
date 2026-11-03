@@ -333,7 +333,15 @@ measured 2026-11-03: a check waited 42 minutes behind a full proof, a board job 
 (`+laneN` after the first's, a character no GitHub repository's name holds) and the same labels, so
 GitHub hands each job to whichever lane is idle. Each lane is one more job of the size `--start` gives it
 held on the worker queue for as long as the lane runs; `--status --repo` shows every lane, `--stop`
-ends the lane it names, and the ssh gate speaks for the first alone. Everything is designed and tested against
+ends the lane it names, and the ssh gate speaks for the first alone. `--autoscale --repos
+OWNER/NAME,OWNER/NAME --site wayne` serves a queue of any length without lanes: a controller, one small Slurm job
+on the same queue that queues its own successor, looks every minute at each repository's queued jobs that ask for
+the runner's labels and submits one runner job for each that no runner job is already waiting to take; that job
+registers one just-in-time runner, runs one GitHub job and ends, or ends after `--idle` minutes (10) with no
+job taken. It never holds more than `--max-per-repo` runner jobs for one repository (6) or `--max-total` in all
+(12), pending ones counted, read again at every look from `autoscale/autoscale.conf` under the runner's folder,
+where a person may change them; `--status` shows it, and `--autoscale-stop` ends it, cancelling the controller's
+queued job and every runner job not yet started. Everything is designed and tested against
 stand-ins (`tools/tests/test_grid_runner.sh`); what the grid has not yet shown is in
 `docs/OPEN_QUESTIONS.md`.
 The ssh gate lets a workflow on GitHub's own machine start, read and end that chain, so the chain need
