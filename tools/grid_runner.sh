@@ -52,8 +52,9 @@
 # wall time, one registration at a time: `gh api` mints a just-in-time runner
 # (name grid-<site>-<job>-<n>; labels self-hosted, linux and x64, which GitHub gives a runner
 # config.sh registers but not one registered just in time, whose labels are exactly the list sent
-# (measured 2026-11-03: a job asking self-hosted waited for ever beside an idle runner labelled
-# grid,wayne alone), then grid, the site's name and --labels) into a 0600 file on the node's disk,
+# (measured at wayne: 2026-11-03, a job asking self-hosted waited for ever beside an idle runner
+# labelled grid and the site's name alone), then grid, the site's name and --labels) into a 0600
+# file on the node's disk,
 # the three files it carries are
 # written 0600 into the runner's folder, that file goes, and the runner listens for one job. A job
 # that completes ends the runner (GitHub removes the registration itself), the work folder and the
