@@ -8,7 +8,9 @@
 # (grid_runner.sh --serve). The wall time, the partition and the QoS (the site profile's worker
 # queue, or --partition and --qos), the cpus, the memory and any GPU arrive on sbatch's command line
 # from --start's options, which outrank the lines below, so this file names no site's queue and the
-# chain's size is the person's choice. Requeueable: a requeued job finds its successor already
+# chain's size is the person's choice. The autoscaling controller (grid_runner.sh --autoscale) and
+# the runner jobs it submits run through this file too, their mode (--control, --once) after --serve
+# on the command line, which the last mode named wins. Requeueable: a requeued job finds its successor already
 # queued, deletes the registration the earlier run left and registers afresh. Nothing here reads a
 # secret; gh uses the account's own sign-in, and no token a shell exported rides into gh, the
 # container or the next job.
