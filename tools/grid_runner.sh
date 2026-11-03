@@ -21,6 +21,8 @@
 #   tools/grid_runner.sh --autoscale --repos OWNER/NAME[,OWNER/NAME...] --site S [--max-per-repo 6]
 #                        [--max-total 12] [--every 60] [--idle 10] [--hours 2] [the --start sizes]
 #   tools/grid_runner.sh --autoscale-stop --site S [--now]
+#   tools/grid_runner.sh --train --repos OWNER/NAME[,OWNER/NAME...] --site S [--every 60]
+#   tools/grid_runner.sh --train-stop --site S [--now]
 #   tools/grid_runner.sh --gate-key 'ssh-ed25519 AAAA... [comment]' --repo OWNER/NAME --site S [the --start options]
 #   tools/grid_runner.sh --gate-off --repo OWNER/NAME --site S
 #   tools/grid_runner.sh --gate-setup --repo OWNER/NAME --site S [the --start options]
@@ -64,6 +66,22 @@
 # started; a runner job busy with a GitHub job finishes it, an idle one ends within a minute, and
 # --now cancels the running controller too. The chains and the controller may serve one repository
 # at once: a job goes to whichever runner GitHub hands it to.
+#
+# --train runs a merge train, where GitHub's own merge queue is not offered (a private repository
+# off Enterprise Cloud): one small Slurm job (1 CPU, 1 GB, 8 hours, its successor queued first)
+# that looks every --every seconds at each repository --repos names. It takes the open pull
+# requests to the default branch that are ready (not a draft) and armed (GitHub's auto-merge
+# enabled), a blocker first (the pull request, or an issue it closes, labelled blocker), then the
+# oldest; and for each in that order: one GitHub calls behind gets the default branch brought in
+# (update-branch), once for its head; one in conflict is told so in a comment, once for its head,
+# and passed by; the first whose head is green is merged, and the look ends, since the default
+# branch has moved. Green is green.py's rule and the branch's own: a check named check succeeded,
+# every status check the branch's rules require succeeded or was skipped, and none failed, timed
+# out, wants action or is still going; the merge names the head it judged, so a push after the
+# look merges nothing. The merges are counted in <runner dir>/train/merged, which --status reads
+# as the pull requests landed in the last hour. --train-stop writes STOP and cancels the train's
+# queued job (--now its running one too). GitHub is reached with the account's own gh sign-in, as
+# the chains reach it; the train runs no workflow's code and needs no runner image.
 #
 # --install: one job on a compute node (tools/grid_runner_install.sbatch) pulls GitHub's own runner
 # image, ghcr.io/actions/actions-runner:<version> (latest unless --version says), as a SIF into
@@ -166,6 +184,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --every) need "$@"; EVERY="$2"; shift 2;; --idle) need "$@"; IDLE="$2"; shift 2;;
   # the controller's own job and a runner job it submits, as each is handed its options
   --control) MODE=control; shift;; --once) MODE=once; shift;;
+  --train) MODE=train; shift;; --train-stop) MODE=trainstop; shift;; --train-job) MODE=trainjob; shift;;
   # the options that size a chain, kept as given too: --gate-key writes them into the gate's line
   --labels|--hours|--margin|--cpus|--mem|--gres|--partition|--qos) need "$@"; STARTOPTS+=("$1" "$2")
     case "$1" in
@@ -201,7 +220,7 @@ case "$MODE" in autoscale) [ $HOURS_GIVEN = 1 ] || HOURS=2;; esac
 if [ -n "$REPOS" ]; then
   [[ "$REPOS" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+/[A-Za-z0-9._-]+){0,19}$ ]] || die "--repos is OWNER/NAME,OWNER/NAME, at most 20: $REPOS"
 fi
-case "$MODE" in autoscale|control) [ -n "$REPOS" ] || die "--$MODE needs --repos OWNER/NAME[,OWNER/NAME...]";; esac
+case "$MODE" in autoscale|control|train|trainjob) [ -n "$REPOS" ] || die "--${MODE/trainjob/train-job} needs --repos OWNER/NAME[,OWNER/NAME...]";; esac
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
 case "$MODE" in start|stop|serve|once|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
@@ -228,7 +247,7 @@ site_profile() {
   [ -n "${HPCW_RUNNER_QOS:-}" ] || HPCW_RUNNER_QOS=$(prof_get qos_batch) || die "profile $f unreadable"
   STATE_DIR=$(prof_get shared_state_dir) || die "profile $f unreadable"
 }
-case "$MODE" in install|start|stop|status|autoscale|autostop|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
+case "$MODE" in install|start|stop|status|autoscale|autostop|train|trainstop|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
 [[ "${HPCW_RUNNER_PARTITION:-}${HPCW_RUNNER_QOS:-}" =~ ^[A-Za-z0-9._,-]*$ ]] || die "bad --partition or --qos"
 [[ "$RUNTIME_BIN_GIVEN$RUNTIME_MODULE_GIVEN" =~ ^[A-Za-z0-9._/-]*$ ]] || die "bad --runtime-bin or --runtime-module"
 if [ -z "${HPCW_RUNNER_DIR:-}" ]; then
@@ -246,7 +265,7 @@ slurm_bin() { command -v "$1" || echo "/opt/hpcw/slurm/bin/$1"; }
 SBATCH=$(slurm_bin sbatch) SQUEUE=$(slurm_bin squeue) SCANCEL=$(slurm_bin scancel)
 # sbatch hands a job the environment it was typed in (--export=ALL): never a token with it, and
 # from inside a job never this node's per-job temp either (each job makes its own)
-SB_ENV=(env -u GITHUB_TOKEN -u GH_TOKEN); case "$MODE" in serve|pull|once|control) SB_ENV+=(-u TMPDIR);; esac
+SB_ENV=(env -u GITHUB_TOKEN -u GH_TOKEN); case "$MODE" in serve|pull|once|control|trainjob) SB_ENV+=(-u TMPDIR);; esac
 SB() { "${SB_ENV[@]}" "$SBATCH" "$@"; }
 SQ() { "${SB_ENV[@]}" "$SQUEUE" "$@"; }
 SC() { "${SB_ENV[@]}" "$SCANCEL" "$@"; }
@@ -263,7 +282,10 @@ JOB_NAME="hpcw_runner_${REPO//\//-}$LANE_SUFFIX"  # unique per repository, lane 
 AUTO="$ROOT/autoscale"           # the controller's folder: autoscale.conf, STOP, next, status, its log, a folder per repository
 AUTO_JOB_NAME=hpcw_autoscale     # the controller's Slurm name, a singleton like a chain's
 auto_name() { printf 'hpcw_auto_%s' "${1//\//-}"; }   # OWNER/NAME -> the Slurm name of the controller's runner jobs for it
+TRAIN="$ROOT/train"              # the merge train's folder: train.conf, STOP, next, status, merged, its log
+TRAIN_JOB_NAME=hpcw_train
 case "$MODE" in
+  train|trainstop|trainjob) CHAIN="$TRAIN" JOB_NAME="$TRAIN_JOB_NAME";;
   autoscale|autostop|control) CHAIN="$AUTO" JOB_NAME="$AUTO_JOB_NAME";;
   # a runner job's own folder, so that runner jobs of one repository running at once never share a registration's record
   once) CHAIN="$AUTO/${REPO//\//-}/jobs/${SLURM_JOB_ID:-none}" JOB_NAME=$(auto_name "$REPO");;
@@ -426,6 +448,12 @@ chain_status() {
     if [ -f "$AUTO/status" ]; then
       say "  last word: $(sed -n 's/^state=//p' "$AUTO/status"), job $(sed -n 's/^job=//p' "$AUTO/status") on $(sed -n 's/^node=//p' "$AUTO/status"), last look $(sed -n 's/^look=//p' "$AUTO/status"), queued/runner jobs by repository: $(sed -n 's/^queue=//p' "$AUTO/status"), $(sed -n 's/^submitted=//p' "$AUTO/status") submitted since $(sed -n 's/^since=//p' "$AUTO/status")"
     else say "  the controller has not written its status yet"; fi
+  fi
+  if [ -f "$TRAIN/train.conf" ]; then
+    say "merge train: $(sed -n 's/^repos=//p' "$TRAIN/train.conf"), started $(sed -n 's/^started=//p' "$TRAIN/train.conf")$([ -e "$TRAIN/STOP" ] && printf ', STOP written %s' "$(head -1 "$TRAIN/STOP")")"
+    printf '%s\n' "$q" | awk -v n="$TRAIN_JOB_NAME" '$3 == n { printf "  train job %s %s, %s on %s\n", $1, $2, $4, ($5 == "" ? "no node yet" : $5) }'
+    say "  merged in the last hour: $(awk -v t="$(( $(date +%s) - 3600 ))" '$1 >= t { n++ } END { print n + 0 }' "$TRAIN/merged" 2>/dev/null || echo 0), in all: $(wc -l < "$TRAIN/merged" 2>/dev/null || echo 0)"
+    [ -f "$TRAIN/status" ] && say "  last word: $(sed -n 's/^state=//p' "$TRAIN/status"), last look $(sed -n 's/^look=//p' "$TRAIN/status"), ready and armed by repository: $(sed -n 's/^queue=//p' "$TRAIN/status")"
   fi
   return 0
 }
@@ -1069,7 +1097,7 @@ control() {
     [ "$v" = public ] && { log "$r is public: no runner for it"; continue; }
     repos="$repos $r"
   done
-  log "looking every $EVERY s until $(iso "$DEADLINE") at$repos; runner jobs: ${SB_FLAGS[*]:-} (one GitHub job each, $IDLE minutes to take one)"
+  log "looking every $EVERY s until $(iso "$DEADLINE") at$repos; runner jobs of $HOURS h${CPUS:+, $CPUS CPUs}${MEM:+, $MEM}, one GitHub job each, $IDLE minutes to take one"
   auto_status running
   while ! over; do
     v=$(conf_get max_per_repo); [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 0 ] && [ "$v" -le 50 ] && MAX_PER_REPO=$v
@@ -1089,9 +1117,144 @@ control() {
   [ $chained = 1 ]
 }
 
+# ---- the merge train -------------------------------------------------------------------------------------
+TRAIN_ARGS=() TRAIN_FLAGS=() TRAIN_MERGED=0 TRAIN_SUMMARY=""
+train_args() {
+  job_args
+  TRAIN_ARGS=(--train-job --repos "$REPOS" "${SITE_ARGS[@]}" --every "$EVERY")
+  TRAIN_FLAGS=(--time "$CONTROL_HOURS:00:00" ${QUEUE[@]+"${QUEUE[@]}"} --cpus-per-task 1 --mem 1G)
+}
+train_start() {
+  local q out
+  [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once)"
+  mkdir -p "$TRAIN" || die "cannot create $TRAIN"
+  q=$(SQ -h -u "$USER" -n "$TRAIN_JOB_NAME" -o '%i %T' 2>&1) || die "squeue did not answer: $q"
+  [ -z "$q" ] || die "the train is already queued or running (job $(printf '%s' "$q" | tr '\n' ' ' | sed 's/ *$//')); tools/grid_runner.sh --train-stop ends it"
+  install_bin "$HERE" || die "nothing started"
+  rm -f "$TRAIN/STOP" "$TRAIN/next" "$TRAIN/next.submitting"
+  train_args
+  printf 'repos=%s\nevery=%s\nstarted=%s\n' "$REPOS" "$EVERY" "$(date -u +%FT%TZ)" > "$TRAIN/train.conf" || die "cannot write $TRAIN/train.conf"
+  out=$(SB --parsable --job-name "$TRAIN_JOB_NAME" --dependency=singleton "${TRAIN_FLAGS[@]}" -D "$ROOT" --output "$TRAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${TRAIN_ARGS[@]}" 2>&1) \
+    || die "sbatch refused the train's job: $out"
+  say "merge train: job $(job_id "$out" || printf '%s' "$out"), $CONTROL_HOURS h a job, a successor queued by each; it looks every $EVERY s at ${REPOS//,/, }"
+  say "it merges, one a look, the first ready and armed pull request whose head is green, a blocker first, then the oldest; tools/grid_runner.sh --status shows it; --train-stop ends it"
+}
+train_stop() {
+  local q ids running
+  mkdir -p "$TRAIN" && date -u +%FT%TZ > "$TRAIN/STOP" || die "cannot write $TRAIN/STOP"
+  q=$(SQ -h -u "$USER" -n "$TRAIN_JOB_NAME" -o '%i %T' 2>&1) || die "squeue did not answer ($q); STOP is written, so the train merges nothing more"
+  [[ "$q" =~ ^[0-9A-Z_[:space:]]*$ ]] || die "squeue answered something else than jobs: $q"
+  ids=$(printf '%s\n' "$q" | awk '$2 == "PENDING" { print $1 }' | tr '\n' ' ' | sed 's/ *$//')
+  running=$(printf '%s\n' "$q" | awk '$2 != "PENDING" && NF { print $1 }' | tr '\n' ' ' | sed 's/ *$//')
+  [ $NOW = 1 ] && ids="$ids${ids:+ }$running"
+  if [ -n "${ids// /}" ]; then
+    # shellcheck disable=SC2086
+    SC $ids || die "scancel failed; STOP is written, so the train merges nothing more"
+    say "cancelled job ${ids// /, }"
+  else say "no job of the train's was queued"; fi
+  if [ -n "$running" ] && [ $NOW = 0 ]; then say "the train's job $running ends at its next look"; fi
+  say "STOP written: the train merges nothing more; tools/grid_runner.sh --train starts it again"
+}
+# the open pull requests, with what the order and the merge need, in one GraphQL call a repository
+TRAIN_QUERY='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { defaultBranchRef { name } pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) { nodes { number isDraft createdAt headRefOid baseRefName mergeStateStatus autoMergeRequest { enabledAt } labels(first: 20) { nodes { name } } closingIssuesReferences(first: 5) { nodes { labels(first: 20) { nodes { name } } } } } } } }'
+# ready and armed, to the default branch, as "<0 for a blocker, else 1> <created> <number> <head> <merge state>"
+TRAIN_ROWS='.data.repository as $r | $r.pullRequests.nodes[] | select(.isDraft | not) | select(.autoMergeRequest != null) | select(.baseRefName == $r.defaultBranchRef.name) | [(if ([.labels.nodes[].name, .closingIssuesReferences.nodes[].labels.nodes[].name] | map(select(. == "blocker")) | length) > 0 then 0 else 1 end), .createdAt, .number, .headRefOid, .mergeStateStatus] | @tsv'
+train_required() { # OWNER/NAME BRANCH -> the status checks the branch's rules require, as a JSON list
+  local out
+  out=$(GH api "repos/$1/rules/branches/$2" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique' 2>/dev/null) || return 1
+  [[ "$out" =~ ^\[.*\]$ ]] || return 1
+  printf '%s' "$out"
+}
+train_green() { # OWNER/NAME SHA REQUIRED_JSON -> "green" or why not
+  GH api "repos/$1/commits/$2/check-runs?per_page=100" --jq "
+    [.check_runs[] | select(.conclusion == \"failure\" or .conclusion == \"timed_out\" or .conclusion == \"action_required\") | .name] as \$bad
+    | [.check_runs[] | select(.status != \"completed\") | .name] as \$going
+    | [.check_runs[] | select(.conclusion == \"success\" or .conclusion == \"skipped\" or .conclusion == \"neutral\") | .name] as \$ok
+    | ($3 - \$ok) as \$missing
+    | if ([.check_runs[] | select(.name == \"check\" and .conclusion == \"success\")] | length) > 0 and (\$bad | length) == 0 and (\$going | length) == 0 and (\$missing | length) == 0
+      then \"green\" else \"failed \(\$bad) going \(\$going) missing \(\$missing)\" end" 2>/dev/null || printf 'unread'
+}
+train_once() { # OWNER/NAME N SHA KIND: 0 the first time this head meets KIND, so it is acted on once
+  local f="$TRAIN/done/${1//\//-}-$2-$3-$4"
+  [ -e "$f" ] && return 1
+  mkdir -p "$TRAIN/done" && : > "$f"
+}
+train_look() { # OWNER/NAME: one look; at most one merge
+  local r=$1 rows base req line blk created n sha state v out lines=()
+  rows=$(GH api graphql -f query="$TRAIN_QUERY" -F owner="${r%/*}" -F name="${r#*/}" --jq "$TRAIN_ROWS" 2>/dev/null) \
+    || { log "$r: GitHub did not list its pull requests; nothing done at this look"; TRAIN_SUMMARY="$TRAIN_SUMMARY $r=?"; return 0; }
+  base=$(GH api "repos/$r" --jq .default_branch 2>/dev/null) || base=main
+  req=$(train_required "$r" "$base") || { log "$r: its branch's rules could not be read; nothing merged at this look"; TRAIN_SUMMARY="$TRAIN_SUMMARY $r=?"; return 0; }
+  [ -n "$rows" ] && mapfile -t lines < <(printf '%s\n' "$rows" | sort)
+  TRAIN_SUMMARY="$TRAIN_SUMMARY $r=${#lines[@]}"
+  for line in ${lines[@]+"${lines[@]}"}; do
+    IFS=$'\t' read -r blk created n sha state <<< "$line"
+    [[ "$n" =~ ^[0-9]+$ ]] && [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+    case "$state" in
+      DIRTY)
+        if train_once "$r" "$n" "$sha" conflict; then
+          GH api -X POST "repos/$r/issues/$n/comments" -f body="The merge train passes this pull request by: it conflicts with $base at ${sha:0:12}. Bring $base in, and the train takes it in its turn once its checks are green." --silent >/dev/null 2>&1 \
+            && log "$r: #$n conflicts with $base; said so" || log "$r: #$n conflicts with $base; the comment was refused"
+        fi
+        continue;;
+      BEHIND)
+        if train_once "$r" "$n" "$sha" behind; then
+          out=$(GH api -X PUT "repos/$r/pulls/$n/update-branch" -f expected_head_sha="$sha" --jq .message 2>&1) \
+            && log "$r: #$n is behind $base; $base brought in ($out)" || log "$r: #$n is behind $base; update-branch refused: $(printf '%s' "$out" | tail -1)"
+        fi
+        continue;;
+    esac
+    v=$(train_green "$r" "$sha" "$req")
+    [ "$v" = green ] || continue
+    out=$(GH api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$sha" --jq .merged 2>&1)
+    if [ "$out" = true ]; then
+      TRAIN_MERGED=$((TRAIN_MERGED + 1))
+      printf '%s %s %s %s\n' "$(date -u +%s)" "$r" "$n" "$sha" >> "$TRAIN/merged"
+      log "$r: merged #$n at ${sha:0:12}$([ "$blk" = 0 ] && echo ', a blocker')"
+      return 0
+    fi
+    log "$r: #$n is green but the merge was refused: $(printf '%s' "$out" | tail -1)"
+  done
+  return 0
+}
+train_status() { # STATE [NOTE]
+  printf 'state=%s\njob=%s\nnode=%s\nsince=%s\nlook=%s\nmerged=%s\nqueue=%s\nnote=%s\n' "$1" "${SLURM_JOB_ID:-}" "$(hostname -s)" "$SINCE" \
+    "$(date -u +%FT%TZ)" "$TRAIN_MERGED" "${TRAIN_SUMMARY# }" "${2:-}" > "$TRAIN/status.new" && mv -f "$TRAIN/status.new" "$TRAIN/status"
+}
+train_job() {
+  local chained=1 looks=0 r
+  [ -n "${SLURM_JOB_ID:-}" ] || die "--train-job runs inside the train's job; start it with --train"
+  say() { log "$@"; }
+  [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once)"
+  SINCE=$(date -u +%FT%TZ)
+  log "== merge train job $SLURM_JOB_ID on $(hostname -s), for ${REPOS//,/, }"
+  mkdir -p "$TRAIN"
+  if [ -e "$TRAIN/STOP" ]; then log "STOP is set ($TRAIN/STOP): the train ends here; tools/grid_runner.sh --train starts it again"; train_status stopped "STOP was set"; return 0; fi
+  train_args
+  JOB_ARGS=("${TRAIN_ARGS[@]}") SB_FLAGS=("${TRAIN_FLAGS[@]}")
+  successor || chained=0
+  DEADLINE=$(( $(HOURS=$CONTROL_HOURS; end_time) - 5 * 60 ))
+  log "looking every $EVERY s until $(iso "$DEADLINE")"
+  train_status running
+  while ! over; do
+    TRAIN_SUMMARY=""
+    for r in ${REPOS//,/ }; do train_look "$r"; done
+    train_status running "ready and armed pull requests by repository at the last look"
+    looks=$((looks + 1))
+    [ -n "${HPCW_AUTOSCALE_LOOKS:-}" ] && [ "$looks" -ge "$HPCW_AUTOSCALE_LOOKS" ] && break
+    sleep "$EVERY"
+  done
+  train_status "$([ -e "$TRAIN/STOP" ] && echo stopped || echo ending)" "$looks looks, $TRAIN_MERGED merged in this job"
+  log "== train job $SLURM_JOB_ID ends: $looks looks, $TRAIN_MERGED merged$([ $chained = 0 ] && echo "; no successor could be queued, so the train ends here: tools/grid_runner.sh --train starts it again")"
+  [ $chained = 1 ]
+}
+
 case "$MODE" in
   install) install_start;;
   start) chain_start;;
+  train) train_start;;
+  trainstop) train_stop;;
+  trainjob) train_job;;
   autoscale) auto_start;;
   autostop) auto_stop;;
   control) control;;

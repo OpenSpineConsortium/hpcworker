@@ -21,6 +21,16 @@
 #       a repository's workflow runs in state S: $SHIM_GH/runs/O-N/S (GitHub's JSON), or none
 #   gh api repos/O/N/actions/runs/ID/jobs[?query] [--jq EXPR]
 #       a run's jobs: $SHIM_GH/runs/O-N/jobs-ID (GitHub's JSON), or none
+#   gh api graphql -f query=Q -F owner=O -F name=N [--jq EXPR]
+#       answers $SHIM_GH/graphql/O-N (GitHub's JSON), or no pull requests
+#   gh api repos/O/N/rules/branches/B [--jq EXPR]
+#       the rules that apply to the branch: $SHIM_GH/rules/O-N-B, or none
+#   gh api -X PUT repos/O/N/pulls/K/merge -f merge_method=M -f sha=S [--jq EXPR]
+#       appends "K S" to $SHIM_GH/merged; 405 while $SHIM_GH/refuse-merge exists
+#   gh api -X PUT repos/O/N/pulls/K/update-branch -f expected_head_sha=S [--jq EXPR]
+#       appends "K S" to $SHIM_GH/updated
+#   gh api -X POST repos/O/N/issues/K/comments -f body=B --silent
+#       appends "K<tab>B" to $SHIM_GH/comments
 #   gh api -X DELETE repos/O/N/actions/runners/ID --silent
 #       appends ID to $SHIM_GH/deleted; 404 while $SHIM_GH/delete-404 exists
 # While $SHIM_GH/offline exists every call fails as gh does without a network. Anything else is refused.
@@ -34,7 +44,7 @@ printf 'gh %s\n' "$*" >> "$G/calls"
 shift
 ep="" jq_expr="" method="" input="" fields=()
 while [ $# -gt 0 ]; do case "$1" in
-  -f|--raw-field) fields+=("$2"); shift 2;;
+  -f|--raw-field|-F|--field) fields+=("$2"); shift 2;;
   --jq|-q) jq_expr=$2; shift 2;;
   -X|--method) method=$2; shift 2;;
   --input) input=$2; shift 2;;
@@ -60,7 +70,7 @@ if [[ "$ep" =~ ^repos/([^/]+/[^/]+)$ ]]; then
   v=$(cat "$G/visibility" 2>/dev/null); v=${v:-private}
   case "$v" in private|internal|public) ;; *) echo "gh: HTTP 404: Not Found (https://api.github.com/$ep)" >&2; exit 1;; esac
   p=true; [ "$v" = public ] && p=false
-  answer "$(printf '{"full_name":"%s","private":%s,"visibility":"%s"}' "${BASH_REMATCH[1]}" "$p" "$v")"; exit $?
+  answer "$(printf '{"full_name":"%s","private":%s,"visibility":"%s","default_branch":"main"}' "${BASH_REMATCH[1]}" "$p" "$v")"; exit $?
 fi
 if [[ "$ep" =~ ^repos/([^/]+/[^/]+)/actions/runners/generate-jitconfig$ ]]; then
   [ "$method" = POST ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep): the registration is a POST" >&2; exit 1; }
@@ -119,6 +129,33 @@ if [[ "$ep" =~ ^repos/([^/]+)/([^/]+)/actions/runs/([0-9]+)/jobs(\?.*)?$ ]]; the
   f="$G/runs/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}/jobs-${BASH_REMATCH[3]}"; json='{"total_count":0,"jobs":[]}'
   [ -f "$f" ] && json=$(cat "$f")
   answer "$json"; exit $?
+fi
+fld_of() { local f; for f in "${fields[@]}"; do case "$f" in "$1"=*) printf '%s' "${f#*=}"; return 0;; esac; done; return 1; }
+if [ "$ep" = graphql ]; then
+  f="$G/graphql/$(fld_of owner)-$(fld_of name)"; json='{"data":{"repository":{"defaultBranchRef":{"name":"main"},"pullRequests":{"nodes":[]}}}}'
+  [ -f "$f" ] && json=$(cat "$f")
+  answer "$json"; exit $?
+fi
+if [[ "$ep" =~ ^repos/([^/]+)/([^/]+)/rules/branches/([^/]+)$ ]]; then
+  f="$G/rules/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"; json='[]'
+  [ -f "$f" ] && json=$(cat "$f")
+  answer "$json"; exit $?
+fi
+if [[ "$ep" =~ ^repos/[^/]+/[^/]+/pulls/([0-9]+)/merge$ ]]; then
+  [ "$method" = PUT ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep)" >&2; exit 1; }
+  [ -e "$G/refuse-merge" ] && { echo '{"message":"Required status check \"gate\" is expected."}'; echo "gh: Required status check (HTTP 405)" >&2; exit 1; }
+  printf '%s %s\n' "${BASH_REMATCH[1]}" "$(fld_of sha)" >> "$G/merged"
+  answer '{"sha":"0000000000000000000000000000000000000000","merged":true,"message":"Pull Request successfully merged"}'; exit $?
+fi
+if [[ "$ep" =~ ^repos/[^/]+/[^/]+/pulls/([0-9]+)/update-branch$ ]]; then
+  [ "$method" = PUT ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep)" >&2; exit 1; }
+  printf '%s %s\n' "${BASH_REMATCH[1]}" "$(fld_of expected_head_sha)" >> "$G/updated"
+  answer '{"message":"Updating pull request branch.","url":"https://github.com/shim"}'; exit $?
+fi
+if [[ "$ep" =~ ^repos/[^/]+/[^/]+/issues/([0-9]+)/comments$ ]]; then
+  [ "$method" = POST ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep)" >&2; exit 1; }
+  printf '%s\t%s\n' "${BASH_REMATCH[1]}" "$(fld_of body)" >> "$G/comments"
+  exit 0
 fi
 if [[ "$ep" =~ ^repos/[^/]+/[^/]+/actions/runners/([0-9]+)$ ]]; then
   [ "$method" = DELETE ] || { echo "gh: HTTP 404: Not Found (https://api.github.com/$ep): only a DELETE is known here" >&2; exit 1; }
