@@ -56,8 +56,13 @@
 # registration and ends, since a chain or another runner may have taken the job it was started for.
 # It never runs more than --max-per-repo runner jobs for one repository (6 unless given, or
 # HPCW_AUTOSCALE_MAX_PER_REPO) nor more than --max-total in all (12, or HPCW_AUTOSCALE_MAX_TOTAL),
-# pending ones included, so it never fills the queue; both are read again at every look from
-# <runner dir>/autoscale/autoscale.conf, where a person may change them while it runs. Three runner
+# pending ones included; both are read again at every look from
+# <runner dir>/autoscale/autoscale.conf, where a person may change them while it runs, up to a
+# bound of 1000 each (a value above it is held to it, and the log says so once). Past those the
+# real ceiling is Slurm's own limit on the account's jobs: a runner job sbatch refuses for a limit
+# is logged as that and tried again at the next look, and one the scheduler holds pending for a
+# limit counts as waiting, so none is submitted twice for one queued job. The runner jobs take the
+# site's CPU batch queue alone: --autoscale refuses --gres and --partition. Three runner
 # jobs of one repository that fail within 15 minutes hold that repository's submissions for 15
 # minutes. The controller queues its own successor first (afterany, singleton), as a chain's job
 # does, and writes status for --status in <runner dir>/autoscale/. GitHub is reached with the
@@ -189,7 +194,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --labels|--hours|--margin|--cpus|--mem|--gres|--partition|--qos) need "$@"; STARTOPTS+=("$1" "$2")
     case "$1" in
       --labels) LABELS="$2";; --hours) HOURS="$2"; HOURS_GIVEN=1;; --margin) MARGIN="$2";; --cpus) CPUS="$2";; --mem) MEM="$2";; --gres) GRES="$2";;
-      --partition) HPCW_RUNNER_PARTITION="$2";; --qos) HPCW_RUNNER_QOS="$2";;
+      --partition) HPCW_RUNNER_PARTITION="$2"; HPCW_RUNNER_PARTITION_GIVEN=1;; --qos) HPCW_RUNNER_QOS="$2";;
     esac; shift 2;;
   --gate-key) need "$@"; MODE=gatekey; GATE_KEY="$2"; shift 2;; --gate-off) MODE=gateoff; shift;;
   --gate-setup) MODE=gatesetup; shift;;
@@ -213,8 +218,11 @@ case "$MODE" in gatekey|gateoff|gatesetup) [ "$LANE" = 1 ] || die "the ssh gate 
 # a runner job of the controller's lives for one GitHub job: two hours unless --hours says otherwise
 case "$MODE" in autoscale) [ $HOURS_GIVEN = 1 ] || HOURS=2;; esac
 { [ "$MARGIN" -lt $((HOURS * 60)) ]; } || die "--margin is minutes before the wall time, under the wall time: $MARGIN"
-[[ "$MAX_PER_REPO" =~ ^[0-9]+$ ]] && [ "$MAX_PER_REPO" -ge 1 ] && [ "$MAX_PER_REPO" -le 50 ] || die "--max-per-repo is 1 to 50: $MAX_PER_REPO"
-[[ "$MAX_TOTAL" =~ ^[0-9]+$ ]] && [ "$MAX_TOTAL" -ge 1 ] && [ "$MAX_TOTAL" -le 200 ] || die "--max-total is 1 to 200: $MAX_TOTAL"
+CAP_BOUND=1000   # the most runner jobs autoscale.conf may ask, for one repository and in all; Slurm's own limits are the ceiling past it
+[[ "$MAX_PER_REPO" =~ ^[0-9]+$ ]] && [ "$MAX_PER_REPO" -ge 1 ] && [ "$MAX_PER_REPO" -le $CAP_BOUND ] || die "--max-per-repo is 1 to $CAP_BOUND: $MAX_PER_REPO"
+[[ "$MAX_TOTAL" =~ ^[0-9]+$ ]] && [ "$MAX_TOTAL" -ge 1 ] && [ "$MAX_TOTAL" -le $CAP_BOUND ] || die "--max-total is 1 to $CAP_BOUND: $MAX_TOTAL"
+# the runner jobs are CPU jobs on the site's batch queue, never a GPU's
+case "$MODE" in autoscale) [ -z "$GRES" ] && [ -z "${HPCW_RUNNER_PARTITION_GIVEN:-}" ] || die "--autoscale submits CPU runner jobs on the site's batch queue alone: no --gres, no --partition";; esac
 [[ "$EVERY" =~ ^[0-9]+$ ]] && [ "$EVERY" -ge 15 ] && [ "$EVERY" -le 3600 ] || die "--every is seconds between two looks, 15 to 3600: $EVERY"
 [[ "$IDLE" =~ ^[0-9]+$ ]] && [ "$IDLE" -ge 1 ] && [ "$IDLE" -le 120 ] || die "--idle is minutes a runner job waits for a GitHub job, 1 to 120: $IDLE"
 if [ -n "$REPOS" ]; then
@@ -441,11 +449,12 @@ chain_status() {
     else say "  no job has written status.json yet"; fi
   done
   if [ -f "$AUTO/autoscale.conf" ]; then
-    say "autoscale: ${REPOS:-$(conf_get repos)}, at most $(conf_get max_per_repo) runner jobs a repository and $(conf_get max_total) in all, labels $(conf_get labels), started $(conf_get started)$([ -e "$AUTO/STOP" ] && printf ', STOP written %s' "$(head -1 "$AUTO/STOP")")"
+    say "autoscale: ${REPOS:-$(conf_get repos)}, autoscale.conf asking at most $(conf_get max_per_repo) runner jobs a repository and $(conf_get max_total) in all (bounds $CAP_BOUND each), labels $(conf_get labels), started $(conf_get started)$([ -e "$AUTO/STOP" ] && printf ', STOP written %s' "$(head -1 "$AUTO/STOP")")"
     printf '%s\n' "$q" | awk -v n="$AUTO_JOB_NAME" '$3 == n { printf "  controller job %s %s, %s on %s\n", $1, $2, $4, ($5 == "" ? "no node yet" : $5) }'
     printf '%s\n' "$q" | awk '$3 ~ /^hpcw_auto_/ { k = substr($3, 11); if ($2 == "PENDING") p[k]++; else r[k]++; s[k] = 1 }
       END { for (k in s) printf "  runner jobs for %s: %d running, %d pending\n", k, r[k], p[k] }'
     if [ -f "$AUTO/status" ]; then
+      say "  caps in force: $(sed -n 's/^caps=//p' "$AUTO/status")"
       say "  last word: $(sed -n 's/^state=//p' "$AUTO/status"), job $(sed -n 's/^job=//p' "$AUTO/status") on $(sed -n 's/^node=//p' "$AUTO/status"), last look $(sed -n 's/^look=//p' "$AUTO/status"), queued/runner jobs by repository: $(sed -n 's/^queue=//p' "$AUTO/status"), $(sed -n 's/^submitted=//p' "$AUTO/status") submitted since $(sed -n 's/^since=//p' "$AUTO/status")"
     else say "  the controller has not written its status yet"; fi
   fi
@@ -973,6 +982,16 @@ control_args() { # what the controller's job is handed, and hands its successor
   CONTROL_FLAGS=(--time "$CONTROL_HOURS:00:00" ${QUEUE[@]+"${QUEUE[@]}"} --cpus-per-task 1 --mem 2G)
 }
 conf_get() { sed -n "s/^$1=//p" "$AUTO/autoscale.conf" 2>/dev/null | head -1; }
+CAP_SAID=""
+conf_cap() { # KEY BOUND NOW -> the cap autoscale.conf gives, held to its bound, said in the log once a value
+  local v; v=$(conf_get "$1")
+  [[ "$v" =~ ^[0-9]+$ ]] || { printf '%s' "$3"; return 0; }
+  if [ "$v" -gt "$2" ]; then
+    case " $CAP_SAID " in *" $1=$v "*) ;; *) log "$1=$v in autoscale.conf is above its bound of $2: $2 is used" >&2; CAP_SAID="$CAP_SAID $1=$v";; esac
+    v=$2
+  fi
+  printf '%s' "$v"
+}
 auto_start() {
   local v q out r
   [ -x "$GHBIN" ] || die "gh is not installed (https://cli.github.com; gh auth login once)"
@@ -1065,7 +1084,10 @@ auto_look() { # OWNER/NAME: one look at its queue, and the runner jobs it needs 
     REPO=$r; job_args
     while [ $i -lt $k ]; do
       out=$(SB --parsable --job-name "$name" "${SB_FLAGS[@]}" -D "$ROOT" --output "$d/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --once "${JOB_ARGS[@]}" --idle "$IDLE" 2>&1) \
-        || { log "$r: sbatch refused a runner job: $(printf '%s' "$out" | tail -1)"; break; }
+        || { if printf '%s' "$out" | grep -qiE 'limit|MaxSubmit|QOSMax|AssocMax|too many'; then
+               log "$r: Slurm's own limit on this account's jobs is reached ($(printf '%s' "$out" | tail -1)); $i submitted at this look, the rest at the next"
+             else log "$r: sbatch refused a runner job: $(printf '%s' "$out" | tail -1)"; fi
+             break; }
       i=$((i + 1))
     done
   fi
@@ -1074,8 +1096,8 @@ auto_look() { # OWNER/NAME: one look at its queue, and the runner jobs it needs 
   SUMMARY="$SUMMARY $r=$queued/$((total + i))"
 }
 auto_status() { # STATE [NOTE]: <runner dir>/autoscale/status, what --status reads
-  printf 'state=%s\njob=%s\nnode=%s\nsince=%s\nlook=%s\nsubmitted=%s\nqueue=%s\nnote=%s\n' "$1" "${SLURM_JOB_ID:-}" "$(hostname -s)" "$SINCE" \
-    "$(date -u +%FT%TZ)" "$SUBMITTED" "${SUMMARY# }" "${2:-}" > "$AUTO/status.new" && mv -f "$AUTO/status.new" "$AUTO/status"
+  printf 'state=%s\njob=%s\nnode=%s\nsince=%s\nlook=%s\nsubmitted=%s\nqueue=%s\ncaps=%s\nnote=%s\n' "$1" "${SLURM_JOB_ID:-}" "$(hostname -s)" "$SINCE" \
+    "$(date -u +%FT%TZ)" "$SUBMITTED" "${SUMMARY# }" "at most $MAX_PER_REPO a repository, $MAX_TOTAL in all" "${2:-}" > "$AUTO/status.new" && mv -f "$AUTO/status.new" "$AUTO/status"
 }
 control() {
   local chained=1 looks=0 r all v l repos=""
@@ -1100,8 +1122,7 @@ control() {
   log "looking every $EVERY s until $(iso "$DEADLINE") at$repos; runner jobs of $HOURS h${CPUS:+, $CPUS CPUs}${MEM:+, $MEM}, one GitHub job each, $IDLE minutes to take one"
   auto_status running
   while ! over; do
-    v=$(conf_get max_per_repo); [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 0 ] && [ "$v" -le 50 ] && MAX_PER_REPO=$v
-    v=$(conf_get max_total); [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 0 ] && [ "$v" -le 200 ] && MAX_TOTAL=$v
+    MAX_PER_REPO=$(conf_cap max_per_repo $CAP_BOUND "$MAX_PER_REPO") MAX_TOTAL=$(conf_cap max_total $CAP_BOUND "$MAX_TOTAL")
     all=$(SQ -h -u "$USER" -o '%j' 2>/dev/null) || { log "squeue did not answer; this look submits nothing"; sleep "$EVERY"; continue; }
     TOTAL_ALL=$(printf '%s\n' "$all" | grep -c '^hpcw_auto_') SUMMARY=""
     for r in $repos; do auto_look "$r"; done

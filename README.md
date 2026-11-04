@@ -340,7 +340,8 @@ the runner's labels and submits one runner job for each that no runner job is al
 registers one just-in-time runner, runs one GitHub job and ends, or ends after `--idle` minutes (10) with no
 job taken. It never holds more than `--max-per-repo` runner jobs for one repository (6) or `--max-total` in all
 (12), pending ones counted, read again at every look from `autoscale/autoscale.conf` under the runner's folder,
-where a person may change them; `--status` shows it, and `--autoscale-stop` ends it, cancelling the controller's
+where a person may change them up to 1000 each (a value above is held to 1000, and logged), Slurm's own limits on the
+account's jobs being the ceiling past that; the runner jobs take the site's CPU batch queue alone; `--status` shows it, and `--autoscale-stop` ends it, cancelling the controller's
 queued job and every runner job not yet started. Where GitHub offers no merge queue (a private
 repository off Enterprise Cloud), `--train --repos OWNER/NAME --site wayne` runs a merge train of the same
 kind: a small job that looks every minute at the ready pull requests with auto-merge armed, a blocker first
