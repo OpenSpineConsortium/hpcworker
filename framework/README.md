@@ -1393,6 +1393,30 @@ unsplit record); how much of a wait is the account's own limits rather than the 
 `_query` twins, which print the line each runs (`lib/adapters/common.sh`); PBS and LSF define
 `adapter_history` as exit 2 and nothing printed.
 
+## Placing a job: `job submit --placement` (version 30)
+
+greg, 2026-11-03: "consider checking the current usage of GPUs, CPUs, and partitions when choosing a slurm
+configuration to minimize wait time while still maximizing throughput". A job with `--placement auto`
+names what it needs, not where it runs: its cores, memory and wall time, and for the gpu class the least
+memory a card must hold (`--gpu-mem`, GB) and the architectures its code runs on (`--gpu-arch`, a list or
+`ampere+`; `ampere,ada,hopper` unless given). The candidates are `profiles/<site>.placement`: each partition
+with the one QoS it takes, never-preempted ones first, and the cards, each with its memory and
+architecture. Every candidate whose cards fit is asked with `sbatch --test-only` and the job's own
+resources, and the job goes to the earliest start Slurm estimates; a start within `HPCW_PLACEMENT_TIE`
+seconds (300) of the earliest is a tie, which goes to a QoS that is never preempted, then to the smaller
+card. The table of estimates and the choice open the job's log and are printed as `HPCW-JOB placement`
+lines; `--placement report` prints them and submits nothing.
+
+At Wayne State the gpu candidates are galhp, gmsap and gvohp with the gpu QoS, and reqp with requeue,
+which the gpu and primary QoS preempt; the cpu candidates are secp (secondary), prip (primary) and reqp.
+express belongs to the hardware investors and is never one. A job placed on requeue is requeued when
+preempted, and every flow resumes from its last checkpoint, so a preemption costs it only the time since
+that checkpoint; a caller's `--no-requeue` leaves the preemptable candidates out. The cards' architectures
+were read from sinfo and the nodes (2026-11-03): the grid's torch build (2.13, CUDA 12.9) lists sm_120 and
+ran a matmul on an RTX PRO 4500 Blackwell, while its JAX build (0.10.2) gave no answer there within the
+probe's 17 minutes and fails to compile on a V100, which is why Blackwell and Volta are left out unless a
+job names them.
+
 ## Files
 
 ```
