@@ -535,6 +535,29 @@ TJ6=$(newest '^hpcw_train$')
 gr --train-stop --site wayne; t "--train-stop cancels the train's queued job" has "cancelled job $TJ6"; t "  and writes STOP" [ -e "$TR/STOP" ]
 run_job "$TJ6" HPCW_AUTOSCALE_LOOKS=1
 t "a train job that meets STOP ends, merging nothing" bash -c "printf '%s\n' \"\$1\" | grep -q 'STOP is set' && [ \$(wc -l < '$T/gh/merged') = 2 ]" _ "$OUT"
+# the latest run of each check decides: a draft's failed check before a ready run that passed stands against nothing
+nodes "$(pr 21 2026-11-03T08:00:00Z CLEAN false 1 '[]' '[]')"
+echo '{"total_count":5,"check_runs":[{"id":10,"name":"check","status":"completed","conclusion":"failure"},{"id":12,"name":"check","status":"completed","conclusion":"success"},{"id":11,"name":"gate","status":"completed","conclusion":"success"},{"id":13,"name":"owner-ok","status":"completed","conclusion":"skipped"},{"id":9,"name":"gate","status":"completed","conclusion":"cancelled"}]}' > "$T/gh/checks/$(sha 21)"
+gr --train --repos "$GH_REPO" --site wayne; TJ7=$(newest '^hpcw_train$'); run_job "$TJ7" HPCW_AUTOSCALE_LOOKS=1
+t "an earlier failed run of a check gives way to the latest, which passed" [ "$(tail -1 "$T/gh/merged")" = "21 $(sha 21)" ]
+echo '{"total_count":3,"check_runs":[{"id":20,"name":"check","status":"completed","conclusion":"success"},{"id":22,"name":"check","status":"completed","conclusion":"failure"},{"id":21,"name":"gate","status":"completed","conclusion":"success"}]}' > "$T/gh/checks/$(sha 22)"
+nodes "$(pr 22 2026-11-03T08:00:00Z CLEAN false 1 '[]' '[]')"
+TJ8=$(newest '^hpcw_train$'); run_job "$TJ8" HPCW_AUTOSCALE_LOOKS=1
+t "  and a latest run that failed holds the head, though an earlier one passed" [ "$(tail -1 "$T/gh/merged")" = "21 $(sha 21)" ]
+# --ready: a ready pull request auto-merge was never armed for
+nodes "$(pr 23 2026-11-03T08:00:00Z CLEAN false 0 '[]' '[]')"; green 23
+TJ9=$(newest '^hpcw_train$'); run_job "$TJ9" HPCW_AUTOSCALE_LOOKS=1
+t "without --ready an unarmed pull request is left alone" [ "$(tail -1 "$T/gh/merged")" = "21 $(sha 21)" ]
+gr --train-stop --site wayne --now; gr --train --repos "$GH_REPO" --site wayne --ready
+t "--train --ready says it takes every ready pull request" has 'the first ready pull request whose head is green'
+TJ10=$(newest '^hpcw_train$')
+t "  and hands --ready to its job" [ "$(J "$TJ10" args | tr '[:space:]' ' ' | grep -c -- " --ready ")" = 1 ]
+run_job "$TJ10" HPCW_AUTOSCALE_LOOKS=1
+t "  whose look merges the ready one auto-merge was never armed for" [ "$(tail -1 "$T/gh/merged")" = "23 $(sha 23)" ]
+TJ11=$(newest '^hpcw_train$')
+t "  and whose successor keeps --ready" [ "$(J "$TJ11" args | tr '[:space:]' ' ' | grep -c -- " --ready ")" = 1 ]
+gr --status; t "--status says so" has 'every ready pull request, armed or not'
+gr --train-stop --site wayne --now
 
 echo "== the end"
 t "every job the test submitted had a wall time and ran from the runner folder" bash -c "[ ! -e '$T/slurm/refused' ]"
