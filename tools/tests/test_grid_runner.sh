@@ -404,7 +404,10 @@ pending() { local j; for j in $(ids "$1"); do [ "$(J "$j" state)" = PENDING ] &&
 AU="$R/autoscale"; TPL=OpenSpineConsortium-symphony-template; RN="^hpcw_auto_$TPL\$"; ON='^hpcw_auto_OpenSpineConsortium-other$'
 gr --autoscale --site wayne; t "--autoscale needs --repos" has '--autoscale needs --repos'
 gr --autoscale --repos "OpenSpineConsortium" --site wayne; t "  each OWNER/NAME" has '--repos is OWNER/NAME'
-gr --autoscale --repos "$GH_REPO" --site wayne --max-total 0; t "  and caps of one at least" has '--max-total is 1 to 200'
+gr --autoscale --repos "$GH_REPO" --site wayne --max-total 0; t "  and caps of one at least" has '--max-total is 1 to 1000'
+gr --autoscale --repos "$GH_REPO" --site wayne --max-total 1001; t "  and of 1000 at most" has '--max-total is 1 to 1000'
+gr --autoscale --repos "$GH_REPO" --site wayne --gres gpu:1; t "  and CPU runner jobs alone" has 'CPU runner jobs on the site.s batch queue alone'
+gr --autoscale --repos "$GH_REPO" --site wayne --partition galhp; t "  on the site's batch queue alone" has 'no --gres, no --partition'
 echo public > "$T/gh/visibility"
 gr --autoscale --repos "$GH_REPO" --site wayne; t "a public repository is refused" has 'refused: .* is public'
 t "  and no controller is queued" [ "$(count '^hpcw_autoscale$')" = 0 ]
@@ -441,8 +444,16 @@ t "a second look, the two still pending, submits nothing past the cap" [ "$(coun
 sed -i 's/^max_per_repo=2$/max_per_repo=5/' "$AU/autoscale.conf"
 AC3=$(newest '^hpcw_autoscale$'); run_job "$AC3" HPCW_AUTOSCALE_LOOKS=1
 t "a cap raised in autoscale.conf counts at the next look, under the cap over all" [ "$(count "$RN")" = 3 ]
+sed -i 's/^max_total=3$/max_total=1000/' "$AU/autoscale.conf"
+AC3A=$(newest '^hpcw_autoscale$'); run_job "$AC3A" HPCW_AUTOSCALE_LOOKS=1
+t "a cap of 1000 is taken as it is" bash -c "grep -qx 'caps=at most 5 a repository, 1000 in all' '$AU/status' && ! printf '%s\n' \"\$1\" | grep -q 'above its bound'" _ "$OUT"
+sed -i 's/^max_total=1000$/max_total=5000/' "$AU/autoscale.conf"
+AC3B=$(newest '^hpcw_autoscale$'); run_job "$AC3B" HPCW_AUTOSCALE_LOOKS=1
+t "a cap above its bound is held to the bound, and said" has 'max_total=5000 in autoscale.conf is above its bound of 1000: 1000 is used'
+t "  the bound then counting" grep -qx 'caps=at most 5 a repository, 1000 in all' "$AU/status"
+sed -i 's/^max_total=5000$/max_total=3/' "$AU/autoscale.conf"
 gr --status
-t "--status shows the controller" all 'autoscale: OpenSpineConsortium/symphony-template,OpenSpineConsortium/other, at most 5 runner jobs a repository and 3 in all' "controller job $(newest '^hpcw_autoscale$') PENDING" "runner jobs for $TPL: 0 running, 3 pending"
+t "--status shows the controller" all 'autoscale: OpenSpineConsortium/symphony-template,OpenSpineConsortium/other, autoscale.conf asking at most 5 runner jobs a repository and 3 in all \(bounds 1000 each\)' 'caps in force: at most 5 a repository' "controller job $(newest '^hpcw_autoscale$') PENDING" "runner jobs for $TPL: 0 running, 3 pending"
 echo "== autoscale: a runner job serves one GitHub job, or none"
 echo "$AU/$TPL/jobs/$U1" > "$T/apptainer/chain"; clear_runs; plan done
 run_job "$U1"
