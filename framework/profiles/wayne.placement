@@ -1,0 +1,25 @@
+# hpcworker framework 30: job submit --placement's candidates and cards for the site wayne (lib/jobs.sh reads it).
+# A candidate is a partition with the QoS it takes, in the order a tie goes: never preempted first. reqp takes
+# only requeue, which the gpu and primary QoS preempt (preempt/qos), so a job placed there is requeued and
+# resumes from its last checkpoint. express belongs to the hardware investors and is never a candidate.
+#   candidate CLASS PARTITION QOS PREEMPTABLE
+candidate gpu galhp gpu no
+candidate gpu gmsap gpu no
+candidate gpu gvohp gpu no
+candidate gpu reqp requeue yes
+candidate cpu secp secondary no
+candidate cpu prip primary no
+candidate cpu reqp requeue yes
+# A card is a GPU type as sinfo's GRES column names it, its memory in GB and its architecture; one with a
+# partition after it holds there alone (tesla is a V100 on gvohp and a K20X or older elsewhere).
+#   card GRES_TYPE MEMORY_GB ARCH [PARTITION]
+card nvidia_h200 141 hopper
+card nvidia_l40s 48 ada
+card nvidia_a30 24 ampere
+card nvidia_a30_2g.12gb 12 ampere
+card nvidia_a100_80gb_pcie_1g.10gb 10 ampere
+card nvidia_rtx_pro_4500_blackwell 32 blackwell
+card nvidia_rtx_pro_4000_blackwell 24 blackwell
+card geforce 11 turing
+card tesla 16 volta gvohp
+card tesla 6 kepler

@@ -12,6 +12,123 @@ import unittest
 import fakegrid as G
 
 
+SINFO = "\n".join(["galhp|gpu:nvidia_l40s:4(S:0)", "gmsap|gpu:nvidia_h200:4(S:0-1)", "gvohp|gpu:tesla:4(S:0)",
+                   "reqp*|gpu:nvidia_a30:10(S:0-7)", "reqp*|gpu:nvidia_a30_2g.12gb:20(S:0,3)", "reqp*|gpu:nvidia_l40s:4(S:0)",
+                   "reqp*|gpu:nvidia_rtx_pro_4500_blackwell:10(S:0-1)", "reqp*|gpu:tesla:2(S:2,7)", "secp|(null)"])
+
+
+class PlacementTest(unittest.TestCase):
+    """--placement (framework 30): the candidates of <site>.placement that fit, each asked with sbatch --test-only,
+    the earliest start taken, a tie to the QoS never preempted, the table at the head of the job's log."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp(prefix="hpcw_place_")
+        self.addCleanup(shutil.rmtree, self.td, True)
+        self.g = G.Grid(self.td, profile_edit=lambda p: p.update(qos_gpu="gpu"))
+        self.g.setup()
+        shutil.copy(os.path.join(self.g.shared, "profiles", "wayne.placement"), os.path.join(self.g.shared, "profiles", "testsite.placement"))
+        self.work = os.path.join(self.td, "work")
+        os.makedirs(self.work)
+        with open(os.path.join(self.work, "run.sbatch"), "w", newline="\n") as fh:
+            fh.write("#!/bin/bash\necho hi\n")
+
+    def plan(self, *lines):
+        with open(os.path.join(self.g.sched, "testonly"), "w", newline="\n") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def submit(self, extra, cls="gpu", name="fit"):
+        return self.g.run("job submit --project demo --name %s --class %s --dir '%s' --time 4:00:00 --cpus 4 --mem 32G %s -- run.sbatch"
+                          % (name, cls, G.posix(self.work), extra), FAKE_SINFO=SINFO)
+
+    def submitted(self):
+        return [c for c in self.g.calls() if c.startswith("sbatch ") and "--test-only" not in c]
+
+    def asked(self):
+        return [c for c in self.g.calls() if c.startswith("sbatch ") and "--test-only" in c]
+
+    def test_the_earliest_start_is_taken_with_the_job_s_own_resources(self):
+        self.plan("galhp nvidia_l40s 3600", "gmsap nvidia_h200 21600", "reqp nvidia_a30 60", "reqp nvidia_l40s 1500",
+                  "reqp nvidia_rtx_pro_4500_blackwell 30")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB placement fit chose reqp/requeue nvidia_a30 (preemptable, requeued)", out)
+        self.assertRegex(out, r"HPCW-JOB submitted \d+ fit reqp/requeue log ")
+        call = self.submitted()[-1]
+        for want in ("--partition=reqp", "--qos=requeue", "--gres=gpu:nvidia_a30:1", "--requeue", "--open-mode=append",
+                     "--time=4:00:00", "--cpus-per-task=4", "--mem=32G"):
+            self.assertIn(want, call)
+        # every fitting candidate was asked with the job's resources; Blackwell, the MIG slice and the tesla cards were not
+        asked = self.asked()
+        self.assertEqual(len(asked), 4, asked)
+        for c in asked:
+            self.assertIn("--time=4:00:00 --cpus-per-task=4 --mem=32G", c)
+        for absent in ("blackwell", "2g.12gb", "tesla"):
+            self.assertFalse([c for c in asked if absent in c], absent)
+        log = [l for l in out.splitlines() if l.startswith("HPCW-JOB submitted")][0].split(" log ")[1]
+        with open(log) as fh:
+            head = fh.read()
+        self.assertIn("== hpcworker placement for fit", head)
+        self.assertIn("galhp/gpu nvidia_l40s 48GB ada start", head)
+        self.assertIn("chose reqp requeue yes nvidia_a30", head)
+
+    def test_a_tie_goes_to_the_qos_never_preempted(self):
+        self.plan("galhp nvidia_l40s 240", "reqp nvidia_a30 0", "reqp nvidia_l40s 0", "gmsap nvidia_h200 0")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        # gmsap and galhp both never preempted and within the tie: the smaller card
+        self.assertIn("chose galhp/gpu nvidia_l40s (never preempted)", out)
+
+    def test_a_far_earlier_requeue_start_beats_a_late_gpu_one(self):
+        self.plan("galhp nvidia_l40s 7200", "reqp nvidia_l40s 0")
+        rc, out, err = self.submit("--placement auto --gpu-mem 40")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose reqp/requeue nvidia_l40s", out)
+        self.assertFalse([c for c in self.asked() if "nvidia_a30" in c], "a 24 GB card for a 40 GB need")
+
+    def test_the_architectures_and_no_requeue_narrow_the_candidates(self):
+        self.plan("gvohp tesla 0", "galhp nvidia_l40s 600", "reqp nvidia_rtx_pro_4500_blackwell 0", "gmsap nvidia_h200 900")
+        rc, out, err = self.submit("--placement auto --gpu-mem 16 --gpu-arch volta+ --no-requeue")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose gvohp/gpu tesla (never preempted)", out)
+        self.assertFalse([c for c in self.asked() if "--partition=reqp" in c], "--no-requeue asks no preemptable partition")
+        self.assertIn("--no-requeue", self.submitted()[-1])
+        rc, out, err = self.submit("--placement auto --gpu-mem 24 --gpu-arch blackwell", name="bw")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose reqp/requeue nvidia_rtx_pro_4500_blackwell", out)
+
+    def test_a_refused_candidate_is_passed_by_and_a_cpu_job_races_its_qos(self):
+        self.plan("secp - refuse", "prip - 900", "reqp - 0")
+        rc, out, err = self.submit("--placement auto", cls="batch", name="cpu")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB placement cpu secp/secondary cpu refused:", out)
+        self.assertIn("chose reqp/requeue (preemptable, requeued)", out)
+        self.assertNotIn("--gres", self.submitted()[-1])
+
+    def test_report_submits_nothing(self):
+        self.plan("galhp nvidia_l40s 600", "reqp nvidia_a30 1200", "gmsap nvidia_h200 3600", "reqp nvidia_l40s 1200")
+        rc, out, err = self.submit("--placement report --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose galhp/gpu nvidia_l40s (never preempted)", out)
+        self.assertNotIn("HPCW-JOB submitted", out)
+        self.assertEqual(self.submitted(), [])
+
+    def test_what_placement_refuses(self):
+        self.plan("galhp nvidia_l40s 600")
+        for extra, says in (("--placement auto --partition galhp", "leave out --partition and --gpu-type"),
+                            ("--placement auto --gpu-arch maxwellx", "--gpu-arch is a list of"),
+                            ("--placement sometimes", "--placement is auto or report"),
+                            ("--gpu-mem 24", "--gpu-mem and --gpu-arch are --placement's"),
+                            ("--placement auto --gpu-mem 500", "no partition of this site holds a card of 500 GB")):
+            rc, out, err = self.submit(extra)
+            self.assertNotEqual(rc, 0, extra)
+            self.assertIn(says, out + err, extra)
+        self.plan("galhp nvidia_l40s refuse", "gmsap nvidia_h200 refuse", "reqp nvidia_a30 refuse", "reqp nvidia_l40s refuse")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no candidate placement answered sbatch --test-only", out + err)
+        self.assertEqual(self.submitted(), [])
+
+
 class JobTest(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.mkdtemp(prefix="hpcw_jobs_")
