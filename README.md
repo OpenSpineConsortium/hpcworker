@@ -346,8 +346,8 @@ queued job and every runner job not yet started. Where GitHub offers no merge qu
 repository off Enterprise Cloud), `--train --repos OWNER/NAME --site wayne` runs a merge train of the same
 kind: a small job that looks every minute at the ready pull requests with auto-merge armed, a blocker first
 and then the oldest, brings the default branch into one GitHub calls behind, tells one in conflict once,
-and merges the first whose head is green by green.py's rule and the branch's required checks, one a look;
-`--train-stop` ends it. Everything is designed and tested against
+and merges the first whose head is green by green.py's rule and the branch's required checks, read over the latest
+run of each check name, one a look; `--ready` takes every ready pull request, armed or not, and `--train-stop` ends it. Everything is designed and tested against
 stand-ins (`tools/tests/test_grid_runner.sh`); what the grid has not yet shown is in
 `docs/OPEN_QUESTIONS.md`.
 The ssh gate lets a workflow on GitHub's own machine start, read and end that chain, so the chain need
