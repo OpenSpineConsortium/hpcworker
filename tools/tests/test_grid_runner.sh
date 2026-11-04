@@ -490,6 +490,8 @@ HWS="$T/bin/hpcw-standin"
   printf '  "job place") [ "${STANDIN_PLACE:-}" = fail ] && { echo "HPCW-JOB refused x: no candidate placement answered"; exit 1; }\n'
   printf '    echo "HPCW-JOB placement $6 chose prip/primary (never preempted)"; echo "HPCW-JOB options --partition=prip --qos=primary --account=wsu --no-requeue --open-mode=append";;\n'
   printf '  "job replace") echo "HPCW-JOB moved 4242 hpcw_auto_x reqp/requeue -> prip/primary (never preempted), estimate a -> b"; echo "HPCW-JOB replace looked at 1 pending job(s), moved 1";;\n'
+  printf '  "job probe") [ -n "${SLURM_JOB_ID:-}" ] || { echo "run it inside a Slurm job"; exit 1; }\n'
+  printf '    echo "HPCW-JOB probe msa1 fail: stat: cannot stat /home/x: No such file or directory"; echo "HPCW-JOB probe alh1 ok"; echo "HPCW-JOB probe asked 2 node(s)";;\n'
   printf 'esac\n'; } > "$HWS"
 chmod 755 "$HWS"; : > "$T/hpcw.calls"
 gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker /nowhere/hpcworker; t "--hpcworker that is not there is refused" has 'hpcworker /nowhere/hpcworker is not there'
@@ -514,9 +516,11 @@ t "  the race asked for that size" grep -q -- "job place --class runner --name h
 t "  and the log says where each went" has "$GH_REPO: placed job [0-9]+ on prip/primary \(never preempted\)"
 t "the look ran job replace --runners in the controller's job" grep -qx 'job replace --runners' "$T/hpcw.calls"
 t "  each move a line of its log" has 'HPCW-JOB moved 4242 hpcw_auto_x reqp/requeue -> prip/primary'
+t "  after job probe, inside the controller's job" bash -c "grep -qx 'job probe --max 6' '$T/hpcw.calls' && [ \"\$(grep -n -E '^job (probe|replace)' '$T/hpcw.calls' | head -1)\" = '1:job probe --max 6' ] || [ \"\$(grep -n -E '^job (probe|replace)' '$T/hpcw.calls' | sed -n '1p' | cut -d: -f2-)\" = 'job probe --max 6' ]"
+t "  a node whose probe failed is a line of its log, a node that passed none" bash -c "printf '%s\n' \"\$OUT\" | grep -q 'HPCW-JOB probe msa1 fail: stat: cannot stat' && ! printf '%s\n' \"\$OUT\" | grep -q 'HPCW-JOB probe alh1 ok'"
 t "  and no token reached hpcworker" no_leak
 for j in $(pending "$RN"); do set_state "$j" CANCELLED; done
-AC6=$(newest '^hpcw_autoscale$'); n=$(grep -c '^job replace' "$T/hpcw.calls")
+AC6=$(newest '^hpcw_autoscale$'); n=$(grep -c '^job replace' "$T/hpcw.calls") np=$(grep -c '^job probe' "$T/hpcw.calls")
 run_job "$AC6" HPCW_AUTOSCALE_LOOKS=1 STANDIN_PLACE=fail
 U6=$(newest "$RN")
 t "a race that places nothing leaves the runner job on the site's batch queue" bash -c "[ '$(J "$U6" partition)' = '$DEF_PART' ] && [ '$(J "$U6" qos)' = '$DEF_QOS' ]"
@@ -524,6 +528,7 @@ t "  and says so" has 'hpcworker placed no runner job'
 sed -i 's/^replace_every=300$/replace_every=0/' "$AU/autoscale.conf"
 AC7=$(newest '^hpcw_autoscale$'); run_job "$AC7" HPCW_AUTOSCALE_LOOKS=1
 t "replace_every=0 in autoscale.conf stops job replace" [ "$(grep -c '^job replace' "$T/hpcw.calls")" = "$((n + 1))" ]
+t "  and job probe with it" [ "$(grep -c '^job probe' "$T/hpcw.calls")" = "$((np + 1))" ]
 gr --autoscale-stop --site wayne --now
 gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker none
 t "--hpcworker none keeps the batch queue" has "runner jobs keep the site's batch queue: --hpcworker none"

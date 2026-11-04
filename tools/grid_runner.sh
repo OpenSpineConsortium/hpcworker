@@ -76,10 +76,13 @@
 # partition that takes it, at most one job of the account at a time as its limits allow, then each
 # partition with the QoS it takes), and the race's options go on its sbatch line; a race that gives
 # none leaves the job on the batch queue, as before. Every replace_every seconds of autoscale.conf
-# (300 unless written; 0 stops it) the controller also runs `job replace --runners`, which races this
-# account's pending jobs again, the ones hpcworker placed and these runner jobs, and moves each one
-# that another placement would start much sooner, in the controller's job and never on the login
-# node; each move is a line of the controller's log. --hpcworker none turns both off.
+# (300 unless written; 0 stops it) the controller also runs `job probe` and then `job replace
+# --runners`: the probe finds a GPU node that cannot read the home or the state folder (a one-minute job
+# of its own on each node, at most six a call and each node once an hour) and keeps every placement
+# and move off it for an hour; the replace races this account's pending jobs again, the ones hpcworker
+# placed and these runner jobs, and moves each one that another placement would start much sooner,
+# in the controller's job and never on the login node; a failed probe and each move are lines of the
+# controller's log. --hpcworker none turns all of it off.
 # --autoscale-stop writes STOP there, cancels the controller's queued job and every runner job not yet
 # started; a runner job busy with a GitHub job finishes it, an idle one ends within a minute, and
 # --now cancels the running controller too. The chains and the controller may serve one repository
@@ -1071,6 +1074,15 @@ replace_look() { # job replace --runners in the controller's job: each move a li
   while IFS= read -r l; do case "$l" in "HPCW-JOB moved "*|"HPCW-JOB cancelled "*|"HPCW-JOB kept "*) log "$l";; esac; done <<< "$out"
   return 0
 }
+probe_look() { # job probe in the controller's job, before each job replace: a GPU node that cannot read the home or the
+  # state folder is found by a one-minute job of its own there, and kept out of every placement and move for an hour,
+  # before a move could land a job on it (a node back in service without the home file system failed every job in
+  # its first second on 2026-11-04); each node is asked at most once an hour, at most HPCW_RUNNER_PROBE_MAX (6) a call
+  local out l
+  out=$(net env -u GITHUB_TOKEN -u GH_TOKEN bash "$HW" job probe --max "${HPCW_RUNNER_PROBE_MAX:-6}" 2>&1) || { log "job probe did not finish: $(printf '%s' "$out" | tail -n 1)"; return 0; }
+  while IFS= read -r l; do case "$l" in "HPCW-JOB probe "*" fail"*) log "$l";; esac; done <<< "$out"
+  return 0
+}
 auto_stop() {
   local q ids running cancel
   mkdir -p "$AUTO" && date -u +%FT%TZ > "$AUTO/STOP" || die "cannot write $AUTO/STOP"
@@ -1195,7 +1207,7 @@ control() {
     for r in $repos; do auto_look "$r"; done
     if [ -n "$HW" ]; then
       v=$(conf_get replace_every); [[ "$v" =~ ^[0-9]+$ ]] || v=${HPCW_RUNNER_REPLACE_EVERY:-300}
-      [ "$v" -gt 0 ] && [ $(( $(now) - REPLACED_AT )) -ge "$v" ] && { replace_look; REPLACED_AT=$(now); }
+      [ "$v" -gt 0 ] && [ $(( $(now) - REPLACED_AT )) -ge "$v" ] && { probe_look; replace_look; REPLACED_AT=$(now); }
     fi
     auto_status running "at most $MAX_PER_REPO a repository, $MAX_TOTAL in all"
     looks=$((looks + 1))
