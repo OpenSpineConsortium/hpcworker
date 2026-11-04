@@ -1,8 +1,13 @@
-# hpcworker framework 30: job submit --placement's candidates and cards for the site wayne (lib/jobs.sh reads it).
+# hpcworker framework 30 and 31: job submit --placement and job place's candidates and cards for the site wayne (lib/jobs.sh reads it).
 # A candidate is a partition with the QoS it takes, in the order a tie goes: never preempted first. reqp takes
-# only requeue, which the gpu and primary QoS preempt (preempt/qos), so a job placed there is requeued and
-# resumes from its last checkpoint. express belongs to the hardware investors and is never a candidate.
-#   candidate CLASS PARTITION QOS PREEMPTABLE
+# requeue, which the gpu, primary, secondary and debug QoS preempt (preempt/qos), so a job placed there is
+# requeued and resumes from its last checkpoint. express belongs to the hardware investors and is never a
+# candidate. Framework 31 races the candidates of one QoS together and submits a job to all of them at once.
+# MAX, where given, is the most of this account's jobs that QoS may hold at once: the debug QoS allows one user
+# 4 cores and 2 submitted jobs (sacctmgr, 2026-11-04), so one runner job, and it takes reqp, prip and secp.
+# The runner class is tools/grid_runner.sh's autoscaler (job place --class runner): CI runner jobs, which
+# nothing resumes, so a QoS never preempted comes first.
+#   candidate CLASS PARTITION QOS PREEMPTABLE [MAX]
 candidate gpu galhp gpu no
 candidate gpu gmsap gpu no
 candidate gpu gvohp gpu no
@@ -10,6 +15,12 @@ candidate gpu reqp requeue yes
 candidate cpu secp secondary no
 candidate cpu prip primary no
 candidate cpu reqp requeue yes
+candidate runner reqp debug no 1
+candidate runner prip debug no 1
+candidate runner secp debug no 1
+candidate runner prip primary no
+candidate runner secp secondary no
+candidate runner reqp requeue yes
 # A card is a GPU type as sinfo's GRES column names it, its memory in GB and its architecture; one with a
 # partition after it holds there alone (tesla is a V100 on gvohp and a K20X or older elsewhere).
 #   card GRES_TYPE MEMORY_GB ARCH [PARTITION]

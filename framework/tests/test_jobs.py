@@ -14,13 +14,27 @@ import fakegrid as G
 
 SINFO = "\n".join(["galhp|gpu:nvidia_l40s:4(S:0)", "gmsap|gpu:nvidia_h200:4(S:0-1)", "gvohp|gpu:tesla:4(S:0)",
                    "reqp*|gpu:nvidia_a30:10(S:0-7)", "reqp*|gpu:nvidia_a30_2g.12gb:20(S:0,3)", "reqp*|gpu:nvidia_l40s:4(S:0)",
-                   "reqp*|gpu:nvidia_rtx_pro_4500_blackwell:10(S:0-1)", "reqp*|gpu:tesla:2(S:2,7)", "secp|(null)"])
+                   "reqp*|gpu:nvidia_h200:4(S:0-1)", "reqp*|gpu:nvidia_rtx_pro_4500_blackwell:10(S:0-1)", "reqp*|gpu:tesla:2(S:2,7)",
+                   "secp|(null)"])
+# node by node, as sinfo -N gives it: alh1, msa1 and voh1 sit in their group's partition and in reqp, as at Wayne State;
+# arw1 holds MIG slices alone and tta1 slices beside two whole A30s, so a generic request there could take a slice
+SINFO_NODES = "\n".join(["alh1|galhp|gpu:nvidia_l40s:4(S:0)", "alh1|reqp*|gpu:nvidia_l40s:4(S:0)",
+                         "msa1|gmsap|gpu:nvidia_h200:4(S:0-1)", "msa1|reqp*|gpu:nvidia_h200:4(S:0-1)",
+                         "voh1|gvohp|gpu:tesla:4(S:0)", "voh1|reqp*|gpu:tesla:4(S:0)",
+                         "arw4|reqp*|gpu:nvidia_a30:10(S:0-7)", "arw1|reqp*|gpu:nvidia_a30_2g.12gb:20(S:0,3)",
+                         "tta1|reqp*|gpu:nvidia_a30_2g.12gb:4(S:0),gpu:nvidia_a30:2(S:0)",
+                         "ymh1|reqp*|gpu:nvidia_rtx_pro_4500_blackwell:10(S:0-1)", "rom1|reqp*|gpu:tesla:2(S:2,7)",
+                         "asx1|secp|(null)", "asx1|reqp*|(null)"])
+# what reqp leaves out for a 24 GB Ampere, Ada or Hopper job: the slices, the mixed node, Blackwell, the tesla cards
+REQP_OUT = "arw1,rom1,tta1,voh1,ymh1"
 
 
-class PlacementTest(unittest.TestCase):
-    """--placement (framework 30): the candidates of <site>.placement that fit, each asked with sbatch --test-only,
-    the earliest start taken, a tie to the QoS never preempted, the table at the head of the job's log."""
+def own(*rows):
+    """FAKE_SQUEUE_LIST rows: this account's jobs as job replace asks squeue for them"""
+    return "\n".join("|".join(r) for r in rows)
 
+
+class PlacementBase(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.mkdtemp(prefix="hpcw_place_")
         self.addCleanup(shutil.rmtree, self.td, True)
@@ -31,14 +45,20 @@ class PlacementTest(unittest.TestCase):
         os.makedirs(self.work)
         with open(os.path.join(self.work, "run.sbatch"), "w", newline="\n") as fh:
             fh.write("#!/bin/bash\necho hi\n")
+        self.ledger = os.path.join(self.g.state, "jobs", "demo", "jobs.tsv")
 
     def plan(self, *lines):
         with open(os.path.join(self.g.sched, "testonly"), "w", newline="\n") as fh:
             fh.write("\n".join(lines) + "\n")
 
-    def submit(self, extra, cls="gpu", name="fit"):
-        return self.g.run("job submit --project demo --name %s --class %s --dir '%s' --time 4:00:00 --cpus 4 --mem 32G %s -- run.sbatch"
-                          % (name, cls, G.posix(self.work), extra), FAKE_SINFO=SINFO)
+    def run_tool(self, args, **env):
+        e = {"FAKE_SINFO": SINFO, "FAKE_SINFO_NODES": SINFO_NODES}
+        e.update(env)
+        return self.g.run(args, **e)
+
+    def submit(self, extra, cls="gpu", name="fit", **env):
+        return self.run_tool("job submit --project demo --name %s --class %s --dir '%s' --time 4:00:00 --cpus 4 --mem 32G %s -- run.sbatch"
+                             % (name, cls, G.posix(self.work), extra), **env)
 
     def submitted(self):
         return [c for c in self.g.calls() if c.startswith("sbatch ") and "--test-only" not in c]
@@ -46,55 +66,86 @@ class PlacementTest(unittest.TestCase):
     def asked(self):
         return [c for c in self.g.calls() if c.startswith("sbatch ") and "--test-only" in c]
 
-    def test_the_earliest_start_is_taken_with_the_job_s_own_resources(self):
-        self.plan("galhp nvidia_l40s 3600", "gmsap nvidia_h200 21600", "reqp nvidia_a30 60", "reqp nvidia_l40s 1500",
-                  "reqp nvidia_rtx_pro_4500_blackwell 30")
+    def updates(self):
+        return [c for c in self.g.calls() if c.startswith("scontrol update")]
+
+    def job_id(self, out):
+        return [l for l in out.splitlines() if l.startswith("HPCW-JOB submitted")][0].split()[2]
+
+    def job_log(self, out):
+        return [l for l in out.splitlines() if l.startswith("HPCW-JOB submitted")][0].split(" log ")[1]
+
+
+class PlacementTest(PlacementBase):
+    """--placement (framework 30, 31): the candidates of <site>.placement that fit, one QoS a placement, each of its
+    partitions asked alone with sbatch --test-only, the job sent to all of them at once with a generic gres and the
+    unfitting GPU nodes excluded; the earliest QoS taken, a tie to the QoS never preempted unless the job resumes."""
+
+    def test_one_qos_is_one_placement_over_every_card_that_fits(self):
+        self.plan("galhp * 3600", "gmsap * 21600", "reqp * 60")
         rc, out, err = self.submit("--placement auto --gpu-mem 24")
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("HPCW-JOB placement fit chose reqp/requeue nvidia_a30 (preemptable, requeued)", out)
+        self.assertIn("HPCW-JOB placement fit chose reqp/requeue gpu:1 (preemptable, requeued)", out)
         self.assertRegex(out, r"HPCW-JOB submitted \d+ fit reqp/requeue log ")
         call = self.submitted()[-1]
-        for want in ("--partition=reqp", "--qos=requeue", "--gres=gpu:nvidia_a30:1", "--requeue", "--open-mode=append",
-                     "--time=4:00:00", "--cpus-per-task=4", "--mem=32G"):
+        for want in ("--partition=reqp ", "--qos=requeue", "--gres=gpu:1 ", "--exclude=" + REQP_OUT + " ", "--requeue",
+                     "--open-mode=append", "--time=4:00:00", "--cpus-per-task=4", "--mem=32G"):
             self.assertIn(want, call)
-        # every fitting candidate was asked with the job's resources; Blackwell, the MIG slice and the tesla cards were not
+        # each partition was asked alone, with the job's resources; gvohp's Volta cards fit no candidate
         asked = self.asked()
-        self.assertEqual(len(asked), 4, asked)
+        self.assertEqual(sorted(c.split("--partition=")[1].split()[0] for c in asked), ["galhp", "gmsap", "reqp"])
         for c in asked:
             self.assertIn("--time=4:00:00 --cpus-per-task=4 --mem=32G", c)
-        for absent in ("blackwell", "2g.12gb", "tesla"):
-            self.assertFalse([c for c in asked if absent in c], absent)
-        log = [l for l in out.splitlines() if l.startswith("HPCW-JOB submitted")][0].split(" log ")[1]
-        with open(log) as fh:
+            self.assertIn("--gres=gpu:1", c)
+        with open(self.job_log(out)) as fh:
             head = fh.read()
         self.assertIn("== hpcworker placement for fit", head)
-        self.assertIn("galhp/gpu nvidia_l40s 48GB ada start", head)
-        self.assertIn("chose reqp requeue yes nvidia_a30", head)
+        self.assertIn("reqp/requeue gpu:1 of nvidia_a30 nvidia_h200 nvidia_l40s start", head)
+        self.assertIn("chose reqp requeue yes gpu:1 " + REQP_OUT, head)
+        # what it was placed for, for job replace
+        with open(os.path.join(self.g.state, "jobs", "demo", "placed", self.job_id(out))) as fh:
+            self.assertEqual(fh.read().strip(), "class=gpu gpus=1 gpu_mem=24 gpu_arch=ampere,ada,hopper requeue=-")
 
-    def test_a_tie_goes_to_the_qos_never_preempted(self):
-        self.plan("galhp nvidia_l40s 240", "reqp nvidia_a30 0", "reqp nvidia_l40s 0", "gmsap nvidia_h200 0")
+    def test_the_gpu_qos_takes_both_its_partitions_earliest_first(self):
+        self.plan("galhp * 3600", "gmsap * 0", "reqp * 7200")
         rc, out, err = self.submit("--placement auto --gpu-mem 24")
         self.assertEqual(rc, 0, (out, err))
-        # gmsap and galhp both never preempted and within the tie: the smaller card
-        self.assertIn("chose galhp/gpu nvidia_l40s (never preempted)", out)
+        self.assertIn("chose gmsap,galhp/gpu gpu:1 (never preempted)", out)
+        call = self.submitted()[-1]
+        for want in ("--partition=gmsap,galhp ", "--qos=gpu", "--gres=gpu:1 ", "--no-requeue"):
+            self.assertIn(want, call)
+        self.assertNotIn("--exclude", call)
+
+    def test_a_tie_goes_to_the_qos_never_preempted_unless_the_job_resumes(self):
+        self.plan("galhp * 240", "gmsap * 9000", "reqp * 0")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose galhp,gmsap/gpu gpu:1 (never preempted)", out)
+        rc, out, err = self.submit("--placement auto --gpu-mem 24 --requeue", name="resumes")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose reqp/requeue gpu:1 (preemptable, requeued)", out)
+        self.assertIn("--requeue", self.submitted()[-1])
 
     def test_a_far_earlier_requeue_start_beats_a_late_gpu_one(self):
-        self.plan("galhp nvidia_l40s 7200", "reqp nvidia_l40s 0")
+        self.plan("galhp * 7200", "gmsap * 9000", "reqp * 0")
         rc, out, err = self.submit("--placement auto --gpu-mem 40")
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("chose reqp/requeue nvidia_l40s", out)
-        self.assertFalse([c for c in self.asked() if "nvidia_a30" in c], "a 24 GB card for a 40 GB need")
+        self.assertIn("chose reqp/requeue gpu:1", out)
+        # the 24 GB A30s and the nodes that hold them are out for a 40 GB need
+        call = self.submitted()[-1]
+        self.assertIn("--exclude=arw1,arw4,rom1,tta1,voh1,ymh1 ", call)
 
     def test_the_architectures_and_no_requeue_narrow_the_candidates(self):
-        self.plan("gvohp tesla 0", "galhp nvidia_l40s 600", "reqp nvidia_rtx_pro_4500_blackwell 0", "gmsap nvidia_h200 900")
+        self.plan("gvohp * 0", "galhp * 600", "reqp * 0", "gmsap * 900")
         rc, out, err = self.submit("--placement auto --gpu-mem 16 --gpu-arch volta+ --no-requeue")
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("chose gvohp/gpu tesla (never preempted)", out)
+        self.assertIn("chose gvohp,galhp,gmsap/gpu gpu:1 (never preempted)", out)
         self.assertFalse([c for c in self.asked() if "--partition=reqp" in c], "--no-requeue asks no preemptable partition")
         self.assertIn("--no-requeue", self.submitted()[-1])
         rc, out, err = self.submit("--placement auto --gpu-mem 24 --gpu-arch blackwell", name="bw")
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("chose reqp/requeue nvidia_rtx_pro_4500_blackwell", out)
+        self.assertIn("chose reqp/requeue gpu:1", out)
+        self.assertIn("--exclude=alh1,arw1,arw4,msa1,rom1,tta1,voh1 ", self.submitted()[-1])
 
     def test_a_refused_candidate_is_passed_by_and_a_cpu_job_races_its_qos(self):
         self.plan("secp - refuse", "prip - 900", "reqp - 0")
@@ -103,17 +154,18 @@ class PlacementTest(unittest.TestCase):
         self.assertIn("HPCW-JOB placement cpu secp/secondary cpu refused:", out)
         self.assertIn("chose reqp/requeue (preemptable, requeued)", out)
         self.assertNotIn("--gres", self.submitted()[-1])
+        self.assertNotIn("--exclude", self.submitted()[-1])
 
     def test_report_submits_nothing(self):
-        self.plan("galhp nvidia_l40s 600", "reqp nvidia_a30 1200", "gmsap nvidia_h200 3600", "reqp nvidia_l40s 1200")
+        self.plan("galhp * 600", "reqp * 1200", "gmsap * 3600")
         rc, out, err = self.submit("--placement report --gpu-mem 24")
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("chose galhp/gpu nvidia_l40s (never preempted)", out)
+        self.assertIn("chose galhp,gmsap/gpu gpu:1 (never preempted)", out)
         self.assertNotIn("HPCW-JOB submitted", out)
         self.assertEqual(self.submitted(), [])
 
     def test_what_placement_refuses(self):
-        self.plan("galhp nvidia_l40s 600")
+        self.plan("galhp * 600")
         for extra, says in (("--placement auto --partition galhp", "leave out --partition and --gpu-type"),
                             ("--placement auto --gpu-arch maxwellx", "--gpu-arch is a list of"),
                             ("--placement sometimes", "--placement is auto or report"),
@@ -122,11 +174,232 @@ class PlacementTest(unittest.TestCase):
             rc, out, err = self.submit(extra)
             self.assertNotEqual(rc, 0, extra)
             self.assertIn(says, out + err, extra)
-        self.plan("galhp nvidia_l40s refuse", "gmsap nvidia_h200 refuse", "reqp nvidia_a30 refuse", "reqp nvidia_l40s refuse")
+        self.plan("galhp * refuse", "gmsap * refuse", "reqp * refuse")
         rc, out, err = self.submit("--placement auto --gpu-mem 24")
         self.assertNotEqual(rc, 0)
         self.assertIn("no candidate placement answered sbatch --test-only", out + err)
         self.assertEqual(self.submitted(), [])
+
+    def test_place_prints_the_options_and_a_capped_qos_is_left_out_at_its_most(self):
+        self.plan("reqp - 0 debug", "prip - 0 debug", "secp - 0 debug", "prip - 900 primary", "secp - 3600 secondary", "reqp - 2400 requeue")
+        cmd = "job place --class runner --name hpcw_auto_o-r --time 2:00:00 --cpus 4 --mem 16G"
+        rc, out, err = self.run_tool(cmd)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB placement hpcw_auto_o-r chose reqp,prip,secp/debug (never preempted)", out)
+        opts = [l for l in out.splitlines() if l.startswith("HPCW-JOB options ")]
+        self.assertEqual(len(opts), 1, out)
+        self.assertRegex(opts[0], r"^HPCW-JOB options --partition=reqp,prip,secp --qos=debug( --account=\S+)? --no-requeue --open-mode=append$")
+        self.assertEqual(self.submitted(), [])
+        for c in self.asked():
+            self.assertIn("--wrap=true", c)
+            self.assertIn("--time=2:00:00 --cpus-per-task=4 --mem=16G", c)
+        # one job of the account already holds the debug QoS, its most: the race passes it by
+        held = own(("40970001", "hpcw_auto_o-r", "RUNNING", "reqp", "debug", "None", "4", "16G", "2:00:00", "N/A", "", "2026-11-04T10:00:00", "(null)"))
+        rc, out, err = self.run_tool(cmd, FAKE_SQUEUE_LIST=held)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("reqp,prip,secp/debug held: 1 of this account's jobs hold it, its most at once 1", out)
+        self.assertIn("chose prip/primary (never preempted)", out)
+        rc, out, err = self.run_tool("job place --class sometimes")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--class is cpu, batch, gpu or runner", out + err)
+
+
+class ReplaceTest(PlacementBase):
+    """job replace (31): this account's own pending jobs that hpcworker placed raced again, each moved in place with
+    scontrol update when another placement starts it sooner by more than the margin; nothing else is touched."""
+
+    OLD = "2026-01-01T00:00:00"
+
+    def placed(self, name="fit", extra="--placement auto --gpu-mem 24"):
+        self.plan("reqp * 0", "galhp * 3600", "gmsap * 3600")
+        rc, out, err = self.submit(extra, name=name)
+        self.assertEqual(rc, 0, (out, err))
+        return self.job_id(out), self.job_log(out)
+
+    def pending(self, jid, name="demo-fit", parts="reqp", qos="requeue", tres="gres:gpu:1", excl=REQP_OUT, sub=OLD, dep="(null)", reason="Priority"):
+        return (jid, name, "PENDING", parts, qos, reason, "4", "32G", "4:00:00", tres, excl, sub, dep)
+
+    def test_a_pending_job_moves_where_it_starts_much_sooner_and_once_in_the_hold(self):
+        jid, log = self.placed()
+        self.plan("reqp * 20000", "galhp * 0", "gmsap * 30000")
+        rows = own(self.pending(jid))
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved %s demo-fit reqp/requeue gpu:1 -> galhp,gmsap/gpu gpu:1 (never preempted), estimate " % jid, out)
+        self.assertIn("moved 1", out)
+        self.assertEqual(self.updates(), ["scontrol update jobid=%s partition=galhp,gmsap qos=gpu gres=gpu:1 excnodelist=" % jid])
+        with open(log) as fh:
+            self.assertIn("moved while pending from reqp/requeue gpu:1 to galhp,gmsap/gpu gpu:1", fh.read())
+        with open(os.path.join(self.g.state, "jobs", "replace.log")) as fh:
+            self.assertIn("moved %s demo-fit" % jid, fh.read())
+        # moved within the hold: the next look leaves it alone
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(len(self.updates()), 1)
+
+    def test_no_move_without_the_margin_or_where_it_is_about_to_start(self):
+        jid, _ = self.placed()
+        rows = own(self.pending(jid))
+        for plan in (("reqp * 1000", "galhp * 600", "gmsap * 600"), ("reqp * 60", "galhp * 0", "gmsap * 0")):
+            self.plan(*plan)
+            rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows)
+            self.assertEqual(rc, 0, (out, err))
+            self.assertIn("moved 0", out)
+        self.assertEqual(self.updates(), [])
+
+    def test_a_dry_run_says_and_moves_nothing(self):
+        jid, _ = self.placed()
+        self.plan("reqp * 20000", "galhp * 0", "gmsap * 0")
+        rc, out, err = self.run_tool("job replace --dry-run", FAKE_SQUEUE_LIST=own(self.pending(jid)))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB would-move %s demo-fit" % jid, out)
+        self.assertEqual(self.updates(), [])
+
+    def test_only_the_account_s_placed_waiting_jobs_are_looked_at(self):
+        jid, _ = self.placed()
+        rc, out, err = self.submit("", name="plain")   # submitted without --placement: no need is known
+        self.assertEqual(rc, 0, (out, err))
+        plain = self.job_id(out)
+        self.plan("reqp * 20000", "galhp * 0", "gmsap * 0")
+        before = len(self.asked())
+        rows = own(self.pending("40999999", name="someone-else"), self.pending(plain, name="demo-plain"),
+                   self.pending(jid, dep="afterok:1(unfulfilled)", reason="Dependency"), self.pending(jid + "_[0-3]"),
+                   self.pending(jid, sub="2099-01-01T00:00:00"), self.pending("40970002", name="hpcw_auto_o-r", tres="N/A"))
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("looked at 0 pending job(s), moved 0", out)
+        self.assertEqual(len(self.asked()), before, "nothing was raced")
+        self.assertEqual(self.updates(), [])
+
+    def test_a_job_framework_30_placed_is_read_from_its_log(self):
+        logs = os.path.join(self.g.state, "jobs", "demo", "logs")
+        os.makedirs(logs)
+        log = os.path.join(logs, "old_40970001.out")
+        with open(log, "w", newline="\n") as fh:
+            fh.write("== hpcworker placement for old, 2026-11-04T13:58:22 UTC: the estimates sbatch --test-only gave, then the choice\n"
+                     "   galhp/gpu nvidia_l40s 48GB ada start 2026-11-07T15:22:13Z in 4403 min\n"
+                     "   reqp/requeue nvidia_a30 refused: Requested node configuration is not available\n"
+                     "   reqp/requeue nvidia_h200 141GB hopper start 2026-11-06T00:28:47Z in 2070 min, preemptable\n"
+                     "   reqp/requeue nvidia_l40s 48GB ada start 2026-11-07T10:35:22Z in 4117 min, preemptable\n"
+                     "   chose reqp requeue yes nvidia_h200\n- code: the run's own lines\n")
+        with open(self.ledger, "w", newline="\n") as fh:
+            fh.write("\t".join(["40970001", "old", "gpu", "reqp", "requeue", "2026-11-04T13:58:22Z", G.posix(log), G.posix(self.work),
+                                G.posix(os.path.join(self.work, "run.sbatch")), "", ""]) + "\n")
+        self.plan("reqp nvidia_h200 90000", "reqp * 0", "galhp * 50000", "gmsap * 50000")
+        rows = own(self.pending("40970001", name="demo-old", tres="gres:gpu:nvidia_h200:1", excl=""))
+        rc, out, err = self.run_tool("job replace --project demo", FAKE_SQUEUE_LIST=rows)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved 40970001 demo-old reqp/requeue gpu:nvidia_h200:1 -> reqp/requeue gpu:1 (preemptable, requeued)", out)
+        # its race asked 48 GB or more of Ada or Hopper: the A30s and every card outside those stay out
+        self.assertEqual(self.updates(), ["scontrol update jobid=40970001 partition=reqp qos=requeue gres=gpu:1 excnodelist=arw1,arw4,rom1,tta1,voh1,ymh1 requeue=1"])
+
+    def test_a_refused_move_cancels_a_runner_job_and_keeps_any_other(self):
+        jid, _ = self.placed()
+        with open(os.path.join(self.g.sched, "scontrol_fail"), "w") as fh:
+            fh.write("slurm_update error: Access/permission denied\n")
+        self.plan("reqp * 20000", "galhp * 0", "gmsap * 0", "reqp - 20000 requeue", "prip - 0 primary", "secp - 9000 secondary",
+                  "reqp - 9000 debug", "prip - 9000 debug", "secp - 9000 debug")
+        runner = ("40970002", "hpcw_auto_o-r", "PENDING", "reqp", "requeue", "Priority", "4", "16G", "2:00:00", "N/A", "", self.OLD, "(null)")
+        rc, out, err = self.run_tool("job replace --runners", FAKE_SQUEUE_LIST=own(self.pending(jid), runner))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB kept %s demo-fit: Slurm refused the move to galhp,gmsap/gpu gpu:1 (never preempted): slurm_update error" % jid, out)
+        self.assertIn("HPCW-JOB cancelled 40970002 hpcw_auto_o-r: Slurm refused the move to prip/primary", out)
+        cancels = [c for c in self.g.calls() if c.startswith("scancel")]
+        self.assertEqual(cancels, ["scancel 40970002"])
+
+
+class UsageTest(PlacementBase):
+    def test_asked_against_used_per_name(self):
+        rc, out, err = self.submit("", name="train")
+        a = self.job_id(out)
+        rc, out, err = self.submit("", name="train")
+        b = self.job_id(out)
+        acct = "\n".join(["%s|64G||8|02:51:55|02:04:28|COMPLETED" % a, "%s.batch||4539908K|8|02:51:50|02:04:28|COMPLETED" % a,
+                          "%s|64G||8|05:00.000|01:00:00|OUT_OF_MEMORY" % b, "%s.batch||1972.50M|8|05:00.000|01:00:00|OUT_OF_MEMORY" % b])
+        rc, out, err = self.run_tool("job usage --project demo", FAKE_SACCT=acct)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB usage train runs 2 mem asked 64G peak 4.3G fit 7G cores asked 8 used 1.4 out-of-memory", out)
+
+
+class AvoidTest(PlacementBase):
+    """Nodes every job is kept off (31): the ones placement.exclude lists, the ones that end the jobs of two users or
+    more within a minute, and the ones whose probe could not read the account's home; and --prefer, a word's own
+    partition, honoured while it costs the job less than HPCW_PLACEMENT_PREFER seconds."""
+
+    def write_exclude(self, text):
+        os.makedirs(self.g.state, exist_ok=True)
+        with open(os.path.join(self.g.state, "placement.exclude"), "w", newline="\n") as fh:
+            fh.write(text)
+
+    def test_a_listed_node_is_left_out_of_every_placement_and_every_job(self):
+        self.write_exclude("# kept in service without the home file system\nmsa1\n")
+        self.plan("galhp * 3600", "gmsap * 0", "reqp * 7200")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("--partition=gmsap,galhp ", self.submitted()[-1])
+        self.assertIn("--exclude=msa1 ", self.submitted()[-1])
+        for c in self.asked():
+            if "--partition=gmsap" in c or "--partition=reqp" in c:
+                self.assertIn("msa1", c)
+        # a job sent with no placement is kept off it too
+        rc, out, err = self.submit("", cls="batch", name="plain")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("--exclude=msa1 ", self.submitted()[-1])
+        rc, out, err = self.submit("", cls="batch", name="plain2", HPCW_PLACEMENT_EXCLUDE="tta1")
+        self.assertIn("--exclude=msa1,tta1 ", self.submitted()[-1])
+
+    def test_a_node_that_ends_the_jobs_of_two_users_at_once_is_left_out(self):
+        acct = "\n".join(["msa1|u1|1", "msa1|u2|0", "msa1|u1|3", "alh1|u1|2", "alh1|u1|2", "alh1|u1|2", "arw4|u1|900", "arw4|u2|900", "arw4|u3|900"])
+        self.plan("galhp * 3600", "gmsap * 0", "reqp * 7200")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24", FAKE_SACCT=acct)
+        self.assertEqual(rc, 0, (out, err))
+        call = self.submitted()[-1]
+        self.assertIn("--exclude=msa1 ", call)
+        self.assertNotIn("alh1", call)   # one user's own failures mark nothing
+        self.assertNotIn("arw4", call)   # nor do jobs that ran a while
+
+    def test_a_node_whose_probe_fails_is_left_out_for_an_hour(self):
+        srun = os.path.join(self.g.bin, "srun")
+        with open(srun, "w", newline="\n") as fh:
+            fh.write('#!/bin/bash\necho "srun $*" >> "$FAKE_SCHED_DIR/calls"\nnode=""\n'
+                     'while [ $# -gt 0 ]; do case "$1" in -w) node=$2; shift 2;; stat) shift 3; break;; *) shift;; esac; done\n'
+                     'case "$node" in\n  msa1) echo "stat: cannot stat $1: No such file or directory" >&2; exit 1;;\n'
+                     '  alh1) echo "srun: error: Unable to allocate resources: Immediate execution impossible" >&2; exit 1;;\n'
+                     '  *) printf "%s\\n" "$@";;\nesac\n')
+        os.chmod(srun, 0o755)
+        rc, out, err = self.run_tool("job probe --max 20")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("run it inside a Slurm job", out + err)
+        rc, out, err = self.run_tool("job probe --max 20", SLURM_JOB_ID="40970000")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB probe msa1 fail: stat: cannot stat", out)
+        self.assertIn("HPCW-JOB probe alh1 unknown", out)
+        self.assertIn("HPCW-JOB probe arw4 ok", out)
+        probes = [c for c in self.g.calls() if c.startswith("srun ")]
+        self.assertTrue(all("--immediate=10" in c and "-t 1" in c for c in probes), probes)
+        # asked within the hour, a node is not asked again
+        rc, out, err = self.run_tool("job probe --max 20", SLURM_JOB_ID="40970000")
+        self.assertIn("HPCW-JOB probe asked 0 node(s)", out)
+        self.plan("galhp * 3600", "gmsap * 0", "reqp * 7200")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("--exclude=msa1 ", self.submitted()[-1])
+
+    def test_a_preferred_partition_is_honoured_unless_another_starts_the_job_an_hour_sooner(self):
+        self.plan("galhp * 1800", "gmsap * 0", "reqp * 0")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24 --prefer galhp")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose galhp/gpu gpu:1 (never preempted)", out)
+        self.assertIn("--partition=galhp ", self.submitted()[-1])
+        with open(os.path.join(self.g.state, "jobs", "demo", "placed", self.job_id(out))) as fh:
+            self.assertIn(" prefer=galhp", fh.read())
+        self.plan("galhp * 7200", "gmsap * 0", "reqp * 0")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24 --prefer galhp", name="late")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose gmsap,galhp/gpu gpu:1 (never preempted)", out)
+        rc, out, err = self.submit("--prefer galhp", name="bare")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--prefer is --placement's", out + err)
 
 
 class JobTest(unittest.TestCase):

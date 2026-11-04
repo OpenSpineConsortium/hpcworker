@@ -45,8 +45,9 @@
 #                     `use` names within seconds, and auto mode moves it when its account nears a limit (lib/accounts.sh)
 #   hpcworker diag [--json]                                      one line per check
 #   hpcworker queue report [--days N] [--limits]                 maintainers and lab leads: how long this account's jobs waited
-#   hpcworker job submit|status|log|cancel --project P ...      framework 24: a project's batch job, its partition and QoS from the
-#                     site profile, its id, log and state kept in the project's ledger (lib/jobs.sh)
+#   hpcworker job submit|status|log|cancel|place|replace|usage   framework 24: a project's batch job, its partition and QoS from the
+#                     site profile, its id, log and state kept in the project's ledger (lib/jobs.sh); 31: placed over
+#                     every fitting partition at once and placed again while it waits (job replace)
 #                                                                per partition and QoS, from Eligible (or Submit where Eligible
 #                                                                is not a time; for a later attempt of a requeued job, the End
 #                                                                of the one before) to Start, a job not started counted as
@@ -81,7 +82,7 @@ set -uo pipefail
 # the environment as the caller gave it, before this script sets a name of its own (SEED, the profile's
 # RUNTIME* and HPCW_* values): `hpcworker job submit` hands a job exactly this, as export -p wrote it
 HPCW_CALLER_EXPORTS=$(export -p)
-VERSION=30
+VERSION=31
 HPCW_HOME="${HPCW_HOME:-$HOME/.hpcworker}"
 # Where the code lives: the directory above this file's bin/. A link to the file itself is followed
 # (a ~/bin/hpcworker link still finds lib/), but the directories above stay as spelled: at Wayne

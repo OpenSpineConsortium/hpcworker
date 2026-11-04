@@ -1417,6 +1417,54 @@ ran a matmul on an RTX PRO 4500 Blackwell, while its JAX build (0.10.2) gave no 
 probe's 17 minutes and fails to compile on a V100, which is why Blackwell and Volta are left out unless a
 job names them.
 
+## Placing over every fitting partition, and again while a job waits (version 31)
+
+greg, 2026-11-04: "i thought you were doing smart GPU assignment?" Framework 30 sent a job to the one
+partition and card type its race said would start it soonest, and the job then waited there however the grid
+changed: two GPU jobs sat seven hours on reqp's H200s, Slurm estimating a start on 6 November, until they were
+sent to the A30s by hand. Measured on the grid that day (Slurm 23.02.6):
+
+- `sbatch --test-only` is a will-run test over the running jobs alone, each ending at its time limit. It ignores
+  every pending job and every job that ends early, so with this account's fairshare near 0.006 (priority 2055
+  to 2075 against 2085 to 10015 for the others on the same cards) its estimates were hours off in both
+  directions: later arrivals took freed cards first, and 7-day and 28-day limits put the H200 and L40S
+  estimates days out while A30 cards were in fact free.
+- Given several partitions, `--test-only` answers for the first of them, not the earliest, so each partition is
+  asked alone.
+- A user may change a pending job's partitions (several at once), QoS, gres, excluded nodes and requeue flag with
+  `scontrol update`, which keeps its id and every job that waits on it.
+- The free A30 cards were held back by cores: their nodes had 0 to 3 free, and the GPU jobs asked 8 cores and
+  64 GB while their measured peak was 2 to 5 GB.
+
+So a placement is now one QoS. The candidates of each QoS are raced together, every partition asked alone, and
+the job is submitted to all of that QoS's partitions at once (`--partition=a,b`, earliest first), with a generic
+`--gres=gpu:N` and `--exclude` of every GPU node there whose cards do not all fit the job (a MIG slice, a card too
+small, an architecture its code does not run on), so Slurm itself starts it wherever a fitting card frees first.
+The earliest QoS wins; one within `HPCW_PLACEMENT_TIE` seconds (300) is a tie, which goes to the QoS never
+preempted, unless the caller said `--requeue`: the job resumes from its last checkpoint, so a preemption costs it
+little, and the tie goes to the preemptable QoS, which at Wayne State reaches every card (reqp spans the GPU
+partitions' nodes and the A30s besides). A candidate line may carry a sixth field, the most of this account's
+jobs its QoS holds at once: the debug QoS allows one user 4 cores and 2 submitted jobs.
+
+`job place` prints that placement as sbatch options without submitting, for a caller that submits its own job:
+`tools/grid_runner.sh --autoscale` places each CI runner job with `--class runner`, whose candidates are the
+debug QoS on reqp, prip and secp (one job at a time), prip/primary, secp/secondary and reqp/requeue.
+
+`job replace` places pending jobs again: each job `job submit --placement` placed keeps what it was placed for
+beside the ledger (`<project>/placed/<id>`; one framework 30 placed is read from the race at the head of its log),
+and `job replace` races this account's own pending jobs again (with `--runners`, the autoscaler's runner jobs
+too). A job is moved with one `scontrol update` when another placement would start it sooner by more than
+`--gain` seconds (900), never when it is about to start where it is, never twice within `HPCW_REPLACE_HOLD`
+seconds (1800), never in its first `--age` seconds (600), and never when it waits on a dependency, is an array,
+or is not one hpcworker placed; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
+`<state>/jobs/replace.log`. When Slurm refuses a move, a runner job is cancelled (the autoscaler queues one again,
+placed afresh) and any other job is left where it is: its environment, which a resubmission would need, is never
+kept, since it may hold a credential. The autoscaler's controller runs `job replace --runners` every
+`replace_every` seconds of its autoscale.conf (300), inside its own Slurm job; nothing here runs on a login node.
+
+`job usage --project P` sets each job name's memory and cores asked beside its measured peak memory and mean cores
+used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use.
+
 ## Files
 
 ```

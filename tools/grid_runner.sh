@@ -20,6 +20,7 @@
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME [--lane N]]
 #   tools/grid_runner.sh --autoscale --repos OWNER/NAME[,OWNER/NAME...] --site S [--max-per-repo 6]
 #                        [--max-total 12] [--every 60] [--idle 10] [--hours 2] [the --start sizes]
+#                        [--hpcworker PATH|none]
 #   tools/grid_runner.sh --autoscale-stop --site S [--now]
 #   tools/grid_runner.sh --train --repos OWNER/NAME[,OWNER/NAME...] --site S [--every 60] [--ready]
 #   tools/grid_runner.sh --train-stop --site S [--now]
@@ -67,6 +68,18 @@
 # minutes. The controller queues its own successor first (afterany, singleton), as a chain's job
 # does, and writes status for --status in <runner dir>/autoscale/. GitHub is reached with the
 # account's own gh sign-in, as the chains reach it, and nothing is written into a repository.
+# Placement (hpcworker framework 31): a runner job used to wait on the site's batch queue with reason
+# Priority, the account's fairshare being low, while another partition's QoS, never preempted, or the
+# debug QoS would have started it within minutes. So where the checkout's own framework/bin/hpcworker
+# (or --hpcworker PATH) is framework 31 or later, each runner job is placed by its `job place --class
+# runner` race over the runner candidates of the site's placement file (the debug QoS over every
+# partition that takes it, at most one job of the account at a time as its limits allow, then each
+# partition with the QoS it takes), and the race's options go on its sbatch line; a race that gives
+# none leaves the job on the batch queue, as before. Every replace_every seconds of autoscale.conf
+# (300 unless written; 0 stops it) the controller also runs `job replace --runners`, which races this
+# account's pending jobs again, the ones hpcworker placed and these runner jobs, and moves each one
+# that another placement would start much sooner, in the controller's job and never on the login
+# node; each move is a line of the controller's log. --hpcworker none turns both off.
 # --autoscale-stop writes STOP there, cancels the controller's queued job and every runner job not yet
 # started; a runner job busy with a GitHub job finishes it, an idle one ends within a minute, and
 # --now cancels the running controller too. The chains and the controller may serve one repository
@@ -181,7 +194,8 @@ need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
 
 MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0 LANE=1 LANE_GIVEN=0
 TRAIN_READY=0 HOURS_GIVEN=0 REPOS="" MAX_PER_REPO=${HPCW_AUTOSCALE_MAX_PER_REPO:-6} MAX_TOTAL=${HPCW_AUTOSCALE_MAX_TOTAL:-12} EVERY=60 IDLE=10 CONTROL_HOURS=8
-RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=()
+RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=() HW=${HPCW_RUNNER_HPCWORKER:-} HW_GIVEN=0
+[ -n "$HW" ] && HW_GIVEN=1
 while [ $# -gt 0 ]; do case "$1" in
   --install) MODE=install; shift;; --start) MODE=start; shift;; --stop) MODE=stop; shift;; --status) MODE=status; shift;;
   --repo) need "$@"; REPO="$2"; shift 2;; --version) need "$@"; VERSION="$2"; shift 2;;
@@ -207,6 +221,7 @@ while [ $# -gt 0 ]; do case "$1" in
   # the jobs' own: what --install hands the install job and --start hands the first job of a chain, and each job its successor
   --pull) MODE=pull; shift;; --serve) MODE=serve; shift;; --runner-dir) need "$@"; HPCW_RUNNER_DIR="$2"; shift 2;;
   --runtime-bin) need "$@"; RUNTIME_BIN_GIVEN="$2"; shift 2;; --runtime-module) need "$@"; RUNTIME_MODULE_GIVEN="$2"; shift 2;;
+  --hpcworker) need "$@"; HW="$2"; HW_GIVEN=1; shift 2;;
   -h|--help) awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "$0"; exit 0;;
   *) die "unknown option $1 (--help)";; esac; done
 [ -n "$MODE" ] || die "one of --install, --start, --stop or --status (--help)"
@@ -228,6 +243,8 @@ CAP_BOUND=1000   # the most runner jobs autoscale.conf may ask, for one reposito
 [[ "$MAX_TOTAL" =~ ^[0-9]+$ ]] && [ "$MAX_TOTAL" -ge 1 ] && [ "$MAX_TOTAL" -le $CAP_BOUND ] || die "--max-total is 1 to $CAP_BOUND: $MAX_TOTAL"
 # the runner jobs are CPU jobs on the site's batch queue, never a GPU's
 case "$MODE" in autoscale) [ -z "$GRES" ] && [ -z "${HPCW_RUNNER_PARTITION_GIVEN:-}" ] || die "--autoscale submits CPU runner jobs on the site's batch queue alone: no --gres, no --partition";; esac
+[ -z "$HW" ] || [ "$HW" = none ] || [[ "$HW" =~ ^/[A-Za-z0-9._/+-]+$ ]] || die "--hpcworker is an absolute path to framework/bin/hpcworker, or none: $HW"
+HW_OFF=0; [ "$HW" = none ] && { HW="" HW_OFF=1; }
 [[ "$EVERY" =~ ^[0-9]+$ ]] && [ "$EVERY" -ge 15 ] && [ "$EVERY" -le 3600 ] || die "--every is seconds between two looks, 15 to 3600: $EVERY"
 [[ "$IDLE" =~ ^[0-9]+$ ]] && [ "$IDLE" -ge 1 ] && [ "$IDLE" -le 120 ] || die "--idle is minutes a runner job waits for a GitHub job, 1 to 120: $IDLE"
 if [ -n "$REPOS" ]; then
@@ -983,6 +1000,7 @@ control_args() { # what the controller's job is handed, and hands its successor
   [ -n "$GRES" ] && CONTROL_ARGS+=(--gres "$GRES")
   [ -n "${HPCW_RUNNER_PARTITION:-}" ] && CONTROL_ARGS+=(--partition "$HPCW_RUNNER_PARTITION")
   [ -n "${HPCW_RUNNER_QOS:-}" ] && CONTROL_ARGS+=(--qos "$HPCW_RUNNER_QOS")
+  [ -n "$HW" ] && CONTROL_ARGS+=(--hpcworker "$HW")
   # the controller itself is small: it asks GitHub and the scheduler and runs nothing of a workflow's
   CONTROL_FLAGS=(--time "$CONTROL_HOURS:00:00" ${QUEUE[@]+"${QUEUE[@]}"} --cpus-per-task 1 --mem 2G)
 }
@@ -1005,17 +1023,53 @@ auto_start() {
   mkdir -p "$AUTO" || die "cannot create $AUTO"
   q=$(SQ -h -u "$USER" -n "$AUTO_JOB_NAME" -o '%i %T' 2>&1) || die "squeue did not answer: $q"
   [ -z "$q" ] || die "the controller is already queued or running (job $(printf '%s' "$q" | tr '\n' ' ' | sed 's/ *$//')); tools/grid_runner.sh --autoscale-stop ends it"
+  hw_choose
   install_bin "$HERE" || die "nothing started"
   rm -f "$AUTO/STOP" "$AUTO/next" "$AUTO/next.submitting"
   control_args
   { printf 'repos=%s\nmax_per_repo=%s\nmax_total=%s\nevery=%s\nidle=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nversion=%s\nstarted=%s\n' \
       "$REPOS" "$MAX_PER_REPO" "$MAX_TOTAL" "$EVERY" "$IDLE" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$v" "$(date -u +%FT%TZ)"
-    printf 'runner_sbatch=%s\n' "${SB_FLAGS[*]}"; } > "$AUTO/autoscale.conf" || die "cannot write $AUTO/autoscale.conf"
+    printf 'runner_sbatch=%s\nplacement=%s\nreplace_every=%s\n' "${SB_FLAGS[*]}" "${HW:-none}" "${HPCW_RUNNER_REPLACE_EVERY:-300}"; } > "$AUTO/autoscale.conf" || die "cannot write $AUTO/autoscale.conf"
   out=$(SB --parsable --job-name "$AUTO_JOB_NAME" --dependency=singleton "${CONTROL_FLAGS[@]}" -D "$ROOT" --output "$AUTO/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${CONTROL_ARGS[@]}" 2>&1) \
     || die "sbatch refused the controller's job: $out"
   say "autoscale controller: job $(job_id "$out" || printf '%s' "$out"), $CONTROL_HOURS h a job, a successor queued by each; it looks every $EVERY s at ${REPOS//,/, }"
   say "for each queued job asking runs-on: [self-hosted, grid${SITE:+, $SITE}${LABELS:+, ${LABELS//,/, }}] it submits one runner job (${SB_FLAGS[*]}), at most $MAX_PER_REPO for one repository and $MAX_TOTAL in all; each GitHub job must end within $MARGIN minutes of a runner job's wall time"
   say "the caps are max_per_repo= and max_total= in $AUTO/autoscale.conf, read at every look; tools/grid_runner.sh --status shows it; --autoscale-stop ends it"
+  if [ -n "$HW" ]; then say "each runner job is placed by $HW's job place race, and every replace_every seconds (autoscale.conf) the controller runs its job replace --runners"
+  else say "runner jobs keep the site's batch queue: ${HW_SAID:-no hpcworker of framework 31 or later was named}"; fi
+}
+HW_SAID=""
+hw_choose() { # on the login node, at --autoscale: the hpcworker whose race places runner jobs, or none
+  local fw
+  [ $HW_OFF = 1 ] && { HW_SAID="--hpcworker none"; return 0; }
+  [ -n "$HW" ] || HW="$(cd "$HERE/../framework/bin" 2>/dev/null && pwd)/hpcworker"
+  [ -f "$HW" ] || { [ $HW_GIVEN = 1 ] && die "--hpcworker $HW is not there"; HW="" HW_SAID="no framework/bin/hpcworker beside this checkout"; return 0; }
+  fw=$(env -u GITHUB_TOKEN -u GH_TOKEN bash "$HW" job version 2>/dev/null | sed -n 's/^HPCW-JOB version \([0-9][0-9]*\) interface .*/\1/p' | head -n 1)
+  if [ -z "$fw" ] || [ "$fw" -lt 31 ]; then
+    [ $HW_GIVEN = 1 ] && die "--hpcworker $HW is framework ${fw:-unknown}; placing runner jobs needs 31 or later"
+    HW_SAID="$HW is framework ${fw:-unknown}, and placing runner jobs needs 31"; HW=""
+  fi
+  return 0
+}
+RUNNER_PLACE=() PLACED_ON=""
+place_runner() { # NAME -> RUNNER_PLACE, the sbatch options hpcworker's race gives a runner job of this size, and PLACED_ON; 1 when it gives none
+  local out line o
+  RUNNER_PLACE=() PLACED_ON=""
+  out=$(net env -u GITHUB_TOKEN -u GH_TOKEN bash "$HW" job place --class runner --name "$1" --time "$HOURS:00:00" ${CPUS:+--cpus "$CPUS"} ${MEM:+--mem "$MEM"} 2>&1) || {
+    log "hpcworker placed no runner job ($(printf '%s' "$out" | tail -n 1)); this one takes the site's batch queue"; return 1; }
+  line=$(printf '%s\n' "$out" | sed -n 's/^HPCW-JOB options //p' | tail -n 1)
+  for o in $line; do
+    [[ "$o" =~ ^--[a-z-]+(=[][A-Za-z0-9_.,:+-]+)?$ ]] || { log "hpcworker's placement gave an option this does not pass on ($o); this one takes the site's batch queue"; return 1; }
+  done
+  read -r -a RUNNER_PLACE <<< "$line"
+  [ ${#RUNNER_PLACE[@]} -gt 0 ] || return 1
+  PLACED_ON=$(printf '%s\n' "$out" | sed -n 's/^HPCW-JOB placement [^ ]* chose //p' | tail -n 1)
+}
+replace_look() { # job replace --runners in the controller's job: each move a line of its log
+  local out l
+  out=$(net env -u GITHUB_TOKEN -u GH_TOKEN bash "$HW" job replace --runners 2>&1) || { log "job replace did not finish: $(printf '%s' "$out" | tail -n 1)"; return 0; }
+  while IFS= read -r l; do case "$l" in "HPCW-JOB moved "*|"HPCW-JOB cancelled "*|"HPCW-JOB kept "*) log "$l";; esac; done <<< "$out"
+  return 0
 }
 auto_stop() {
   local q ids running cancel
@@ -1062,9 +1116,9 @@ prune_auto() { # a runner job's folder and log, two days after it ended
   find "$d" -maxdepth 1 -type f -name 'runner-[0-9]*.log' -mtime +2 -delete 2>/dev/null
   return 0
 }
-SUBMITTED=0 TOTAL_ALL=0 SUMMARY=""
+SUBMITTED=0 TOTAL_ALL=0 SUMMARY="" REPLACED_AT=0
 auto_look() { # OWNER/NAME: one look at its queue, and the runner jobs it needs within the caps
-  local r=$1 name queued q total waiting id st k i out failed d
+  local r=$1 name queued q total waiting id st k i out failed d flags=() placed=""
   name=$(auto_name "$r") d="$AUTO/${r//\//-}"
   queued=$(queued_jobs "$r") || { log "$r: GitHub did not list its queued jobs; nothing submitted for it at this look"; SUMMARY="$SUMMARY $r=?"; return 0; }
   q=$(SQ -h -u "$USER" -n "$name" -o '%i %T' 2>/dev/null) || { log "$r: squeue did not answer; nothing submitted for it at this look"; return 0; }
@@ -1088,14 +1142,22 @@ auto_look() { # OWNER/NAME: one look at its queue, and the runner jobs it needs 
     mkdir -p "$d/jobs" || { log "cannot create $d"; return 0; }
     REPO=$r; job_args
     while [ $i -lt $k ]; do
-      out=$(SB --parsable --job-name "$name" "${SB_FLAGS[@]}" -D "$ROOT" --output "$d/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --once "${JOB_ARGS[@]}" --idle "$IDLE" 2>&1) \
+      flags=("${SB_FLAGS[@]}") PLACED_ON=""
+      if [ -n "$HW" ] && place_runner "$name"; then
+        flags=(--time "$HOURS:00:00" "${RUNNER_PLACE[@]}")
+        [ -n "$CPUS" ] && flags+=(--cpus-per-task "$CPUS")
+        [ -n "$MEM" ] && flags+=(--mem "$MEM")
+      fi
+      out=$(SB --parsable --job-name "$name" "${flags[@]}" -D "$ROOT" --output "$d/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --once "${JOB_ARGS[@]}" --idle "$IDLE" 2>&1) \
         || { if printf '%s' "$out" | grep -qiE 'limit|MaxSubmit|QOSMax|AssocMax|too many'; then
                log "$r: Slurm's own limit on this account's jobs is reached ($(printf '%s' "$out" | tail -1)); $i submitted at this look, the rest at the next"
              else log "$r: sbatch refused a runner job: $(printf '%s' "$out" | tail -1)"; fi
              break; }
       i=$((i + 1))
+      [ -n "$PLACED_ON" ] && placed="$placed, job $(job_id "$out") on $PLACED_ON"
     done
   fi
+  [ -z "$placed" ] || log "$r: placed${placed#,}"
   TOTAL_ALL=$((TOTAL_ALL + i)) SUBMITTED=$((SUBMITTED + i))
   [ "$queued" = 0 ] && [ $i = 0 ] || log "$r: $queued queued, $total runner jobs ($waiting yet to take one), $i submitted"
   SUMMARY="$SUMMARY $r=$queued/$((total + i))"
@@ -1131,6 +1193,10 @@ control() {
     all=$(SQ -h -u "$USER" -o '%j' 2>/dev/null) || { log "squeue did not answer; this look submits nothing"; sleep "$EVERY"; continue; }
     TOTAL_ALL=$(printf '%s\n' "$all" | grep -c '^hpcw_auto_') SUMMARY=""
     for r in $repos; do auto_look "$r"; done
+    if [ -n "$HW" ]; then
+      v=$(conf_get replace_every); [[ "$v" =~ ^[0-9]+$ ]] || v=${HPCW_RUNNER_REPLACE_EVERY:-300}
+      [ "$v" -gt 0 ] && [ $(( $(now) - REPLACED_AT )) -ge "$v" ] && { replace_look; REPLACED_AT=$(now); }
+    fi
     auto_status running "at most $MAX_PER_REPO a repository, $MAX_TOTAL in all"
     looks=$((looks + 1))
     [ $((looks % 60)) = 1 ] && for r in $repos; do prune_auto "$r"; done
