@@ -1459,8 +1459,21 @@ seconds (1800), never in its first `--age` seconds (600), and never when it wait
 or is not one hpcworker placed; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
 `<state>/jobs/replace.log`. When Slurm refuses a move, a runner job is cancelled (the autoscaler queues one again,
 placed afresh) and any other job is left where it is: its environment, which a resubmission would need, is never
-kept, since it may hold a credential. The autoscaler's controller runs `job replace --runners` every
-`replace_every` seconds of its autoscale.conf (300), inside its own Slurm job; nothing here runs on a login node.
+kept, since it may hold a credential. The autoscaler's controller runs `job probe` and then `job replace --runners`
+every `replace_every` seconds of its autoscale.conf (300), inside its own Slurm job; nothing here runs on a login node.
+
+`--prefer P[,P]...` on `job submit --placement` and `job place` names the partitions a caller would rather have: the
+earliest of them is taken unless another placement starts the job more than `HPCW_PLACEMENT_PREFER` seconds (600)
+sooner, and `job replace` keeps the preference when it races the job again.
+
+Every submission, placed or not, and every race keep off three kinds of node: the ones `<state>/placement.exclude`
+lists (one node or Slurm host list a line, `#` a comment) or `HPCW_PLACEMENT_EXCLUDE` names; the ones where, in the
+last `HPCW_BAD_NODE_HOURS` (3), at least 3 jobs of at least 2 users ended FAILED or NODE_FAIL within a minute of
+starting, by sacct; and the ones whose latest `job probe` failed within `HPCW_PROBE_FRESH` seconds (3600). `job probe`
+runs only inside a Slurm job: it starts a one-core, one-minute job on each GPU node of the site's gpu candidates, at most
+`--max` (6) a call and each node once in that time, that reads the account's home and state folder; a node that cannot
+reads `fail`, and a busy one `unknown`, which holds nothing against it. The first two kinds end on their own only when
+a person takes the line away or the failures age out; the probe's verdict ends when the hour does.
 
 `job usage --project P` sets each job name's memory and cores asked beside its measured peak memory and mean cores
 used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use.

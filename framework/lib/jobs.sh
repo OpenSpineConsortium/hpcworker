@@ -31,7 +31,7 @@
 #                     the ledger's jobs cancelled in one scancel; an id the ledger does not name is named
 #                     back and never cancelled, and the call then exits 1
 #   hpcworker job place --class cpu|batch|gpu|runner [--name N] [--time T] [--cpus C] [--mem M] [--gpus G]
-#                        [--gpu-mem GB] [--gpu-arch LIST] [--requeue|--no-requeue]
+#                        [--gpu-mem GB] [--gpu-arch LIST] [--prefer P[,P]...] [--requeue|--no-requeue]
 #                     the placement --placement auto would make, submitted nowhere: the race's
 #                     "HPCW-JOB placement" lines, then "HPCW-JOB options <sbatch options>" (31)
 #   hpcworker job replace [--project P]... [--runners] [--dry-run] [--job ID]... [--gain S] [--age S]
@@ -403,10 +403,10 @@ job_race() { # GPUS RESUMES SCRIPT ARGS...: the groups on stdin -> PLACE_CHOICE 
   # QoS, which reaches more cards, and otherwise to the QoS never preempted; then to the file's order.
   # PLACE_PREFER names partitions the caller asked for (--prefer, a gate word's own --partition): the earliest
   # of them, alone, is taken unless another placement starts the job more than HPCW_PLACEMENT_PREFER seconds
-  # (3600) sooner, so a word's partition is honoured while it costs the job less than an hour.
+  # (600) sooner, so a preference is honoured while it costs the job little, and never holds it long from a free card.
   local gpus="$1" resumes="$2" script="$3"; shift 3
   local q pre max parts gres excl cards part at tie=${HPCW_PLACEMENT_TIE:-300} now held got ok best="" best_at="" best_pre="" won
-  local pgot pok pat pbest="" pbest_at="" window=${HPCW_PLACEMENT_PREFER:-3600}
+  local pgot pok pat pbest="" pbest_at="" window=${HPCW_PLACEMENT_PREFER:-600}
   now=$(date +%s); PLACE_TABLE="" PLACE_AT=""
   while read -r q pre max parts gres excl cards; do
     [ -n "$q" ] || continue

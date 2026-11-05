@@ -385,15 +385,15 @@ class AvoidTest(PlacementBase):
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("--exclude=msa1 ", self.submitted()[-1])
 
-    def test_a_preferred_partition_is_honoured_unless_another_starts_the_job_an_hour_sooner(self):
-        self.plan("galhp * 1800", "gmsap * 0", "reqp * 0")
+    def test_a_preferred_partition_is_honoured_unless_another_starts_the_job_ten_minutes_sooner(self):
+        self.plan("galhp * 400", "gmsap * 0", "reqp * 0")
         rc, out, err = self.submit("--placement auto --gpu-mem 24 --prefer galhp")
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("chose galhp/gpu gpu:1 (never preempted)", out)
         self.assertIn("--partition=galhp ", self.submitted()[-1])
         with open(os.path.join(self.g.state, "jobs", "demo", "placed", self.job_id(out))) as fh:
             self.assertIn(" prefer=galhp", fh.read())
-        self.plan("galhp * 7200", "gmsap * 0", "reqp * 0")
+        self.plan("galhp * 1800", "gmsap * 0", "reqp * 0")
         rc, out, err = self.submit("--placement auto --gpu-mem 24 --prefer galhp", name="late")
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("chose gmsap,galhp/gpu gpu:1 (never preempted)", out)
