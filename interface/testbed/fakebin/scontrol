@@ -1,10 +1,14 @@
 #!/bin/bash
 # fake scontrol (hpcworker's test bed): `show job ID` with FAKE_SUBMIT_TIME (default 2026-10-01T08:00:00); `show hostlist
 # LIST` prints LIST as it came; `update ...` is logged and answers 0, or fails with the message in
-# $FAKE_SCHED_DIR/scontrol_fail when that file is not empty.
+# $FAKE_SCHED_DIR/scontrol_fail when that file is not empty. `-o show node` prints FAKE_SCONTROL_NODES (framework 34's
+# free cards, one node a line as Slurm prints it); requeuehold and release are logged and answer 0, or fail with the
+# message in $FAKE_SCHED_DIR/requeue_fail.
 d="${FAKE_SCHED_DIR:?}"
 echo "scontrol $*" >> "$d/calls"
 [ "$1 $2" = "show job" ] && echo "JobId=$3 JobName=hpcw_worker UserId=st1234 SubmitTime=${FAKE_SUBMIT_TIME:-2026-10-01T08:00:00} StartTime=Unknown"
 [ "$1 $2" = "show hostlist" ] && echo "$3"
+[ "$1 $2 $3" = "-o show node" ] && [ -n "${FAKE_SCONTROL_NODES:-}" ] && printf '%s\n' "$FAKE_SCONTROL_NODES"
+case "$1" in requeuehold|release) if [ -s "$d/requeue_fail" ]; then cat "$d/requeue_fail" >&2; exit 1; fi;; esac
 if [ "$1" = update ] && [ -s "$d/scontrol_fail" ]; then cat "$d/scontrol_fail" >&2; exit 1; fi
 exit 0
