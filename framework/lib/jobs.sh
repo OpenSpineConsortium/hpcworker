@@ -123,6 +123,8 @@ job_usage() {
        hpcworker job place --class cpu|batch|gpu|runner [--name N --time T --cpus C --mem M --gpus G --gpu-mem GB --gpu-arch LIST --prefer P[,P] --requeue|--no-requeue]
        hpcworker job replace [--project P]... [--runners] [--dry-run] [--job ID]... [--gain SECONDS] [--age SECONDS]
        hpcworker job usage --project P [--last K]
+       hpcworker job share --project P [--last K] [--kind REGEX]
+       hpcworker job pack --items \"A B ...\" [--var NAME] [--mps auto|on|off] -- COMMAND [ARG...]
        hpcworker job probe [--nodes LIST] [--max N]
        hpcworker job version"
 }
@@ -1138,6 +1140,8 @@ cmd_job() {
     replace) job_replace "$@";;
     usage) job_usage_report "$@";;
     probe) job_probe "$@";;
+    share) job_share_report "$@";;
+    pack) job_pack "$@";;
     version) echo "HPCW-JOB version $VERSION interface $HPCW_JOB_INTERFACE";;
     *) job_usage;;
   esac

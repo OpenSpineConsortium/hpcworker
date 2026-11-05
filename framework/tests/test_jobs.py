@@ -416,6 +416,59 @@ class UsageTest(PlacementBase):
         self.assertIn("card peak 15.6G", out)
 
 
+class ShareTest(PlacementBase):
+    """job share and job pack (33): a kind's measured share of its card from the site's own job accounting, the runs that
+    fit one card of each type, and N commands side by side in one job, under MPS where the job holds a card."""
+
+    def test_a_kind_s_share_and_how_many_fit_each_card(self):
+        ids = []
+        for name in ("dg_rot_cios_base_s1", "dg_rot_cios_base_s2", "big_s1", "dg_rot_cios_base_s3"):
+            rc, out, err = self.submit("", name=name)
+            self.assertEqual(rc, 0, (out, err))
+            ids.append(self.job_id(out))
+        a, b, c, d = ids
+        acct = "\n".join([
+            "%s.batch|cpu=01:20:00,gres/gpumem=12960M,gres/gpuutil=80,mem=41825712K|cpu=01:00:00,gres/gpumem=9000M,gres/gpuutil=60|COMPLETED" % a,
+            "%s.batch|cpu=01:20:00,gres/gpumem=13000M,gres/gpuutil=90|cpu=01:00:00,gres/gpuutil=70|COMPLETED" % b,
+            "%s.batch|cpu=01:00:00,gres/gpumem=40000M,gres/gpuutil=95|cpu=01:00:00,gres/gpuutil=95|COMPLETED" % c,
+            # a run under MPS: its card memory is gathered and its card use read as 0, which says nothing of its use
+            "%s.batch|cpu=01:00:00,gres/gpumem=12000M,gres/gpuutil=0|cpu=01:00:00,gres/gpuutil=0|COMPLETED" % d,
+            "%s|||COMPLETED" % a])
+        rc, out, err = self.run_tool("job share --project demo", FAKE_SACCT=acct)
+        self.assertEqual(rc, 0, (out, err))
+        # three runs of one kind, one under MPS: peak 12.7 GB, mean use 65 per cent of the two that held a card alone
+        line = [l for l in out.splitlines() if l.startswith("HPCW-JOB share dg_rot_cios_base ")][0]
+        self.assertIn("runs 3 card peak 12.7G use 65%", line)
+        self.assertIn("nvidia_h200:3", line)       # by compute: 100 / (65 x 0.5) = 3.07; by memory 9
+        self.assertIn("nvidia_a30:1", line)        # by memory: 24 / (12.7 x 1.2) = 1.57
+        big = [l for l in out.splitlines() if l.startswith("HPCW-JOB share big ")][0]
+        self.assertIn("nvidia_h200:2", big)        # 100 / (95 x 0.5) = 2.1
+        with open(os.path.join(self.g.state, "jobs", "demo", "share.tsv")) as fh:
+            self.assertIn("dg_rot_cios_base\t3\t12.7\t65\t", fh.read())
+
+    def pack(self, extra, command, **env):
+        return self.run_tool("job pack %s -- bash -c %s" % (extra, G.shq(command)) if hasattr(G, "shq")
+                             else "job pack %s -- bash -c '%s'" % (extra, command), **env)
+
+    def test_pack_runs_each_item_side_by_side_and_keeps_the_worst_exit(self):
+        rc, out, err = self.pack("--items 'a b c' --var PLAN --mps off", 'echo "item $PLAN packed $HPCW_PACK"; [ "$PLAN" != b ] || exit 3')
+        self.assertEqual(rc, 3, (out, err))
+        for item in ("a", "b", "c"):
+            self.assertIn("[%s] item %s packed 1" % (item, item), out)
+        self.assertIn("HPCW-JOB pack ended, worst exit 3", out)
+
+    def test_pack_without_a_card_takes_turns_and_mps_on_is_refused(self):
+        rc, out, err = self.pack("--items 'a'", "true", CUDA_VISIBLE_DEVICES="")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("taking turns on the card (no MPS here)", out)
+        rc, out, err = self.pack("--items 'a' --mps on", "true", CUDA_VISIBLE_DEVICES="")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--mps on: no card in this job", out + err)
+        for extra in ("--items ''", "--items 'a b' --var lower", "--items 'a/b'", "--items a --mps maybe"):
+            rc, out, err = self.pack(extra, "true")
+            self.assertNotEqual(rc, 0, extra)
+
+
 class AvoidTest(PlacementBase):
     """Nodes every job is kept off (31): the ones placement.exclude lists, the ones that end the jobs of two users or
     more within a minute, and the ones whose probe could not read the account's home; and --prefer, a word's own
