@@ -5,7 +5,7 @@
 #
 #   hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P[,P]...] [--time T] [--cpus C]
 #                        [--mem M] [--gpus G] [--gpu-type T] [--requeue|--no-requeue] [--after ID[:ok|any]]...
-#                        [--placement auto|report [--gpu-mem GB] [--gpu-arch LIST]]
+#                        [--placement auto|report [--gpu-mem GB] [--gpu-arch LIST] [--prefer P[,P]...]]
 #                        [--array SPEC] [--dir D] [--check] -- SCRIPT [ARG...]
 #                     SCRIPT queued with the partition, QoS, account and GPU request the deployment's
 #                     profile gives the class (--partition picks one or more of the class's own, the job
@@ -30,8 +30,41 @@
 #   hpcworker job cancel --project P ID...|--all
 #                     the ledger's jobs cancelled in one scancel; an id the ledger does not name is named
 #                     back and never cancelled, and the call then exits 1
+#   hpcworker job place --class cpu|batch|gpu|runner [--name N] [--time T] [--cpus C] [--mem M] [--gpus G]
+#                        [--gpu-mem GB] [--gpu-arch LIST] [--prefer P[,P]...] [--requeue|--no-requeue]
+#                     the placement --placement auto would make, submitted nowhere: the race's
+#                     "HPCW-JOB placement" lines, then "HPCW-JOB options <sbatch options>" (31)
+#   hpcworker job replace [--project P]... [--runners] [--dry-run] [--job ID]... [--gain S] [--age S]
+#                     this account's pending jobs that hpcworker placed (every project's ledger unless
+#                     --project names some; with --runners the autoscaler's runner jobs too) raced
+#                     again, each moved with scontrol update when another placement starts it sooner
+#                     by more than --gain seconds (900); "HPCW-JOB moved|would-move|kept|cancelled"
+#                     lines, then "HPCW-JOB replace looked at N pending job(s), moved M" (31)
+#   hpcworker job usage --project P [--last K]
+#                     per job name of the ledger's last K ended jobs: memory and cores asked against
+#                     the measured peak memory and mean cores used, and a fit of 1.5 times the peak (31)
+#   hpcworker job probe [--nodes LIST] [--max N]
+#                     from inside a Slurm job: a one-core, one-minute job on each GPU node of the site's gpu
+#                     candidates (or those LIST names) that reads this account's home and state folder; a
+#                     node that cannot is kept out of every placement for an hour (31)
 #   hpcworker job version
 #                     "HPCW-JOB version <framework> interface <n>", the copy that runs this command
+#
+# Placement over every fitting partition at once (31): framework 30 sent a job to the one partition and
+# card type the race said would start it soonest, and the job then waited there however the grid changed.
+# sbatch --test-only is a will-run test over the running jobs alone, each ending at its time limit: it
+# ignores every pending job and every job that ends early, so with a low fairshare its estimates were
+# hours off either way (2026-11-04: two GPU jobs waited seven hours on the H200 cards of the preemptable
+# partition, estimated for 6 November, while A30 cards stood free). So a placement is now one QoS: every
+# candidate partition of that QoS, asked alone (given several, --test-only answers for the first, not the
+# earliest), and the job submitted to all of them at once with a generic gpu:N and --exclude of every GPU
+# node there whose cards do not all fit, so Slurm starts it wherever a fitting card frees first. A caller's --requeue says the job resumes
+# from its last checkpoint, and a tie then goes to the preemptable QoS, which reaches the most cards. A
+# candidate line's sixth field caps how many of this account's jobs a QoS holds at once (the debug QoS,
+# whose limits allow one 4-core job a user). Each placed job's need is kept beside the ledger
+# (<project>/placed/<id>), and job replace races it again while it waits: a user may change a pending
+# job's partitions, QoS, gres, excluded nodes and requeue flag with scontrol update, which keeps its id
+# and every job waiting on it. A move is logged in the job's log and in <state>/jobs/replace.log.
 #
 # Auto placement (30): --placement auto names what a job needs, not where it runs: its cores, memory and
 # time, and for the gpu class the least memory a card must hold (--gpu-mem, in GB) and the architectures
@@ -83,10 +116,14 @@ HPCW_JOB_MEM_RE='^[1-9][0-9]{0,5}[KMGT]?$'
 HPCW_JOB_ARRAY_RE='^[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?(,[0-9]{1,7}(-[0-9]{1,7}(:[0-9]{1,7})?)?){0,31}(%[1-9][0-9]{0,4})?$'
 
 job_usage() {
-  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P[,P]... --time T --cpus C --mem M --gpus G --gpu-type T --requeue|--no-requeue --after ID[:ok|any] --array SPEC --dir D --check --placement auto|report --gpu-mem GB --gpu-arch LIST] -- SCRIPT [ARG...]
+  die "usage: hpcworker job submit --project P --name N --class cpu|batch|gpu [--partition P[,P]... --time T --cpus C --mem M --gpus G --gpu-type T --requeue|--no-requeue --after ID[:ok|any] --array SPEC --dir D --check --placement auto|report --gpu-mem GB --gpu-arch LIST --prefer P[,P]] -- SCRIPT [ARG...]
        hpcworker job status --project P [--last K] [--json]
        hpcworker job log --project P ID [--task N] [--lines N]
        hpcworker job cancel --project P ID...|--all
+       hpcworker job place --class cpu|batch|gpu|runner [--name N --time T --cpus C --mem M --gpus G --gpu-mem GB --gpu-arch LIST --prefer P[,P] --requeue|--no-requeue]
+       hpcworker job replace [--project P]... [--runners] [--dry-run] [--job ID]... [--gain SECONDS] [--age SECONDS]
+       hpcworker job usage --project P [--last K]
+       hpcworker job probe [--nodes LIST] [--max N]
        hpcworker job version"
 }
 
@@ -209,62 +246,249 @@ job_partition_types() { # PARTITION -> each GPU type its nodes hold, one a line 
   sinfo -h -o '%P|%G' 2>/dev/null | awk -F'|' -v p="$1" '{ q = $1; sub(/[*]$/, "", q); if (q == p) print $2 }' \
     | tr ',' '\n' | sed -n 's/^gpu:\([A-Za-z0-9_.-]*\):[0-9].*/\1/p' | sort -u
 }
-job_candidates() { # CLASS GPU_MEM ARCHS NO_PREEMPT -> "PARTITION QOS PREEMPTABLE TYPE MEMORY ARCH" lines, TYPE - for a CPU job
-  local class="$1" need="$2" archs="$3" nopre="$4" f kind part qos pre t card mem arch
+job_candidates() { # CLASS GPU_MEM ARCHS NO_PREEMPT -> "PARTITION QOS PREEMPTABLE TYPE MEMORY ARCH MAX" lines, TYPE - for a CPU job
+  # MAX is the most of this account's jobs the QoS may hold at once (the file's sixth field), - for no such bound
+  local class="$1" need="$2" archs="$3" nopre="$4" f kind part qos pre max t card mem arch
   f=$(job_place_file)
   [ -r "$f" ] || return 1
-  [ "$class" = gpu ] && kind=gpu || kind=cpu
-  while read -r tag k part qos pre; do
+  case "$class" in gpu) kind=gpu;; runner) kind=runner;; *) kind=cpu;; esac
+  while read -r tag k part qos pre max; do
     [ "$tag" = candidate ] && [ "$k" = "$kind" ] || continue
     [ "$nopre" = 1 ] && [ "$pre" = yes ] && continue
-    if [ "$kind" = cpu ]; then printf '%s %s %s - - -\n' "$part" "$qos" "$pre"; continue; fi
+    [[ "${max:=-}" =~ ^([1-9][0-9]{0,3}|-)$ ]] || max=-
+    if [ "$kind" != gpu ]; then printf '%s %s %s - - - %s\n' "$part" "$qos" "$pre" "$max"; continue; fi
     for t in $(job_partition_types "$part"); do
       card=$(job_card "$t" "$part") || continue
       mem=${card% *} arch=${card#* }
       [ "$mem" -ge "$need" ] || continue
       case " $archs " in *" $arch "*) ;; *) continue;; esac
-      printf '%s %s %s %s %s %s\n' "$part" "$qos" "$pre" "$t" "$mem" "$arch"
+      printf '%s %s %s %s %s %s %s\n' "$part" "$qos" "$pre" "$t" "$mem" "$arch" "$max"
     done
   done < <(grep -E '^candidate ' "$f")
+}
+job_gpu_nodes() { # PARTITION... -> "NODE PARTITION TYPE" a line for each GPU type a node of those partitions holds (? for an untyped card)
+  sinfo -h -N -o '%N|%P|%G' 2>/dev/null | awk -F'|' -v ps=" $* " '
+    { q = $2; sub(/[*]$/, "", q); if (index(ps, " " q " ") == 0) next
+      # GRES pieces split on commas: gpu:TYPE:N(S:0,3) leaves a "3)" behind, which names nothing
+      n = split($3, g, ",")
+      for (i = 1; i <= n; i++) {
+        if (g[i] ~ /^gpu:[A-Za-z0-9_.-]+:[0-9]/) { split(g[i], f, ":"); print $1, q, f[2] }
+        else if (g[i] ~ /^gpu:[0-9]/) print $1, q, "?"
+      } }' | sort -u
+}
+job_hostlist() { # NODE... -> one Slurm host list, compressed where scontrol can say it (arw[1-3],tta1)
+  local plain short; plain=$(printf '%s,' "$@"); plain=${plain%,}
+  [ -n "$plain" ] || return 0
+  short=$(scontrol show hostlist "$plain" 2>/dev/null | head -1)
+  if [[ "$short" =~ ^[A-Za-z0-9_.,\[\]-]+$ ]]; then printf '%s\n' "$short"; else printf '%s\n' "$plain"; fi
+}
+BAD_NODES="" BAD_NODES_READ=0
+job_bad_nodes() { # the nodes that end jobs at once: one sacct a process, the nodes spaced
+  # A node that takes jobs and fails each within a minute is a black hole for a placement that goes wherever
+  # a card is free first (2026-11-04: an H200 node back from draining without the home file system failed
+  # every job of three users in its first second, two of ours among them). A node where, in the last
+  # HPCW_BAD_NODE_HOURS (3), at least 3 jobs of at least 2 users ended FAILED or NODE_FAIL within 60 seconds of
+  # starting is left out of every placement; one user's own broken script, failing on every node it meets, marks
+  # none. Where sacct gives no answer nothing is left out.
+  if [ $BAD_NODES_READ = 0 ]; then
+    BAD_NODES_READ=1
+    local since; since=$(date -d "-${HPCW_BAD_NODE_HOURS:-3} hours" +%Y-%m-%dT%H:%M:%S 2>/dev/null) || return 0
+    BAD_NODES=$(LC_ALL=C timeout 30 sacct -a -X -n -P -S "$since" -E now -s FAILED,NODE_FAIL -o NodeList,User,ElapsedRaw 2>/dev/null \
+      | awk -F'|' '$1 ~ /^[A-Za-z0-9_.-]+$/ && $3 ~ /^[0-9]+$/ && $3 <= 60 { n[$1]++; if (!((($1) SUBSEP ($2)) in seen)) { seen[$1, $2] = 1; u[$1]++ } }
+        END { for (k in n) if (n[k] >= 3 && u[k] >= 2) print k }' | sort | tr '\n' ' ')
+  fi
+  printf '%s' "$BAD_NODES"
+}
+# a Slurm host list as one word; ] comes first in the bracket since a backslash is no escape inside one, and an escaped ]
+# there would close it and refuse every plain node name
+HPCW_JOB_HOSTLIST_RE='^[][A-Za-z0-9_.,-]+$'
+job_exclude_file() { printf '%s/placement.exclude' "$STATE_DIR"; }
+job_listed_nodes() { # the nodes a person has listed to keep every job off, spaced: <state>/placement.exclude and HPCW_PLACEMENT_EXCLUDE
+  # One node or Slurm host list a line (msa[2-3]), # starting a comment, or a comma list in the variable: a node
+  # the site keeps in service that cannot run our jobs (2026-11-04: an H200 node, some hours without the home file system).
+  local f w out=""; f=$(job_exclude_file)
+  for w in $( { [ -r "$f" ] && sed 's/#.*//' "$f"; printf '%s\n' "${HPCW_PLACEMENT_EXCLUDE:-}" | tr ',' '\n'; } | tr -s ' \t' '\n' ); do
+    [[ "$w" =~ $HPCW_JOB_HOSTLIST_RE ]] || continue
+    case "$w" in *\[*) out="$out $(scontrol show hostnames "$w" 2>/dev/null | tr '\n' ' ')";; *) out="$out $w";; esac
+  done
+  printf '%s' "${out# }"
+}
+AVOID_NODES="" AVOID_READ=0
+job_avoid_nodes() { # every node a job of ours is kept off: listed, ending jobs at once, or failing its probe, spaced, one read a process
+  if [ $AVOID_READ = 0 ]; then
+    AVOID_READ=1
+    AVOID_NODES=$(printf '%s\n' $(job_listed_nodes) $(job_bad_nodes) $(job_probed_bad) | grep . | sort -u | tr '\n' ' ')
+  fi
+  printf '%s' "$AVOID_NODES"
+}
+job_probe_file() { printf '%s/placement.probe' "$STATE_DIR"; }
+job_probed_bad() { # the nodes whose latest probe within HPCW_PROBE_FRESH seconds (3600) failed, spaced
+  local f; f=$(job_probe_file)
+  [ -r "$f" ] || return 0
+  awk -v t="$(( $(date +%s) - ${HPCW_PROBE_FRESH:-3600} ))" '$2 ~ /^[0-9]+$/ && $3 != "unknown" { last[$1] = $2; said[$1] = $3 }
+    END { for (n in last) if (last[n] >= t && said[n] == "fail") printf "%s ", n }' "$f"
+}
+job_groups() { # GPUS: job_candidates' lines on stdin -> "QOS PREEMPTABLE MAX PARTITIONS GRES EXCLUDE CARDS" a line, in the file's order
+  # Framework 31: one QoS is one placement. Slurm gives a job one QoS, and a job naming several partitions
+  # starts on whichever of them can run it first, so the candidates of each QoS become one submission over
+  # every partition they fit on, with a generic gpu:N and every GPU node of those partitions excluded that
+  # holds a card the job cannot use (a MIG slice, a card too small, an architecture its code does not run
+  # on), since a generic request could otherwise land on one. A node with a fitting card beside an unfitting
+  # one is left out for the same reason.
+  local gpus="$1" part qos pre t mem arch max q order="" node np nt cards p excl
+  declare -A parts pres maxes fits
+  while read -r part qos pre t mem arch max; do
+    [ -n "$part" ] || continue
+    case " $order " in *" $qos "*) ;; *) order="$order $qos"; pres[$qos]=$pre; maxes[$qos]=$max;; esac
+    case ",${parts[$qos]:-}," in *",$part,"*) ;; *) parts[$qos]="${parts[$qos]:+${parts[$qos]},}$part";; esac
+    [ "$t" = - ] || fits[$qos/$part]="${fits[$qos/$part]:-} $t "
+  done
+  local bad; bad=" $(job_avoid_nodes) "
+  for q in $order; do
+    if [ -z "${fits[$q/${parts[$q]%%,*}]:-}" ]; then
+      excl=""
+      [ "$bad" = "  " ] || excl=$(sinfo -h -N -p "${parts[$q]}" -o '%N' 2>/dev/null | sort -u | while read -r node; do case "$bad" in *" $node "*) printf '%s ' "$node";; esac; done)
+      p=""; [ -n "$excl" ] && p=$(job_hostlist $excl)
+      printf '%s %s %s %s - %s -\n' "$q" "${pres[$q]}" "${maxes[$q]}" "${parts[$q]}" "${p:--}"; continue
+    fi
+    excl=" " cards=""
+    while read -r node np nt; do
+      [ -n "$node" ] || continue
+      # a node listed to avoid, or one that ends every job at once, is left out whatever its cards (job_avoid_nodes)
+      case "$bad" in *" $node "*) case "$excl" in *" $node "*) ;; *) excl="$excl$node ";; esac; continue;; esac
+      case "${fits[$q/$np]:-}" in
+        *" $nt "*) case ",$cards," in *",$nt,"*) ;; *) cards="${cards:+$cards,}$nt";; esac;;
+        *) case "$excl" in *" $node "*) ;; *) excl="$excl$node ";; esac;;
+      esac
+    done < <(job_gpu_nodes ${parts[$q]//,/ })
+    p=""; [ "$excl" != " " ] && p=$(job_hostlist $excl)
+    cards=$(printf '%s\n' ${cards//,/ } | sort | paste -sd, -)
+    printf '%s %s %s %s gpu:%s %s %s\n' "$q" "${pres[$q]}" "${maxes[$q]}" "${parts[$q]}" "$gpus" "${p:--}" "${cards:--}"
+  done
 }
 job_estimate() { # START_TEXT -> epoch seconds of "to start at YYYY-MM-DDTHH:MM:SS", or nothing
   local at; at=$(printf '%s\n' "$1" | sed -n 's/.*to start at \([0-9T:-]*\).*/\1/p' | head -1)
   [ -n "$at" ] && date -d "${at/T/ }" +%s 2>/dev/null
 }
-PLACE_TABLE="" PLACE_CHOICE=""
-job_race() { # GPUS REQUEUE SCRIPT ARGS... -> PLACE_CHOICE "PARTITION QOS PREEMPTABLE TYPE" and PLACE_TABLE, or 1 when no candidate answered
-  local gpus="$1" requeue="$2" script="$3"; shift 3
-  local line part qos pre t mem arch opts out at best="" best_at="" best_pre="" best_mem="" tie=${HPCW_PLACEMENT_TIE:-300} now
-  now=$(date +%s); PLACE_TABLE=""
-  while read -r part qos pre t mem arch; do
-    [ -n "$part" ] || continue
-    opts=(--partition="$part" --qos="$qos")
-    [ -n "${P_account:-}" ] && opts+=(--account="$P_account")
-    [ "$t" != - ] && opts+=(--gres="gpu:$t:$gpus")
-    out=$(job_caller_env; sbatch --test-only "${opts[@]}" "$@" "$script" 2>&1 | job_clean | tr '\n' ' ')
-    at=$(job_estimate "$out")
-    if [ -z "$at" ]; then
-      PLACE_TABLE="$PLACE_TABLE$part/$qos ${t/#-/cpu} refused: $(printf '%s' "$out" | sed 's/^sbatch: error: //' | cut -c1-120)"$'\n'; continue
+OWN_JOBS="" OWN_JOBS_READ=0
+job_own_jobs() { # this account's jobs, one squeue a process: ID|NAME|STATE|PARTITIONS|QOS|REASON|CPUS|MEM|TIME|TRES|EXCLUDED|SUBMITTED|DEPENDENCY
+  if [ $OWN_JOBS_READ = 0 ]; then
+    OWN_JOBS=$(squeue -h -u "${USER:-$(id -un)}" -o '%i|%j|%T|%P|%q|%r|%C|%m|%l|%b|%x|%V|%E' 2>/dev/null) || return 1
+    OWN_JOBS_READ=1
+  fi
+  [ -n "$OWN_JOBS" ] && printf '%s\n' "$OWN_JOBS"
+  return 0
+}
+ASK_SAID=""
+job_ask() { # PARTITION QOS GRES EXCLUDE SCRIPT ARGS... -> epoch seconds of the start sbatch --test-only gives, else 1 with its words in ASK_SAID
+  local part="$1" qos="$2" gres="$3" excl="$4" script="$5" opts out at; shift 5
+  opts=(--partition="$part" --qos="$qos")
+  [ -n "${P_account:-}" ] && opts+=(--account="$P_account")
+  [ "$gres" != - ] && opts+=(--gres="$gres")
+  [ "$excl" != - ] && opts+=(--exclude="$excl")
+  # a caller that submits itself has no script to ask with: a one-word job asks for the same resources
+  if [ -n "$script" ]; then out=$(job_caller_env; sbatch --test-only "${opts[@]}" "$@" "$script" 2>&1 | job_clean | tr '\n' ' ')
+  else out=$(job_caller_env; sbatch --test-only "${opts[@]}" "$@" --wrap=true 2>&1 | job_clean | tr '\n' ' '); fi
+  at=$(job_estimate "$out")
+  if [ -n "$at" ]; then printf '%s' "$at"; return 0; fi
+  ASK_SAID=$(printf '%s' "$out" | sed 's/^sbatch: error: //' | cut -c1-120); return 1
+}
+PLACE_TABLE="" PLACE_CHOICE="" PLACE_AT="" PLACE_WHY="" PLACE_PREFER=""
+job_race() { # GPUS RESUMES SCRIPT ARGS...: the groups on stdin -> PLACE_CHOICE "PARTITIONS QOS PREEMPTABLE GRES EXCLUDE", PLACE_AT and PLACE_TABLE; 1 when none answered
+  # Each partition is asked alone, since given several, sbatch --test-only answers for the first of them and
+  # not the earliest (Slurm 23.02 at Wayne State, 2026-11-04). A group's estimate is its earliest partition's,
+  # and its partitions are submitted earliest first, refused ones left out. The earliest group wins; one
+  # within HPCW_PLACEMENT_TIE seconds of it is a tie, which goes, when RESUMES is yes (the caller's
+  # --requeue: the job resumes from its last checkpoint, so a preemption costs it little), to the preemptable
+  # QoS, which reaches more cards, and otherwise to the QoS never preempted; then to the file's order.
+  # PLACE_PREFER names partitions the caller asked for (--prefer, a gate word's own --partition): the earliest
+  # of them, alone, is taken unless another placement starts the job more than HPCW_PLACEMENT_PREFER seconds
+  # (600) sooner, so a preference is honoured while it costs the job little, and never holds it long from a free card.
+  local gpus="$1" resumes="$2" script="$3"; shift 3
+  local q pre max parts gres excl cards part at tie=${HPCW_PLACEMENT_TIE:-300} now held got ok best="" best_at="" best_pre="" won
+  local pgot pok pat pbest="" pbest_at="" window=${HPCW_PLACEMENT_PREFER:-600}
+  now=$(date +%s); PLACE_TABLE="" PLACE_AT=""
+  while read -r q pre max parts gres excl cards; do
+    [ -n "$q" ] || continue
+    if [ "$max" != - ]; then
+      held=$(job_own_jobs | awk -F'|' -v q="$q" '$5 == q { n++ } END { print n + 0 }')
+      if [ "$held" -ge "$max" ]; then PLACE_TABLE="$PLACE_TABLE$parts/$q held: $held of this account's jobs hold it, its most at once $max"$'\n'; continue; fi
     fi
-    [ "$at" -lt "$now" ] && at=$now
-    PLACE_TABLE="$PLACE_TABLE$part/$qos ${t/#-/cpu}$([ "$t" != - ] && echo " ${mem}GB $arch") start $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ) in $(( (at - now) / 60 )) min$([ "$pre" = yes ] && echo ", preemptable")"$'\n'
-    if [ -z "$best" ]; then best="$part $qos $pre $t" best_at=$at best_pre=$pre best_mem=$mem; continue; fi
-    # earlier by more than the tie wins; within the tie, never preempted wins, then the smaller card
-    if [ "$at" -lt $((best_at - tie)) ] \
-      || { [ "$at" -le $((best_at + tie)) ] && [ "$best_pre" = yes ] && [ "$pre" = no ]; } \
-      || { [ "$at" -le $((best_at + tie)) ] && [ "$best_pre" = "$pre" ] && [ "$mem" != - ] && [ "$best_mem" != - ] && [ "$mem" -lt "$best_mem" ] && [ "$at" -le $((best_at + tie)) ]; }; then
-      best="$part $qos $pre $t" best_at=$at best_pre=$pre best_mem=$mem
+    got=""
+    for part in ${parts//,/ }; do
+      if at=$(job_ask "$part" "$q" "$gres" "$excl" "$script" "$@"); then
+        [ "$at" -lt "$now" ] && at=$now
+        got="$got$at $part"$'\n'
+        PLACE_TABLE="$PLACE_TABLE$part/$q $([ "$gres" = - ] && echo cpu || echo "$gres of ${cards//,/ }") start $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ) in $(( (at - now) / 60 )) min$([ "$pre" = yes ] && echo ", preemptable")"$'\n'
+      else
+        PLACE_TABLE="$PLACE_TABLE$part/$q $([ "$gres" = - ] && echo cpu || echo "$gres") refused: $ASK_SAID"$'\n'
+      fi
+    done
+    [ -n "$got" ] || continue
+    ok=$(printf '%s' "$got" | sort -s -n -k1,1 | awk '{ printf "%s%s", (NR > 1 ? "," : ""), $2 }')
+    at=$(printf '%s' "$got" | sort -n | head -1 | cut -d' ' -f1)
+    won=0
+    if [ -z "$best" ] || [ "$at" -lt $((best_at - tie)) ]; then won=1
+    elif [ "$at" -le $((best_at + tie)) ] && [ "$best_pre" != "$pre" ]; then
+      if [ "$resumes" = yes ]; then [ "$pre" = yes ] && won=1; else [ "$pre" = no ] && won=1; fi
+    fi
+    [ $won = 1 ] && best="$ok $q $pre $gres $excl" best_at=$at best_pre=$pre
+    if [ -n "${PLACE_PREFER:-}" ]; then
+      pgot=$(printf '%s' "$got" | awk -v want=",$PLACE_PREFER," 'index(want, "," $2 ",") > 0')
+      if [ -n "$pgot" ]; then
+        pok=$(printf '%s\n' "$pgot" | sort -s -n -k1,1 | awk '{ printf "%s%s", (NR > 1 ? "," : ""), $2 }')
+        pat=$(printf '%s\n' "$pgot" | sort -n | head -1 | cut -d' ' -f1)
+        if [ -z "$pbest" ] || [ "$pat" -lt "$pbest_at" ]; then pbest="$pok $q $pre $gres $excl" pbest_at=$pat; fi
+      fi
     fi
   done
   [ -n "$best" ] || return 1
-  PLACE_CHOICE="$best"
+  PLACE_CHOICE="$best" PLACE_AT="$best_at"
+  if [ -n "$pbest" ] && [ "$pbest_at" -le $((best_at + window)) ]; then PLACE_CHOICE="$pbest" PLACE_AT="$pbest_at"; fi
+  return 0
+}
+job_choice_text() { # -> "PARTITIONS/QOS [GRES] (how)" of PLACE_CHOICE, as the choice line says it
+  local cp cq cpre cg cx; read -r cp cq cpre cg cx <<< "$PLACE_CHOICE"
+  printf '%s/%s%s (%s)' "$cp" "$cq" "$([ "$cg" != - ] && echo " $cg")" "$([ "$cpre" = yes ] && echo "preemptable, requeued" || echo "never preempted")"
+}
+job_choice_options() { # REQUEUE(yes|no|"") -> PLACE_CHOICE as sbatch options, one a line
+  local cp cq cpre cg cx; read -r cp cq cpre cg cx <<< "$PLACE_CHOICE"
+  printf '%s\n' "--partition=$cp" "--qos=$cq"
+  [ -n "${P_account:-}" ] && printf '%s\n' "--account=$P_account"
+  [ "$cg" != - ] && printf '%s\n' "--gres=$cg"
+  [ "$cx" != - ] && printf '%s\n' "--exclude=$cx"
+  # a job placed where it may be preempted is requeued and resumes; every placed job's log is appended to,
+  # so the table written first stays at its head
+  if [ "$cpre" = yes ] && [ "$1" != no ]; then printf '%s\n' --requeue; else printf '%s\n' --no-requeue; fi
+  printf '%s\n' --open-mode=append
+}
+job_need_place() { # CLASS GPUS GPU_MEM ARCHS REQUEUE SCRIPT ARGS...: the whole race for one need -> PLACE_*, or 1 with why in PLACE_WHY
+  local class="$1" gpus="$2" need="$3" archs="$4" requeue="$5" script="$6" cands nopre=0; shift 6
+  [ "$requeue" = no ] && nopre=1
+  PLACE_WHY="" PLACE_TABLE="" PLACE_CHOICE=""
+  job_avoid_nodes > /dev/null   # read once in this shell, so every race of one job replace shares one sacct
+  cands=$(job_candidates "$class" "$need" "$archs" "$nopre")
+  if [ -z "$cands" ]; then
+    if [ "$class" = gpu ]; then PLACE_WHY="no partition of this site holds a card of ${need} GB or more of ${archs// /, }$([ $nopre = 1 ] && echo " that is never preempted (--no-requeue)")"
+    else PLACE_WHY="this site's placement file names no $class candidate$([ $nopre = 1 ] && echo " that is never preempted (--no-requeue)")"; fi
+    return 1
+  fi
+  job_race "$gpus" "$requeue" "$script" "$@" < <(printf '%s\n' "$cands" | job_groups "$gpus") && return 0
+  PLACE_WHY="no candidate placement answered sbatch --test-only: $(printf '%s' "$PLACE_TABLE" | tail -n 3 | tr '\n' ' ')"
+  return 1
+}
+job_need_write() { # PROJECT ID CLASS GPUS GPU_MEM ARCHS REQUEUE [PREFER]: what the job was placed for, for job replace
+  local d; d="$(job_dir "$1")/placed"
+  ( umask 077; mkdir -p "$d" && printf 'class=%s gpus=%s gpu_mem=%s gpu_arch=%s requeue=%s%s\n' "$3" "$4" "$5" "${6// /,}" "${7:--}" "${8:+ prefer=$8}" > "$d/$2" ) 2>/dev/null
+  return 0
 }
 
 job_submit() {
   local project="" name="" class="" time="" cpus="" mem="" gpus=1 dir="$PWD" check=0 afters=() array="" want="" requeue="" type=""
-  local placement="" gpumem=0 gpuarch=""
+  local placement="" gpumem=0 gpuarch="" prefer=""
   while [ $# -gt 0 ]; do case "$1" in
     --project) project="${2:-}"; shift 2 || job_usage;;
+    --prefer) prefer="${2:-}"; shift 2 || job_usage;;
     --name) name="${2:-}"; shift 2 || job_usage;;
     --class) class="${2:-}"; shift 2 || job_usage;;
     --time) time="${2:-}"; shift 2 || job_usage;;
@@ -298,6 +522,8 @@ job_submit() {
   case "$dir" in /*) [ -d "$dir" ] || die "--dir $dir is not a folder";; *) die "--dir must be an absolute path";; esac
   case "$placement" in ""|auto|report) ;; *) die "--placement is auto or report";; esac
   [[ "$gpumem" =~ ^[0-9]{1,4}$ ]] || die "--gpu-mem is the least memory a card must hold, in whole GB"
+  [ -z "$prefer" ] || [[ "$prefer" =~ ^[A-Za-z0-9_.-]{1,64}(,[A-Za-z0-9_.-]{1,64}){0,7}$ ]] || die "--prefer is a partition's name, or up to eight joined by commas"
+  [ -z "$prefer" ] || [ -n "$placement" ] || die "--prefer is --placement's"
   if [ -n "$placement" ]; then
     [ -z "$want" ] && [ -z "$type" ] || die "--placement chooses the partition and the card; leave out --partition and --gpu-type, and name the need with --gpu-mem and --gpu-arch"
     [ -z "$array" ] || die "--placement places one job; an array keeps its --partition"
@@ -319,31 +545,24 @@ job_submit() {
   if [ -n "$placement" ]; then
     case "$class" in cpu|batch|gpu) ;; *) die "the class is cpu, batch or gpu";; esac
     [ -r "$(job_place_file)" ] || die "this site has no placement file ($(job_place_file)); name the partition instead"
-    local cands race_args=() nopre=0
-    [ "$requeue" = no ] && nopre=1
-    cands=$(job_candidates "$class" "$gpumem" "$gpuarch" "$nopre")
-    [ -n "$cands" ] || die "no partition of this site holds a card of ${gpumem} GB or more of ${gpuarch// /, }$([ $nopre = 1 ] && echo " that is never preempted (--no-requeue)")"
+    local race_args=()
     # the job's own resources and wall time, as each candidate is asked with them
     race_args=("--job-name=$project-$name" -D "$dir")
     [ -n "$time" ] && race_args+=("--time=$time")
     [ -n "$cpus" ] && race_args+=("--cpus-per-task=$cpus")
     [ -n "$mem" ] && race_args+=("--mem=$mem")
-    job_race "$gpus" "$requeue" "$script" "${race_args[@]}" <<< "$cands" \
-      || die "no candidate placement answered sbatch --test-only: $(printf '%s' "$PLACE_TABLE" | tail -n 3 | tr '\n' ' ')"
-    local cp cq cpre ct how; read -r cp cq cpre ct <<< "$PLACE_CHOICE"
-    how="never preempted"; [ "$cpre" = yes ] && how="preemptable, requeued"
+    PLACE_PREFER=$prefer
+    job_need_place "$class" "$gpus" "$gpumem" "$gpuarch" "$requeue" "$script" "${race_args[@]}" || die "$PLACE_WHY"
     while IFS= read -r o; do [ -n "$o" ] && echo "HPCW-JOB placement $name $o"; done <<< "$PLACE_TABLE"
-    echo "HPCW-JOB placement $name chose $cp/$cq$([ "$ct" != - ] && echo " $ct") ($how)"
+    echo "HPCW-JOB placement $name chose $(job_choice_text)"
     [ "$placement" = report ] && return 0
-    opts="--partition=$cp"$'\n'"--qos=$cq"
-    [ -n "${P_account:-}" ] && opts="$opts"$'\n'"--account=$P_account"
-    [ "$ct" != - ] && opts="$opts"$'\n'"--gres=gpu:$ct:$gpus"
-    # a job placed where it may be preempted is requeued and resumes; every placed job's log is appended to,
-    # so the table above, written first, stays at its head
-    if [ "$cpre" = yes ] && [ "$requeue" != no ]; then opts="$opts"$'\n'"--requeue"; else opts="$opts"$'\n'"--no-requeue"; fi
-    opts="$opts"$'\n'"--open-mode=append"
+    opts=$(job_choice_options "$requeue")
   else
   opts=$(job_class_options "$class" "$gpus" "$want" "$requeue" "$type" 2>&1) || die "$opts"
+  # a job placed by hand is kept off the nodes placement avoids too (job_avoid_nodes): a node listed in
+  # placement.exclude, one ending every job at once, or one failing its probe
+  local avoid; avoid=$(job_avoid_nodes)
+  [ -z "$avoid" ] || opts="$opts"$'\n'"--exclude=$(job_hostlist $avoid)"
   fi
   dep=$(job_after_option ${afters[@]+"${afters[@]}"}) || die "--after is a job id, then :ok or :any (any when left out)"
   local jd; jd=$(job_dir "$project")
@@ -383,6 +602,7 @@ job_submit() {
     { printf '== hpcworker placement for %s, %s UTC: the estimates sbatch --test-only gave, then the choice\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%S)"
       printf '%s' "$PLACE_TABLE" | sed 's/^/   /'
       printf '   chose %s\n' "$PLACE_CHOICE"; } >> "$log" 2>/dev/null
+    job_need_write "$project" "$id" "$class" "$gpus" "$gpumem" "$gpuarch" "$requeue" "$prefer"
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$class" "$part" "${qos:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$log" "$dir" "$script" "$array" "$(job_after_ids ${afters[@]+"${afters[@]}"})" >> "$jd/jobs.tsv"
   echo "HPCW-JOB submitted $id $name $part/${qos:-none} log $log"
@@ -502,6 +722,314 @@ job_cancel() {
   echo "HPCW-JOB cancelled ${ids[*]}"
 }
 
+# ---- job place, job replace and job usage (31) ------------------------------------------------------------
+job_need_args() { # the resource options place and replace share, validated -> 0, or die
+  [ -z "$N_time" ] || [[ "$N_time" =~ $HPCW_JOB_TIME_RE ]] || die "--time is H:MM:SS or D-H:MM:SS"
+  [ -z "$N_cpus" ] || [[ "$N_cpus" =~ ^[1-9][0-9]{0,2}$ ]] || die "--cpus is a whole number from 1 to 999"
+  [ -z "$N_mem" ] || [[ "$N_mem" =~ $HPCW_JOB_MEM_RE ]] || die "--mem is a number with K, M, G or T after it"
+  [[ "$N_gpus" =~ ^[1-8]$ ]] || die "--gpus is 1 to 8"
+  [[ "$N_gpumem" =~ ^[0-9]{1,4}$ ]] || die "--gpu-mem is the least memory a card must hold, in whole GB"
+  return 0
+}
+
+job_place() {
+  # The placement job submit --placement auto makes, printed as sbatch options and submitted nowhere, for a
+  # caller that submits its own jobs (tools/grid_runner.sh's autoscaler): the race's lines, the choice, and
+  # one line "HPCW-JOB options --partition=... --qos=..." to put on its sbatch line.
+  local class="" name=place requeue="" gpuarch="" o
+  N_time="" N_cpus="" N_mem="" N_gpus=1 N_gpumem=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --class) class="${2:-}"; shift 2 || job_usage;;
+    --name) name="${2:-}"; shift 2 || job_usage;;
+    --time) N_time="${2:-}"; shift 2 || job_usage;;
+    --cpus) N_cpus="${2:-}"; shift 2 || job_usage;;
+    --mem) N_mem="${2:-}"; shift 2 || job_usage;;
+    --gpus) N_gpus="${2:-}"; shift 2 || job_usage;;
+    --gpu-mem) N_gpumem="${2:-}"; shift 2 || job_usage;;
+    --gpu-arch) gpuarch="${2:-}"; shift 2 || job_usage;;
+    --prefer) PLACE_PREFER="${2:-}"; shift 2 || job_usage;;
+    --requeue) requeue=yes; shift;;
+    --no-requeue) requeue=no; shift;;
+    *) job_usage;;
+  esac; done
+  case "$class" in cpu|batch|gpu|runner) ;; *) die "--class is cpu, batch, gpu or runner";; esac
+  [ -z "${PLACE_PREFER:-}" ] || [[ "$PLACE_PREFER" =~ ^[A-Za-z0-9_.-]{1,64}(,[A-Za-z0-9_.-]{1,64}){0,7}$ ]] || die "--prefer is a partition's name, or up to eight joined by commas"
+  [[ "$name" =~ $HPCW_JOB_NAME_RE ]] || die "--name is letters, digits, _, . and -, at most 64, starting with a letter or digit"
+  job_need_args
+  gpuarch=$(job_arch_set "${gpuarch:-ampere,ada,hopper}") || die "--gpu-arch is a list of $HPCW_ARCHS, or one of them with + for it and every newer one"
+  load_profile
+  [ "$P_scheduler" = slurm ] || die "hpcworker job speaks Slurm only for now; this site's scheduler is $P_scheduler"
+  job_site_placement
+  [ -r "$(job_place_file)" ] || die "this site has no placement file ($(job_place_file))"
+  local race_args=("--job-name=$name")
+  [ -n "$N_time" ] && race_args+=("--time=$N_time")
+  [ -n "$N_cpus" ] && race_args+=("--cpus-per-task=$N_cpus")
+  [ -n "$N_mem" ] && race_args+=("--mem=$N_mem")
+  if ! job_need_place "$class" "$N_gpus" "$N_gpumem" "$gpuarch" "$requeue" "" "${race_args[@]}"; then
+    while IFS= read -r o; do [ -n "$o" ] && echo "HPCW-JOB placement $name $o"; done <<< "$PLACE_TABLE"
+    echo "HPCW-JOB refused $name: $PLACE_WHY"; return 1
+  fi
+  while IFS= read -r o; do [ -n "$o" ] && echo "HPCW-JOB placement $name $o"; done <<< "$PLACE_TABLE"
+  echo "HPCW-JOB placement $name chose $(job_choice_text)"
+  echo "HPCW-JOB options $(job_choice_options "$requeue" | tr '\n' ' ' | sed 's/ *$//')"
+}
+
+job_need_read() { # PROJECT ID LEDGER_LINE -> "class=C gpus=G gpu_mem=M gpu_arch=A requeue=R" of a job hpcworker placed; 1 for any other
+  local f; f="$(job_dir "$1")/placed/$2"
+  if [ -s "$f" ]; then head -n 1 "$f"; return 0; fi
+  # A job framework 30 placed has no record, but its log opens with the race it ran: the cards it was asked
+  # with (each fits it, so the smallest is no more than it needs) and whether a preemptable partition was one.
+  local class log; class=$(printf '%s\n' "$3" | cut -f3); log=$(printf '%s\n' "$3" | cut -f7)
+  [ -f "$log" ] || return 1
+  awk -v class="$class" -v pf="$(job_place_file)" '
+    BEGIN { while ((getline l < pf) > 0) { n = split(l, w, " "); if (w[1] == "candidate") pre[w[3] "/" w[4]] = w[5] } }
+    NR == 1 && !/^== hpcworker placement for / { exit 1 }
+    NR == 1 { next }
+    /^   chose / { done = 1; exit }
+    /^   / { if (pre[$1] == "yes") anypre = 1
+            if ($3 ~ /^[0-9]+GB$/) { m = $3 + 0; if (min == "" || m < min) min = m; a[$4] = 1 }
+            next }
+    { exit 1 }
+    END { if (!done) exit 1
+          archs = ""; for (k in a) archs = archs (archs == "" ? "" : ",") k
+          if (class == "gpu" && min == "") exit 1
+          printf "class=%s gpus=1 gpu_mem=%s gpu_arch=%s requeue=%s\n", class, (min == "" ? 0 : min), (archs == "" ? "-" : archs), (anypre ? "-" : "no") }' "$log"
+}
+
+job_same_set() { # LIST LIST -> 0 when the two comma lists name the same members
+  [ "$(printf '%s\n' ${1//,/ } | sort -u | paste -sd, -)" = "$(printf '%s\n' ${2//,/ } | sort -u | paste -sd, -)" ]
+}
+job_iso() { if [ -n "${1:-}" ]; then date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; else printf 'none'; fi; }
+
+REPLACE_MOVED=0
+job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PROJECT LOG DRY GAIN: race one pending job again, and move it when that pays
+  local id=$1 jname=$2 parts=$3 qos=$4 cpus=$5 jmem=$6 tl=$7 tres=$8 excl=${9:--} need=${10} project=${11} log=${12} dry=${13} gain=${14}
+  local class="" gpus=1 gpumem=0 archs="" rq="" kv gres=- n prefer=""
+  for kv in $need; do case "$kv" in
+    class=*) class=${kv#*=};; gpus=*) gpus=${kv#*=};; gpu_mem=*) gpumem=${kv#*=};; gpu_arch=*) archs=${kv#*=};; requeue=*) rq=${kv#*=};;
+    prefer=*) prefer=${kv#*=};;
+  esac; done
+  [[ "$prefer" =~ ^[A-Za-z0-9_.,-]*$ ]] || prefer=""
+  PLACE_PREFER=$prefer
+  [ "$rq" = - ] && rq=""
+  { [ -z "$archs" ] || [ "$archs" = - ]; } && archs="ampere,ada,hopper"
+  archs=$(job_arch_set "$archs") || return 0
+  # the gres the job holds now, and its count of cards
+  case "$tres" in *gres:gpu:*) gres=${tres#*gres:}; gres=${gres%%,*}; n=${gres##*:}; [[ "$n" =~ ^[1-8]$ ]] && gpus=$n;; esac
+  [ -n "$excl" ] || excl=-
+  local race_args=("--job-name=$jname" "--cpus-per-task=$cpus" "--mem=$jmem")
+  [[ "$tl" =~ ^[0-9:-]+$ ]] && race_args+=("--time=$tl")
+  # where it stands now, each of its partitions asked alone, as the race asks the others
+  local cur="" at p now
+  for p in ${parts//,/ }; do
+    at=$(job_ask "$p" "$qos" "$gres" "$excl" "" "${race_args[@]}") || continue
+    if [ -z "$cur" ] || [ "$at" -lt "$cur" ]; then cur=$at; fi
+  done
+  job_need_place "$class" "$gpus" "$gpumem" "$archs" "$rq" "" "${race_args[@]}" || { echo "HPCW-JOB kept $id $jname: $PLACE_WHY"; return 0; }
+  local bp bq bpre bg bx; read -r bp bq bpre bg bx <<< "$PLACE_CHOICE"
+  local from="$parts/$qos$([ "$gres" != - ] && echo " $gres")" to
+  to="$(job_choice_text)"
+  local what="estimate $(job_iso "$cur") -> $(job_iso "$PLACE_AT")"
+  # a dry run says why each job stays, so a person can read the race the way the move would have
+  stays() { [ "$dry" = 1 ] && echo "HPCW-JOB stays $id $jname $from: $1, $what"; return 0; }
+  if job_same_set "$bp" "$parts" && [ "$bq" = "$qos" ] && [ "$bg" = "$gres" ] && [ "$bx" = "$excl" ]; then stays "already where the race puts it"; return 0; fi
+  now=$(date +%s)
+  # about to start where it is, or no sooner by the margin elsewhere: left where it is
+  if [ -n "$cur" ]; then
+    [ "$cur" -le $((now + 120)) ] && { stays "about to start there"; return 0; }
+    [ "$PLACE_AT" -lt $((cur - gain)) ] || { stays "$to starts it no sooner by ${gain} s"; return 0; }
+  fi
+  if [ "$dry" = 1 ]; then echo "HPCW-JOB would-move $id $jname $from -> $to, $what"; return 0; fi
+  local upd=("jobid=$id" "partition=$bp" "qos=$bq") out rc=0
+  if [ "$bg" != - ]; then
+    upd+=("gres=$bg")
+    if [ "$bx" != - ]; then upd+=("excnodelist=$bx"); elif [ "$excl" != - ]; then upd+=("excnodelist="); fi
+  fi
+  # a job sent where it may be preempted must be requeued then, not ended (PreemptMode=REQUEUE ends a job
+  # that may not requeue); only a job that never said --no-requeue is ever sent there
+  [ "$bpre" = yes ] && upd+=("requeue=1")
+  out=$(scontrol update "${upd[@]}" 2>&1) || rc=$?
+  local stamp jd; stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); jd="$STATE_DIR/jobs"
+  if [ $rc = 0 ]; then
+    REPLACE_MOVED=$((REPLACE_MOVED + 1))
+    echo "HPCW-JOB moved $id $jname $from -> $to, $what"
+    ( umask 077; mkdir -p "$jd/.moves" && echo "$now" >> "$jd/.moves/$id"
+      echo "$stamp moved $id $jname $from -> $to, $what" >> "$jd/replace.log" ) 2>/dev/null
+    [ -n "$log" ] && [ -f "$log" ] && echo "== hpcworker $stamp: moved while pending from $from to $to, $what" >> "$log" 2>/dev/null
+    return 0
+  fi
+  out=$(printf '%s' "$out" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  # A runner job holds nothing yet while it waits, and the autoscaler queues one again, placed afresh, for a
+  # GitHub job still waiting; any other job is left where it is, since its environment, which a cancel
+  # would lose, is never kept (it may hold a credential).
+  if [ "$class" = runner ] && scancel "$id" 2>/dev/null; then
+    echo "HPCW-JOB cancelled $id $jname: Slurm refused the move to $to ($out); the autoscaler queues it again"
+    ( umask 077; echo "$stamp cancelled $id $jname: the move to $to refused ($out)" >> "$jd/replace.log" ) 2>/dev/null
+  else
+    echo "HPCW-JOB kept $id $jname: Slurm refused the move to $to: $out"
+  fi
+  return 0
+}
+
+job_replace() {
+  # Framework 31: a placement is a guess made once, from estimates that ignore every pending job and every
+  # job that ends before its time limit, so the guess goes stale while a job waits. job replace races this
+  # account's own pending jobs again (those hpcworker placed, and with --runners the autoscaler's runner
+  # jobs) and moves one, in place with scontrol update, which keeps its id and whatever waits on it, when
+  # another placement would start it sooner by more than --gain seconds.
+  local projects=() only=" " runners=0 dry=0 gain=${HPCW_REPLACE_GAIN:-900} age=${HPCW_REPLACE_AGE:-600} hold=${HPCW_REPLACE_HOLD:-1800} most=${HPCW_REPLACE_MAX:-20}
+  while [ $# -gt 0 ]; do case "$1" in
+    --project) projects+=("${2:-}"); shift 2 || job_usage;;
+    --runners) runners=1; shift;;
+    --dry-run) dry=1; shift;;
+    --job) [[ "${2:-}" =~ ^[0-9]{1,12}$ ]] || die "--job is one job id"; only="$only$2 "; shift 2;;
+    --gain) gain="${2:-}"; shift 2 || job_usage;;
+    --age) age="${2:-}"; shift 2 || job_usage;;
+    *) job_usage;;
+  esac; done
+  local p; for p in ${projects[@]+"${projects[@]}"}; do [[ "$p" =~ $HPCW_JOB_PROJECT_RE ]] || die "--project is lower-case letters, digits, _ and -, at most 32"; done
+  [[ "$gain" =~ ^[0-9]{1,6}$ ]] && [[ "$age" =~ ^[0-9]{1,6}$ ]] && [[ "$hold" =~ ^[0-9]{1,6}$ ]] && [[ "$most" =~ ^[0-9]{1,4}$ ]] \
+    || die "--gain, --age, HPCW_REPLACE_HOLD and HPCW_REPLACE_MAX are whole seconds (a count for the last)"
+  load_profile
+  [ "$P_scheduler" = slurm ] || die "hpcworker job speaks Slurm only for now; this site's scheduler is $P_scheduler"
+  job_site_placement
+  [ -r "$(job_place_file)" ] || die "this site has no placement file ($(job_place_file))"
+  if [ ${#projects[@]} = 0 ]; then
+    local f; for f in "$STATE_DIR"/jobs/*/jobs.tsv; do [ -s "$f" ] && projects+=("$(basename "$(dirname "$f")")"); done
+  fi
+  local own; own=$(job_own_jobs) || { echo "HPCW-JOB replace: squeue did not answer; nothing was moved"; return 1; }
+  local now id jname st parts qos reason cpus jmem tl tres excl sub dep line need project log at last looked=0
+  now=$(date +%s)
+  while IFS='|' read -r id jname st parts qos reason cpus jmem tl tres excl sub dep; do
+    [ "$st" = PENDING ] || continue
+    [[ "$id" =~ ^[0-9]{1,12}$ ]] || continue          # an array keeps its partitions, as job submit leaves it
+    [ "$only" = " " ] || case "$only" in *" $id "*) ;; *) continue;; esac   # --job: these alone
+    case "$reason" in Priority|Resources|ReqNodeNotAvail*) ;; *) continue;; esac
+    case "$dep" in ""|"(null)") ;; *) continue;; esac  # one that waits on another job is not waiting for a card
+    need="" project="" line="" log=""
+    for p in ${projects[@]+"${projects[@]}"}; do line=$(job_known "$p" "$id"); [ -n "$line" ] && { project=$p; break; }; done
+    if [ -n "$line" ]; then
+      need=$(job_need_read "$project" "$id" "$line") || continue
+      log=$(printf '%s\n' "$line" | cut -f7)
+    elif [ $runners = 1 ] && [[ "$jname" == hpcw_auto_* ]] && [[ "$tres" != *gpu* ]]; then
+      need="class=runner gpus=1 gpu_mem=0 gpu_arch=- requeue=-"
+    else continue; fi
+    at=$(date -d "${sub/T/ }" +%s 2>/dev/null) || continue
+    [ $((now - at)) -ge "$age" ] || continue
+    last=$(tail -n 1 "$STATE_DIR/jobs/.moves/$id" 2>/dev/null)
+    [[ "$last" =~ ^[0-9]+$ ]] && [ $((now - last)) -lt "$hold" ] && continue
+    looked=$((looked + 1)); [ "$looked" -le "$most" ] || break
+    job_replace_one "$id" "$jname" "$parts" "$qos" "$cpus" "$jmem" "$tl" "$tres" "$excl" "$need" "$project" "$log" "$dry" "$gain" < /dev/null
+  done <<< "$own"
+  echo "HPCW-JOB replace looked at $((looked > most ? most : looked)) pending job(s), moved $REPLACE_MOVED"
+}
+
+job_usage_report() {
+  # What each job name of the project's last K ended jobs asked for beside what it used, from one sacct: the
+  # memory asked and the batch step's peak resident memory, the cores asked and the cores used on average
+  # (TotalCPU over Elapsed), and a fit of 1.5 times the peak (at least 2 GB). Asking far more than a job uses
+  # keeps it off nodes whose cards are free but whose cores or memory are mostly taken.
+  local project="" last=200
+  while [ $# -gt 0 ]; do case "$1" in
+    --project) project="${2:-}"; shift 2 || job_usage;;
+    --last) last="${2:-}"; shift 2 || job_usage;;
+    *) job_usage;;
+  esac; done
+  [[ "$project" =~ $HPCW_JOB_PROJECT_RE ]] || die "--project is lower-case letters, digits, _ and -, at most 32"
+  [[ "$last" =~ ^[1-9][0-9]{0,3}$ ]] || die "--last is 1 to 9999"
+  load_profile
+  local ledger ids acct
+  ledger=$(job_ledger "$project" "$last")
+  [ -n "$ledger" ] || { echo "HPCW-JOB none for $project"; return 0; }
+  ids=$(printf '%s\n' "$ledger" | cut -f1 | paste -sd, -)
+  acct=$(LC_ALL=C timeout 60 sacct -n -P -j "$ids" --format=JobID,ReqMem,MaxRSS,AllocCPUS,TotalCPU,Elapsed,State 2>/dev/null | tr -d '\r') \
+    || { echo "HPCW-JOB usage: sacct did not answer"; return 1; }
+  printf '%s\n' "$ledger" | ACCT="$acct" LC_ALL=C awk -F'\t' '
+    function secs(t,   d, n, p, s, i) { d = 0; if (t ~ /-/) { d = substr(t, 1, index(t, "-") - 1); t = substr(t, index(t, "-") + 1) }
+      sub(/\..*/, "", t); n = split(t, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; return d * 86400 + s }
+    function gb(m,   v, u) { if (m == "" || m == "0") return 0; v = m + 0; u = m; gsub(/[0-9.]/, "", u); u = substr(u, 1, 1)
+      if (u == "K") return v / 1048576; if (u == "M") return v / 1024; if (u == "G") return v; if (u == "T") return v * 1024; return v / 1073741824 }
+    BEGIN { n = split(ENVIRON["ACCT"], l, "\n")
+      for (i = 1; i <= n; i++) { split(l[i], f, "|"); id = f[1]; base = id; sub(/[._].*/, "", base)
+        if (id ~ /\.batch$/) { r = gb(f[3]); if (r > rss[base]) rss[base] = r; continue }
+        if (id ~ /\./) continue
+        a = gb(f[2]); if (a > ask[base]) ask[base] = a; if (f[4] + 0 > cores[base]) cores[base] = f[4] + 0
+        e = secs(f[6]); if (e > 0) { u = secs(f[5]) / e; if (u > used[base]) used[base] = u }
+        st[base] = st[base] " " f[7]; seen[base] = 1 } }
+    { id = $1; nm = $2; if (!(id in seen)) next
+      if (st[id] ~ /PENDING|RUNNING/ && st[id] !~ /COMPLETED|FAILED|TIMEOUT|OUT_OF/) next
+      if (!(nm in runs)) order[++k] = nm
+      runs[nm]++; if (ask[id] > mask[nm]) mask[nm] = ask[id]; if (rss[id] > mrss[nm]) mrss[nm] = rss[id]
+      if (cores[id] > mcores[nm]) mcores[nm] = cores[id]; if (used[id] > mused[nm]) mused[nm] = used[id]
+      if (st[id] ~ /OUT_OF_ME/) oom[nm] = 1 }
+    END { for (i = 1; i <= k; i++) { nm = order[i]; fit = mrss[nm] * 1.5; if (fit < 2) fit = 2; fit = int(fit + 0.999)
+        printf "HPCW-JOB usage %s runs %d mem asked %.0fG peak %.1fG fit %dG cores asked %d used %.1f%s\n", nm, runs[nm], mask[nm], mrss[nm], fit, mcores[nm], mused[nm], (oom[nm] ? " out-of-memory" : "") } }'
+}
+
+job_probe() {
+  # A node that takes jobs but cannot run ours (2026-11-04: an H200 node, back in service without the home file system,
+  # ended every job in its first second) is found before a job lands there: a one-minute job of one core on the
+  # node itself, which reads this account's home and state folder and nothing else. --immediate gives it 10
+  # seconds to start, so a busy node is no failure: it reads "unknown" and is asked again at the next probe. A
+  # node whose probe ran and could not read them reads "fail", and placement keeps every job off it for
+  # HPCW_PROBE_FRESH seconds (3600). Each node is asked at most once in that time, the ones asked longest ago
+  # first, at most --max (6) a call. It runs only from a Slurm job (the autoscaler's controller), whose own
+  # allocation the probe must not use, so it starts a job of its own; never on a login node.
+  local nodes="" most=6 f now n part qos node out rc said asked=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --nodes) nodes="${2:-}"; shift 2 || job_usage;;
+    --max) most="${2:-}"; shift 2 || job_usage;;
+    *) job_usage;;
+  esac; done
+  [[ "$most" =~ ^[1-9][0-9]{0,2}$ ]] || die "--max is 1 to 999"
+  [ -z "$nodes" ] || [[ "$nodes" =~ $HPCW_JOB_HOSTLIST_RE ]] || die "--nodes is a Slurm host list"
+  [ -n "${SLURM_JOB_ID:-}" ] || die "job probe starts jobs of its own on the nodes it asks; run it inside a Slurm job (the autoscaler's controller), never on a login node"
+  load_profile
+  [ "$P_scheduler" = slurm ] || die "hpcworker job speaks Slurm only for now; this site's scheduler is $P_scheduler"
+  job_site_placement
+  [ -r "$(job_place_file)" ] || die "this site has no placement file ($(job_place_file))"
+  f=$(job_probe_file); now=$(date +%s)
+  # the GPU nodes of the site's gpu candidates, each with the first candidate partition and QoS that holds it
+  local cand; cand=$(awk '$1 == "candidate" && $2 == "gpu" { print $3, $4 }' "$(job_place_file)")
+  local pairs="" p q
+  while read -r p q; do
+    [ -n "$p" ] || continue
+    while read -r node np nt; do
+      [ -n "$node" ] || continue
+      case "$pairs" in *" $node "*) ;; *) pairs="$pairs $node $p $q ";; esac
+    done < <(job_gpu_nodes "$p")
+  done <<< "$cand"
+  local want=" "
+  if [ -n "$nodes" ]; then want=" $(scontrol show hostnames "$nodes" 2>/dev/null | tr '\n' ' ') "; fi
+  # oldest probe first, a node never asked before all of them
+  local order
+  order=$(set -- $pairs; while [ $# -ge 3 ]; do
+      [ "$want" = " " ] || case "$want" in *" $1 "*) ;; *) shift 3; continue;; esac
+      printf '%s %s %s %s\n' "$(awk -v n="$1" '$1 == n { t = $2 } END { print t + 0 }' "$f" 2>/dev/null || echo 0)" "$1" "$2" "$3"; shift 3
+    done | sort -n -s -k1,1)
+  local sargs=() v
+  # a new allocation, not a step of the calling job's: every SLURM_ name of this job is taken away
+  for v in $(compgen -e | grep '^SLURM_'); do sargs+=(-u "$v"); done
+  while read -r n node part qos; do
+    [ -n "$node" ] || continue
+    [ $((now - n)) -ge "${HPCW_PROBE_FRESH:-3600}" ] || continue
+    [ "$asked" -lt "$most" ] || break
+    asked=$((asked + 1))
+    rc=0
+    out=$(env ${sargs[@]+"${sargs[@]}"} timeout 60 srun --immediate=10 --quiet -w "$node" -N 1 -n 1 -c 1 --mem=256M -t 1 \
+      -p "$part" -q "$qos" ${P_account:+-A "$P_account"} -J hpcw_probe stat -c %n "$HOME" "$STATE_DIR" 2>&1) || rc=$?
+    if [ $rc = 0 ] && printf '%s\n' "$out" | grep -qxF "$HOME"; then said=ok
+    elif printf '%s' "$out" | grep -qiE 'immediate|unable to allocate|not available|resources|priority|reservation|timed out|socket|invalid'; then said=unknown
+    elif [ $rc = 124 ]; then said=unknown
+    else said=fail; fi
+    ( umask 077; mkdir -p "$(dirname "$f")" && echo "$node $(date +%s) $said" >> "$f" ) 2>/dev/null
+    echo "HPCW-JOB probe $node $said$([ "$said" = fail ] && echo ": $(printf '%s' "$out" | job_clean | tr '\n' ' ' | cut -c1-160)")"
+  done <<< "$order"
+  # the record keeps its last thousand lines
+  if [ -f "$f" ] && [ "$(wc -l < "$f")" -gt 2000 ]; then tail -n 1000 "$f" > "$f.new" && mv -f "$f.new" "$f"; fi
+  echo "HPCW-JOB probe asked $asked node(s)"
+}
+
 cmd_job() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -509,6 +1037,10 @@ cmd_job() {
     status) job_status "$@";;
     log) job_log "$@";;
     cancel) job_cancel "$@";;
+    place) job_place "$@";;
+    replace) job_replace "$@";;
+    usage) job_usage_report "$@";;
+    probe) job_probe "$@";;
     version) echo "HPCW-JOB version $VERSION interface $HPCW_JOB_INTERFACE";;
     *) job_usage;;
   esac

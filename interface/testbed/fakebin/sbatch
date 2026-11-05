@@ -3,8 +3,9 @@
 # $FAKE_SCHED_DIR/sbatch_fail when that file is not empty; else prints the next id and lists the job PENDING
 # (FAKE_REASON, default Priority). FAKE_SBATCH_DELAY: seconds to wait first. With --test-only and a file
 # $FAKE_SCHED_DIR/testonly it answers as Slurm's estimate instead and lists nothing: each line is
-# "PARTITION GRES_TYPE SECONDS" (- for a job asking no GPU), and the call whose --partition and --gres type
-# match is told it starts SECONDS from now; "refuse" in place of SECONDS, or no line, refuses it.
+# "PARTITION GRES_TYPE SECONDS [QOS]" (- for a job asking no GPU, * for one asking a generic gpu:N), and the call
+# whose --partition, --gres type and, where the line names one, --qos match is told it starts SECONDS from now;
+# "refuse" in place of SECONDS, or no line, refuses it.
 # fake sbatch: logs, refuses when <sched>/sbatch_fail holds a message, else prints the next id and lists the job PENDING
 d="${FAKE_SCHED_DIR:?}"
 echo "sbatch $*" >> "$d/calls"
@@ -12,9 +13,12 @@ sleep "${FAKE_SBATCH_DELAY:-0}"
 if [ -s "$d/sbatch_fail" ]; then cat "$d/sbatch_fail" >&2; exit 1; fi
 case " $* " in *" --test-only "*)
   if [ -f "$d/testonly" ]; then
-    p="" t=-
-    for a in "$@"; do case "$a" in --partition=*) p=${a#--partition=};; --gres=gpu:*) t=${a#--gres=gpu:}; t=${t%%:*};; esac; done
-    s=$(awk -v p="$p" -v t="$t" '$1 == p && $2 == t { print $3; exit }' "$d/testonly")
+    p="" t=- q=""
+    for a in "$@"; do case "$a" in
+      --partition=*) p=${a#--partition=};; --qos=*) q=${a#--qos=};;
+      --gres=gpu:*) t=${a#--gres=gpu:}; case "$t" in [0-9]*) t='*';; *) t=${t%%:*};; esac;;
+    esac; done
+    s=$(awk -v p="$p" -v t="$t" -v q="$q" '$1 == p && $2 == t && ($4 == "" || $4 == q) { print $3; exit }' "$d/testonly")
     case "$s" in
       ""|refuse) echo "sbatch: error: Batch job submission failed: Requested node configuration is not available" >&2; exit 1;;
       *) echo "sbatch: Job 99 to start at $(date -d "@$(( $(date +%s) + s ))" +%Y-%m-%dT%H:%M:%S) using 4 processors on nodes n1 in partition $p" >&2; exit 0;;

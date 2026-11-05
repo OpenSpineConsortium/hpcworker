@@ -1,8 +1,10 @@
 #!/bin/bash
-# fake sinfo (hpcworker's test bed), the partitions: FAKE_SINFO holds the lines it prints (nothing when unset). Each
+# fake sinfo (hpcworker's test bed), the partitions: FAKE_SINFO holds the lines it prints (nothing when unset), and
+# FAKE_SINFO_NODES the lines it prints instead when asked node by node (-N). Each
 # call is also logged to $FAKE_SCHED_DIR/argv as sacct's is.
 d="${FAKE_SCHED_DIR:?}"
 echo "sinfo $*" >> "$d/calls"
 { printf '%s\n%s\n%s\n%d\n' "${0##*/}" "${TZ-(unset)}" "${SLURM_TIME_FORMAT-(unset)}" $#; [ $# -gt 0 ] && printf '%s\n' "$@"; } >> "$d/argv"
+case " $* " in *" -N "*) [ -n "${FAKE_SINFO_NODES:-}" ] && printf '%s\n' "$FAKE_SINFO_NODES"; exit 0;; esac
 [ -n "${FAKE_SINFO:-}" ] && printf '%s\n' "$FAKE_SINFO"
 exit 0

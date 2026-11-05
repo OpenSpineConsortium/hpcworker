@@ -1,6 +1,10 @@
 #!/bin/bash
-# fake scontrol (hpcworker's test bed): `show job ID` with FAKE_SUBMIT_TIME (default 2026-10-01T08:00:00).
+# fake scontrol (hpcworker's test bed): `show job ID` with FAKE_SUBMIT_TIME (default 2026-10-01T08:00:00); `show hostlist
+# LIST` prints LIST as it came; `update ...` is logged and answers 0, or fails with the message in
+# $FAKE_SCHED_DIR/scontrol_fail when that file is not empty.
 d="${FAKE_SCHED_DIR:?}"
 echo "scontrol $*" >> "$d/calls"
 [ "$1 $2" = "show job" ] && echo "JobId=$3 JobName=hpcw_worker UserId=st1234 SubmitTime=${FAKE_SUBMIT_TIME:-2026-10-01T08:00:00} StartTime=Unknown"
+[ "$1 $2" = "show hostlist" ] && echo "$3"
+if [ "$1" = update ] && [ -s "$d/scontrol_fail" ]; then cat "$d/scontrol_fail" >&2; exit 1; fi
 exit 0

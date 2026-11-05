@@ -42,6 +42,7 @@ done
 export PATH="$T/bin:$PATH" SHIM_SLURM="$T/slurm" SHIM_SLURM_ROOT="$T" SHIM_GH="$T/gh" SHIM_SLEEPS="$T/sleeps" SHIM_APPTAINER="$T/apptainer"
 export HPCW_RUNNER_DIR="$T/runner"   # never the lab volume's default
 export HPCW_RUNNER_CLOCK="$T/clock"
+export HPCW_RUNNER_HPCWORKER=none   # the fixed batch queue unless a test names an hpcworker, so the checkout's own never races here
 unset HPCW_RUNNER_PARTITION HPCW_RUNNER_QOS SLURM_JOB_ID SLURM_JOB_START_TIME SLURM_JOB_END_TIME TMPDIR
 export GITHUB_TOKEN=ghp_testtoken_must_not_leak GH_TOKEN=gho_testtoken_must_not_leak
 mkdir -p "$T/slurm" "$T/gh" "$T/apptainer/tree/home/runner/bin"
@@ -476,6 +477,64 @@ gr --start --repo OpenSpineConsortium/other --site wayne --lane 4; L4=$(newest '
 t "a chain still starts beside it" [ -n "$L4" ]; gr --stop --repo OpenSpineConsortium/other --lane 4 --now
 gr --autoscale --repos "$GH_REPO" --site wayne; t "--autoscale after a stop starts again" rc_is 0; t "  and takes STOP away" [ ! -e "$AU/STOP" ]
 gr --autoscale-stop --site wayne --now; t "--autoscale-stop --now cancels the running controller too" has 'cancelled job'
+
+echo "== autoscale: runner jobs placed by hpcworker's race, and pending jobs placed again"
+# a stand-in for framework/bin/hpcworker: its version, a placement on prip/primary (or none, STANDIN_PLACE=fail)
+# and one move by job replace, each call written down; it never sees a token
+HWS="$T/bin/hpcw-standin"
+{ printf '#!/bin/bash\n'
+  printf '{ [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; } && echo "hpcworker TOKEN-IN-ENV $*" >> "%s/slurm/leaks"\n' "$T"
+  printf 'echo "$*" >> "%s/hpcw.calls"\n' "$T"
+  printf 'case "$1 $2" in\n'
+  printf '  "job version") echo "HPCW-JOB version ${STANDIN_FRAMEWORK:-31} interface 2";;\n'
+  printf '  "job place") [ "${STANDIN_PLACE:-}" = fail ] && { echo "HPCW-JOB refused x: no candidate placement answered"; exit 1; }\n'
+  printf '    echo "HPCW-JOB placement $6 chose prip/primary (never preempted)"; echo "HPCW-JOB options --partition=prip --qos=primary --account=wsu --no-requeue --open-mode=append";;\n'
+  printf '  "job replace") echo "HPCW-JOB moved 4242 hpcw_auto_x reqp/requeue -> prip/primary (never preempted), estimate a -> b"; echo "HPCW-JOB replace looked at 1 pending job(s), moved 1";;\n'
+  printf '  "job probe") [ -n "${SLURM_JOB_ID:-}" ] || { echo "run it inside a Slurm job"; exit 1; }\n'
+  printf '    echo "HPCW-JOB probe msa1 fail: stat: cannot stat /home/x: No such file or directory"; echo "HPCW-JOB probe alh1 ok"; echo "HPCW-JOB probe asked 2 node(s)";;\n'
+  printf 'esac\n'; } > "$HWS"
+chmod 755 "$HWS"; : > "$T/hpcw.calls"
+gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker /nowhere/hpcworker; t "--hpcworker that is not there is refused" has 'hpcworker /nowhere/hpcworker is not there'
+gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker relative/hpcworker; t "  and one that is no absolute path" has 'is an absolute path'
+export STANDIN_FRAMEWORK=30
+gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker "$HWS"; t "  and one older than framework 31" has 'is framework 30; placing runner jobs needs 31 or later'
+unset STANDIN_FRAMEWORK
+t "  starting no controller" [ -z "$(pending '^hpcw_autoscale$')" ]
+gr --autoscale --repos "$GH_REPO" --site wayne --cpus 4 --mem 16G --hpcworker "$HWS"
+t "--autoscale takes an hpcworker of framework 31" rc_is 0; t "  and says its race places the runner jobs" has 'each runner job is placed by'
+AC5=$(newest '^hpcw_autoscale$')
+t "  handing it to the controller" [ "$(J "$AC5" args | tr '[:space:]' ' ' | grep -c -- "--hpcworker $HWS")" = 1 ]
+t "  and writing it in autoscale.conf" bash -c "grep -qx 'placement=$HWS' '$AU/autoscale.conf' && grep -qx 'replace_every=300' '$AU/autoscale.conf'"
+for j in $(pending "$RN"); do set_state "$j" CANCELLED; done
+clear_runs; before=$(count "$RN")
+run_job "$AC5" HPCW_AUTOSCALE_LOOKS=1
+t "the controller's job ends well" rc_is 0
+U5=$(newest "$RN")
+t "  each runner job placed where the race said" bash -c "[ '$(count "$RN")' -gt '$before' ] && [ '$(J "$U5" partition)' = prip ] && [ '$(J "$U5" qos)' = primary ] && [ '$(J "$U5" extra)' = '--account=wsu --no-requeue --open-mode=append ' ]"
+t "  sized as asked" bash -c "[ '$(J "$U5" cpus)' = 4 ] && [ '$(J "$U5" mem)' = 16G ] && [ '$(J "$U5" time)' = 2:00:00 ]"
+t "  the race asked for that size" grep -q -- "job place --class runner --name hpcw_auto_$TPL --time 2:00:00 --cpus 4 --mem 16G" "$T/hpcw.calls"
+t "  and the log says where each went" has "$GH_REPO: placed job [0-9]+ on prip/primary \(never preempted\)"
+t "the look ran job replace --runners in the controller's job" grep -qx 'job replace --runners' "$T/hpcw.calls"
+t "  each move a line of its log" has 'HPCW-JOB moved 4242 hpcw_auto_x reqp/requeue -> prip/primary'
+t "  after job probe, inside the controller's job" [ "$(grep -E '^job (probe|replace)' "$T/hpcw.calls" | head -1)" = "job probe --max 6" ]
+t "  a node whose probe failed is a line of its log" has 'HPCW-JOB probe msa1 fail: stat: cannot stat'
+if has 'HPCW-JOB probe alh1 ok'; then no "  and a node that passed is none"; else ok "  and a node that passed is none"; fi
+t "  and no token reached hpcworker" no_leak
+for j in $(pending "$RN"); do set_state "$j" CANCELLED; done
+AC6=$(newest '^hpcw_autoscale$'); n=$(grep -c '^job replace' "$T/hpcw.calls") np=$(grep -c '^job probe' "$T/hpcw.calls")
+run_job "$AC6" HPCW_AUTOSCALE_LOOKS=1 STANDIN_PLACE=fail
+U6=$(newest "$RN")
+t "a race that places nothing leaves the runner job on the site's batch queue" bash -c "[ '$(J "$U6" partition)' = '$DEF_PART' ] && [ '$(J "$U6" qos)' = '$DEF_QOS' ]"
+t "  and says so" has 'hpcworker placed no runner job'
+sed -i 's/^replace_every=300$/replace_every=0/' "$AU/autoscale.conf"
+AC7=$(newest '^hpcw_autoscale$'); run_job "$AC7" HPCW_AUTOSCALE_LOOKS=1
+t "replace_every=0 in autoscale.conf stops job replace" [ "$(grep -c '^job replace' "$T/hpcw.calls")" = "$((n + 1))" ]
+t "  and job probe with it" [ "$(grep -c '^job probe' "$T/hpcw.calls")" = "$((np + 1))" ]
+gr --autoscale-stop --site wayne --now
+gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker none
+t "--hpcworker none keeps the batch queue" has "runner jobs keep the site's batch queue: --hpcworker none"
+t "  and hands the controller none" [ "$(J "$(newest '^hpcw_autoscale$')" args | grep -c -- '--hpcworker')" = 0 ]
+gr --autoscale-stop --site wayne --now
 
 echo "== the merge train"
 TR="$R/train"; sha() { printf '%040d' "$1"; }
