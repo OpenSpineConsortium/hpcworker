@@ -509,7 +509,8 @@ class CheckpointMoveTest(PlacementBase):
         return self.run_tool("job replace " + extra, **e)
 
     def scontrols(self):
-        return [c for c in self.g.calls() if c.startswith("scontrol ") and not c.startswith("scontrol -o show")]
+        # the calls a move makes: not the node read, nor the host lists the submission compressed
+        return [c for c in self.g.calls() if c.startswith("scontrol ") and not c.startswith(("scontrol -o show", "scontrol show hostlist"))]
 
     def test_mark_sets_the_marker_to_the_oldest_checkpoint_and_waits_for_a_missing_one(self):
         old, new = os.path.join(self.work, "a.npz"), os.path.join(self.work, "b.npz")
@@ -563,7 +564,8 @@ class CheckpointMoveTest(PlacementBase):
         cases = (({"marked": 3600}, None), ({"marked": None}, None),
                  ({"rates": ("nvidia_h200 1400",)}, "no measured rate for it on nvidia_a30"),
                  ({"rates": ("nvidia_a30 1000",)}, "no measured rate for it on the free nvidia_h200 card"),
-                 ({"rates": ("nvidia_a30 1000", "nvidia_h200 1030")}, "not more than 300 s"))
+                 ({"rates": ("nvidia_a30 1000", "nvidia_h200 1030")}, "would not run it faster by the time it has left"),
+                 ({"rates": ("nvidia_a30 1000", "nvidia_h200 1060")}, "it would save 155 s, not more than 300 s"))
         for kw, said in cases:
             jid = self.running_job(**kw)
             rc, out, err = self.replace(jid, "--dry-run")
