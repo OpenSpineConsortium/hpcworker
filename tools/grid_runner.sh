@@ -48,7 +48,8 @@
 # --autoscale starts one runner per queued job instead of a fixed number of chains. A controller,
 # one small Slurm job (1 CPU, 2 GB, 8 hours, on the chains' queue, never a loop on the login node),
 # looks every --every seconds (60 unless given) at each repository --repos names: its queued and
-# running workflow runs, and in them the jobs still queued whose runs-on labels a runner of this
+# running workflow runs and its 20 oldest pending ones (the head of a concurrency group that queues
+# its runs reads as pending), and in them the jobs still queued whose runs-on labels a runner of this
 # site carries (self-hosted, linux, x64, grid, the site's name and --labels). For each such job no
 # runner job of the controller's is yet waiting to take, it submits one runner job of the size the
 # --start options give (--hours 2 unless given), named hpcw_auto_OWNER-NAME, which registers one
@@ -1108,6 +1109,10 @@ queued_jobs() { # OWNER/NAME -> how many of its jobs are queued asking only for 
   local ids id c n=0
   ids=$(GH api "repos/$1/actions/runs?status=queued&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null) || return 1
   ids="$ids $(GH api "repos/$1/actions/runs?status=in_progress&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null)" || return 1
+  # A run at the head of a concurrency group that queues its runs (queue: max) has its job queued while the run
+  # itself reads as pending, so with only the two lists above no runner is ever started for it and the whole group
+  # waits behind it. The oldest pending runs are read, a bounded number, since a group can hold a hundred.
+  ids="$ids $(GH api "repos/$1/actions/runs?status=pending&per_page=100" --jq '.workflow_runs | sort_by(.created_at) | .[:20] | .[].id' 2>/dev/null)" || return 1
   for id in $ids; do
     [[ "$id" =~ ^[0-9]+$ ]] || continue
     c=$(GH api "repos/$1/actions/runs/$id/jobs?filter=latest&per_page=100" \

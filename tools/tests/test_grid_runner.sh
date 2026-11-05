@@ -422,18 +422,21 @@ t "  logging under the controller's folder" [ "$(J "$AC" out)" = "$AU/runner-$AC
 t "  handed its repositories, caps and the runner jobs' size" [ "$(J "$AC" args | tr '[:space:]' ' ' | grep -c -- "--control --repos $GH_REPO,OpenSpineConsortium/other .*--hours 2 --margin 60 --max-per-repo 2 --max-total 3 --every 60 --idle 10 --cpus 4 --mem 16G")" = 1 ]
 t "  with its caps written where a person can change them" bash -c "grep -qx 'max_per_repo=2' '$AU/autoscale.conf' && grep -qx 'max_total=3' '$AU/autoscale.conf'"
 gr --autoscale --repos "$GH_REPO" --site wayne; t "a second controller is refused while one is queued" has "the controller is already queued or running \(job $AC PENDING\)"
-# the queue: two grid jobs and one asking for GitHub's machines in a queued run, one grid job left in a run in progress
+# the queue: a grid job and one asking for GitHub's machines in a queued run, one grid job left in a run in progress,
+# and one in a run that reads as pending, the head of a concurrency group that queues its runs, with a run behind it that has no job yet
 mkdir -p "$T/gh/runs/$TPL"
 echo '{"workflow_runs":[{"id":11}]}' > "$T/gh/runs/$TPL/queued"
 echo '{"workflow_runs":[{"id":12}]}' > "$T/gh/runs/$TPL/in_progress"
-echo '{"jobs":[{"status":"queued","labels":["self-hosted","grid"]},{"status":"queued","labels":["self-hosted","grid"]},{"status":"queued","labels":["ubuntu-latest"]}]}' > "$T/gh/runs/$TPL/jobs-11"
+echo '{"workflow_runs":[{"id":14,"created_at":"2026-11-03T10:05:00Z"},{"id":13,"created_at":"2026-11-03T10:00:00Z"}]}' > "$T/gh/runs/$TPL/pending"
+echo '{"jobs":[{"status":"queued","labels":["self-hosted","grid"]}]}' > "$T/gh/runs/$TPL/jobs-13"
+echo '{"jobs":[{"status":"queued","labels":["self-hosted","grid"]},{"status":"queued","labels":["ubuntu-latest"]}]}' > "$T/gh/runs/$TPL/jobs-11"
 echo '{"jobs":[{"status":"completed","labels":["self-hosted","grid"]},{"status":"queued","labels":["self-hosted","grid","wayne"]},{"status":"queued","labels":["self-hosted","gpu"]}]}' > "$T/gh/runs/$TPL/jobs-12"
 clear_runs
 run_job "$AC" HPCW_AUTOSCALE_LOOKS=1
 t "the controller's job ends well" rc_is 0
 AC2=$(newest '^hpcw_autoscale$')
 t "  after queuing its successor with the same arguments" bash -c "[ '$AC2' != '$AC' ] && [ '$(J "$AC2" dependency)' = 'afterany:$AC,singleton' ] && [ \"\$(cat '$T/slurm/jobs/$AC2/args')\" = \"\$(cat '$T/slurm/jobs/$AC/args')\" ]"
-t "  it counts the three queued jobs these runners can take, not GitHub's machine's or a GPU's" has "$GH_REPO: 3 queued, 0 runner jobs \(0 yet to take one\), 2 submitted"
+t "  it counts the three queued jobs these runners can take, the pending run's among them, not GitHub's machine's or a GPU's" has "$GH_REPO: 3 queued, 0 runner jobs \(0 yet to take one\), 2 submitted"
 t "  and submits one runner job for each, up to the repository's cap" [ "$(count "$RN")" = 2 ]
 t "  none for a repository with nothing queued" [ "$(count "$ON")" = 0 ]
 U1=$(pending "$RN" | head -1)
