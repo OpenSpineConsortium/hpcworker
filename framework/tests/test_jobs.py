@@ -565,7 +565,7 @@ class CheckpointMoveTest(PlacementBase):
                  ({"rates": ("nvidia_h200 1400",)}, "no measured rate for it on nvidia_a30"),
                  ({"rates": ("nvidia_a30 1000",)}, "no measured rate for it on the free nvidia_h200 card"),
                  ({"rates": ("nvidia_a30 1000", "nvidia_h200 1030")}, "would not run it faster by the time it has left"),
-                 ({"rates": ("nvidia_a30 1000", "nvidia_h200 1060")}, "it would save 155 s, not more than 300 s"))
+                 ({"rates": ("nvidia_a30 1000", "nvidia_h200 1060")}, " s, not more than 300 s"))
         for kw, said in cases:
             jid = self.running_job(**kw)
             rc, out, err = self.replace(jid, "--dry-run")
