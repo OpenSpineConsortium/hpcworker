@@ -516,8 +516,9 @@ t "  the race asked for that size" grep -q -- "job place --class runner --name h
 t "  and the log says where each went" has "$GH_REPO: placed job [0-9]+ on prip/primary \(never preempted\)"
 t "the look ran job replace --runners in the controller's job" grep -qx 'job replace --runners' "$T/hpcw.calls"
 t "  each move a line of its log" has 'HPCW-JOB moved 4242 hpcw_auto_x reqp/requeue -> prip/primary'
-t "  after job probe, inside the controller's job" bash -c "grep -qx 'job probe --max 6' '$T/hpcw.calls' && [ \"\$(grep -n -E '^job (probe|replace)' '$T/hpcw.calls' | head -1)\" = '1:job probe --max 6' ] || [ \"\$(grep -n -E '^job (probe|replace)' '$T/hpcw.calls' | sed -n '1p' | cut -d: -f2-)\" = 'job probe --max 6' ]"
-t "  a node whose probe failed is a line of its log, a node that passed none" bash -c "printf '%s\n' \"\$OUT\" | grep -q 'HPCW-JOB probe msa1 fail: stat: cannot stat' && ! printf '%s\n' \"\$OUT\" | grep -q 'HPCW-JOB probe alh1 ok'"
+t "  after job probe, inside the controller's job" [ "$(grep -E '^job (probe|replace)' "$T/hpcw.calls" | head -1)" = "job probe --max 6" ]
+t "  a node whose probe failed is a line of its log" has 'HPCW-JOB probe msa1 fail: stat: cannot stat'
+if has 'HPCW-JOB probe alh1 ok'; then no "  and a node that passed is none"; else ok "  and a node that passed is none"; fi
 t "  and no token reached hpcworker" no_leak
 for j in $(pending "$RN"); do set_state "$j" CANCELLED; done
 AC6=$(newest '^hpcw_autoscale$'); n=$(grep -c '^job replace' "$T/hpcw.calls") np=$(grep -c '^job probe' "$T/hpcw.calls")
