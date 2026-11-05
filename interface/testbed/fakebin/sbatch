@@ -9,6 +9,8 @@
 # fake sbatch: logs, refuses when <sched>/sbatch_fail holds a message, else prints the next id and lists the job PENDING
 d="${FAKE_SCHED_DIR:?}"
 echo "sbatch $*" >> "$d/calls"
+# (34) the folder of the job's checkpoint marker, as the job would find it in its environment
+echo "${HPCW_CHECKPOINTS:-}" >> "$d/checkpoints_env"
 sleep "${FAKE_SBATCH_DELAY:-0}"
 if [ -s "$d/sbatch_fail" ]; then cat "$d/sbatch_fail" >&2; exit 1; fi
 case " $* " in *" --test-only "*)

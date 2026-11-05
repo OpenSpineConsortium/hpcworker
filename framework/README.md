@@ -1554,7 +1554,7 @@ its own folder, key and record. A job that runs N children asks N times one run'
 Slurm itself, each run a job of its own; this framework does not ask for shards yet, since the site it was measured on
 has none, and `job pack` is the way to share a card there.
 
-**Moving a running job at a checkpoint (designed; not yet built).** A kind that resumes from its last checkpoint can be
+**Moving a running job at a checkpoint (designed here; built in version 34, the next section).** A kind that resumes from its last checkpoint can be
 moved while it runs, at almost no cost, just after a checkpoint. The job says so by writing a marker,
 `$HPCW_CHECKPOINT_FILE` (hpcworker hands every placed job the path `<state>/jobs/<project>/checkpoints/<id>`), touched
 each time a checkpoint is safely written. `job replace` then looks at this account's RUNNING placed jobs too:
@@ -1567,6 +1567,76 @@ each time a checkpoint is safely written. `job replace` then looks at this accou
   where there is one, since a preemptable one loses an H200 to its owners' jobs within minutes), and released.
 The move is one line of `replace.log` and of the job's log; a job not started within `HPCW_CHECKPOINT_RETURN` seconds
 (900) of the move is moved back to where it ran. Slurm keeps the job's id, so every job that waits on it still does.
+
+## Moving a running job at a checkpoint (version 34)
+
+Framework 34 builds the move that version 33 designed. Framework 31's `job replace` moves only pending jobs, so a job
+that started on the first card free, a slow one or a preemptable one, stayed there for its whole run while a better
+card freed beside it. A kind that resumes from its last checkpoint loses almost nothing by being moved just after one.
+The move uses Slurm's own steps, so the job keeps its id and every job that waits on it still does.
+
+**The marker.** `job submit` hands every job `HPCW_CHECKPOINTS`, the folder `<state>/jobs/<project>/checkpoints`. A job
+that resumes from its checkpoints says when it has written one:
+
+    bash "$HPCWORKER" job mark --watch 60 -- "$RUN/last.npz" &
+
+This sets `$HPCW_CHECKPOINTS/$SLURM_JOB_ID` to the time of the oldest named file every 60 seconds. With no file named,
+it sets the marker to now. A job that runs several runs side by side (`job pack`) names each run's checkpoint. Its
+marker is then only as fresh as the stalest of them, and stays untouched while any of them has none yet, so a move
+never costs a run more than the time since its own last checkpoint. Outside a job hpcworker submitted, `job mark` says
+so and marks nothing.
+
+**What a move needs.** After the pending jobs, `job replace` looks at each of this account's running placed GPU jobs
+(not an array's task) whose marker is younger than `HPCW_CHECKPOINT_FRESH` seconds (600). It moves one only when all of
+these hold:
+- **A card free now that the job fits:** of a type its placed `gpu_mem` and `gpu_arch` allow, on a candidate of the
+  placement file (a preemptable one only where the job did not say `--no-requeue`), on a node no placement avoids.
+  The node must also hold the job's cores idle and its memory allocatable (RealMemory less AllocMem, read with one
+  `scontrol -o show node`). A job's cores cannot change while it waits: NumCPUs set on a pending job leaves its
+  CPUs/Task as it was (5 November).
+- **Nobody waiting first:** no pending GPU job of anyone's waits in that partition for Priority or Resources that would
+  fit the node's idle cores and allocatable memory. Such a job takes the card at Slurm's next pass, and a running job
+  sent there would give up its own card and then wait.
+- **A measured gain:** the kind's measured rate on both cards, from the project's `<state>/jobs/<project>/speeds`. Each
+  line is `NAME_REGEX CARD_TYPE RATE` (`#` a comment); the first line whose expression matches the job's name gives
+  the rate, in any unit the project keeps alike. The move is expected to save `H x (1 - rate_now / rate_there) - lost`
+  seconds:
+  - H is the job's time left, held to `HPCW_CHECKPOINT_HORIZON` (14400);
+  - lost is the marker's age plus `HPCW_CHECKPOINT_RESTART` (600), for the work since the checkpoint and the start again.
+
+  It must save more than `--gain` (300). A card's place in the placement file is no measure of a kind's speed. On
+  5 November a design whose validation read is CPU-bound ran 1,170 steps an hour on an A30 and 1,400 on an H200. So
+  without a measured rate on both cards nothing moves, and a project that writes no speeds file has no running job
+  moved.
+- **No move since:** the job has not moved within `HPCW_CHECKPOINT_HOLD` seconds (3600). Of the cards that save the
+  most, the placement file's first candidate wins, a QoS never preempted before a preemptable one.
+
+**The steps.**
+1. Where the job may not be requeued (`--no-requeue`), it is made so for the move (`scontrol update requeue=1`), since
+   Slurm requeues only a job that may be.
+2. It is requeued held (`scontrol requeuehold`).
+3. Its partition, QoS and card are set to the free card's (`partition=P qos=Q gres=gpu:TYPE:N`, the excluded nodes those
+   placement avoids). The update is tried again `HPCW_CHECKPOINT_TRIES` times (6), `HPCW_CHECKPOINT_WAIT` seconds apart
+   (10), while Slurm still finishes the requeue.
+4. It is released, and set back to `requeue=0` where it had been so and goes where it is never preempted.
+
+Where Slurm refuses the requeue, the job runs on where it was. Where it refuses the update, the job is released where it
+ran: it waits again for a card of the kind it had, and the line says so.
+
+**The return.** Each move is recorded in `<state>/jobs/.checkpoint-moves/<id>`: the time, the project, and the partition,
+QoS, card and excluded nodes the job had. Each later `job replace` lets a moved job be once it has started. One still
+pending `HPCW_CHECKPOINT_RETURN` seconds (900) after its move is sent back to the partition, QoS and card it had, and
+the pending race leaves it alone until then.
+
+**Lines.** Each move, return and refusal is one line of the output, of `<state>/jobs/replace.log` and of the job's own
+log:
+- `HPCW-JOB moved-running ID NAME FROM -> TO, checkpoint N s old, saves about S s`;
+- `HPCW-JOB returned ID ...` and `HPCW-JOB started ID ...`;
+- `HPCW-JOB kept ID NAME: ...`.
+
+`--dry-run` prints `would-move-running`, `would-return`, and `stays ... :` with the reason a job stays. The count follows
+the pending one: `HPCW-JOB replace looked at N running job(s) just after a checkpoint, moved M`.
+`HPCW_CHECKPOINT_MOVES=off` turns the running moves and their returns off.
 
 ## Files
 

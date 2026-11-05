@@ -469,6 +469,163 @@ class ShareTest(PlacementBase):
             self.assertNotEqual(rc, 0, extra)
 
 
+class CheckpointMoveTest(PlacementBase):
+    """The checkpoint-boundary move (34): a job marks its checkpoints with job mark, and job replace moves a running placed
+    GPU job whose marker is fresh to a card free now that runs its kind faster by the project's measured rates, by
+    requeuehold, update and release, never while a waiting job fits that card, and sends it back where it ran when it
+    has not started there within the return time."""
+
+    A30_NODE = ("NodeName=arw4 CPUAlloc=32 CPUEfctv=32 CPUTot=32 RealMemory=257300 AllocMem=200000 State=ALLOCATED "
+                "Partitions=reqp CfgTRES=cpu=32,mem=257300M,gres/gpu=10,gres/gpu:nvidia_a30=10 "
+                "AllocTRES=cpu=32,mem=200000M,gres/gpu=10,gres/gpu:nvidia_a30=10")
+    H200_NODE = ("NodeName=msa1 CPUAlloc=8 CPUEfctv=128 CPUTot=128 RealMemory=769600 AllocMem=100000 State=MIXED "
+                 "Partitions=gmsap,reqp CfgTRES=cpu=128,mem=769600M,gres/gpu=4,gres/gpu:nvidia_h200=4 "
+                 "AllocTRES=cpu=8,mem=100000M,gres/gpu=3,gres/gpu:nvidia_h200=3")
+
+    def setUp(self):
+        super().setUp()
+        self.marks = os.path.join(self.g.state, "jobs", "demo", "checkpoints")
+
+    def running_job(self, rates=("nvidia_a30 1000", "nvidia_h200 1400"), marked=60):
+        """a placed job running on an A30, its checkpoint MARKED seconds ago (None for none), and the project's rates"""
+        self.plan("reqp * 0", "galhp * 3600", "gmsap * 3600")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24")
+        self.assertEqual(rc, 0, (out, err))
+        jid = self.job_id(out)
+        with open(os.path.join(self.g.state, "jobs", "demo", "speeds"), "w", newline="\n") as fh:
+            fh.write("# NAME_REGEX CARD_TYPE STEPS_AN_HOUR\n" + "".join("^demo-fit$ %s\n" % r for r in rates))
+        if marked is not None:
+            os.makedirs(self.marks, exist_ok=True)
+            marker = os.path.join(self.marks, jid)
+            open(marker, "w").close()
+            os.utime(marker, (time.time() - marked, time.time() - marked))
+        return jid
+
+    def replace(self, jid, extra="", nodes=None, waiting="", **env):
+        row = "%s|demo-fit|reqp|requeue|4|32G|gres:gpu:nvidia_a30:1|arw4|10:00:00|(null)" % jid
+        e = {"FAKE_SQUEUE_RUNNING": row, "FAKE_SCONTROL_NODES": "\n".join(nodes or (self.A30_NODE, self.H200_NODE)),
+             "FAKE_SQUEUE_WAITING": waiting, "HPCW_CHECKPOINT_TRIES": "1"}
+        e.update(env)
+        return self.run_tool("job replace " + extra, **e)
+
+    def scontrols(self):
+        return [c for c in self.g.calls() if c.startswith("scontrol ") and not c.startswith("scontrol -o show")]
+
+    def test_mark_sets_the_marker_to_the_oldest_checkpoint_and_waits_for_a_missing_one(self):
+        old, new = os.path.join(self.work, "a.npz"), os.path.join(self.work, "b.npz")
+        for path, ago in ((old, 500), (new, 100)):
+            open(path, "w").close()
+            os.utime(path, (time.time() - ago, time.time() - ago))
+        env = {"SLURM_JOB_ID": "4242", "HPCW_CHECKPOINTS": G.posix(self.marks)}
+        rc, out, err = self.run_tool("job mark -- '%s' '%s'" % (G.posix(old), G.posix(new)), **env)
+        self.assertEqual(rc, 0, (out, err))
+        marker = os.path.join(self.marks, "4242")
+        self.assertAlmostEqual(os.path.getmtime(marker), os.path.getmtime(old), delta=2)
+        os.utime(marker, (1000, 1000))
+        gone = os.path.join(self.work, "gone.npz")
+        rc, out, err = self.run_tool("job mark -- '%s' '%s'" % (G.posix(old), G.posix(gone)), **env)
+        self.assertEqual(rc, 0, (out, err))
+        # one run has no checkpoint yet: the marker is left as it was
+        self.assertAlmostEqual(os.path.getmtime(marker), 1000, delta=1)
+        rc, out, err = self.run_tool("job mark", **env)
+        self.assertAlmostEqual(os.path.getmtime(marker), time.time(), delta=30)
+        rc, out, err = self.run_tool("job mark")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("not inside a job hpcworker submitted", out)
+
+    def test_submit_hands_every_job_its_checkpoint_folder(self):
+        rc, out, err = self.submit("")
+        self.assertEqual(rc, 0, (out, err))
+        with open(os.path.join(self.g.sched, "checkpoints_env")) as fh:
+            self.assertEqual(fh.read().split("\n")[-2], G.posix(self.marks))
+        self.assertTrue(os.path.isdir(self.marks))
+
+    def test_a_running_job_just_after_a_checkpoint_moves_to_a_faster_free_card(self):
+        jid = self.running_job()
+        rc, out, err = self.replace(jid)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved-running %s demo-fit reqp/requeue nvidia_a30 on arw4 -> gmsap/gpu nvidia_h200 on msa1" % jid, out)
+        self.assertIn("looked at 1 running job(s) just after a checkpoint, moved 1", out)
+        # its requeue flag read, made requeueable for the move, held, moved, released, and set back for a QoS never preempted
+        self.assertEqual(self.scontrols(), ["scontrol show job %s" % jid, "scontrol update jobid=%s requeue=1" % jid,
+                                            "scontrol requeuehold %s" % jid,
+                                            "scontrol update jobid=%s partition=gmsap qos=gpu gres=gpu:nvidia_h200:1 excnodelist=" % jid,
+                                            "scontrol release %s" % jid, "scontrol update jobid=%s requeue=0" % jid])
+        with open(os.path.join(self.g.state, "jobs", ".checkpoint-moves", jid)) as fh:
+            self.assertEqual(fh.read().split()[1:], ["demo", "reqp", "requeue", "gpu:nvidia_a30:1", "-", "0"])
+        with open(os.path.join(self.g.state, "jobs", "replace.log")) as fh:
+            self.assertIn("moved-running %s demo-fit" % jid, fh.read())
+        # moved once: the next look leaves it to start where it was sent
+        rc, out, err = self.replace(jid)
+        self.assertEqual(len([c for c in self.scontrols() if "requeuehold" in c]), 1)
+
+    def test_no_move_without_a_fresh_marker_both_rates_or_the_gain(self):
+        cases = (({"marked": 3600}, None), ({"marked": None}, None),
+                 ({"rates": ("nvidia_h200 1400",)}, "no measured rate for it on nvidia_a30"),
+                 ({"rates": ("nvidia_a30 1000",)}, "no measured rate for it on the free nvidia_h200 card"),
+                 ({"rates": ("nvidia_a30 1000", "nvidia_h200 1030")}, "not more than 300 s"))
+        for kw, said in cases:
+            jid = self.running_job(**kw)
+            rc, out, err = self.replace(jid, "--dry-run")
+            self.assertEqual(rc, 0, (out, err))
+            if said is None:
+                self.assertIn("looked at 0 running job(s)", out, kw)
+            else:
+                self.assertIn("HPCW-JOB stays %s demo-fit on arw4 nvidia_a30: " % jid, out, kw)
+                self.assertIn(said, out, kw)
+        self.assertEqual([c for c in self.scontrols() if "update" in c or "requeue" in c or "release" in c], [])
+
+    def test_a_waiting_job_that_fits_the_free_card_comes_first(self):
+        jid = self.running_job()
+        waiting = "\n".join(["gmsap|777|8|64G|gres:gpu:1|Priority", "reqp|777|8|64G|gres:gpu:1|Priority"])
+        rc, out, err = self.replace(jid, "--dry-run", waiting=waiting)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("a waiting job fits the free nvidia_h200 card on msa1 first", out)
+        # one waiting only for a dependency, or too large for the node's idle cores, takes nothing from it
+        waiting = "\n".join(["gmsap|777|8|64G|gres:gpu:1|Dependency", "gmsap|778|200|64G|gres:gpu:1|Priority"])
+        rc, out, err = self.replace(jid, "--dry-run", waiting=waiting)
+        self.assertIn("HPCW-JOB would-move-running %s demo-fit" % jid, out)
+
+    def test_a_node_short_of_cores_or_memory_holds_no_free_card(self):
+        jid = self.running_job()
+        for short in (self.H200_NODE.replace("CPUAlloc=8 ", "CPUAlloc=126 "), self.H200_NODE.replace("AllocMem=100000", "AllocMem=750000")):
+            rc, out, err = self.replace(jid, "--dry-run", nodes=(self.A30_NODE, short))
+            self.assertIn("no other card it fits is free now", out)
+
+    def test_a_refused_requeue_leaves_the_job_where_it_runs(self):
+        jid = self.running_job()
+        with open(os.path.join(self.g.sched, "requeue_fail"), "w") as fh:
+            fh.write("slurm_requeue error: Requested operation is presently disabled\n")
+        rc, out, err = self.replace(jid)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("kept %s demo-fit: Slurm refused the requeue: slurm_requeue error" % jid, out)
+        self.assertNotIn("partition=", " ".join(self.scontrols()))
+        self.assertEqual(self.scontrols()[-1], "scontrol update jobid=%s requeue=0" % jid)
+
+    def test_a_moved_job_not_started_in_time_goes_back_and_a_started_one_is_let_be(self):
+        jid = self.running_job()
+        records = os.path.join(self.g.state, "jobs", ".checkpoint-moves")
+        os.makedirs(records, exist_ok=True)
+        with open(os.path.join(records, jid), "w", newline="\n") as fh:
+            fh.write("%d demo reqp requeue gpu:nvidia_a30:1 - 0\n" % (time.time() - 1000))
+        with open(os.path.join(records, "40999999"), "w", newline="\n") as fh:
+            fh.write("%d demo reqp requeue gpu:1 - 1\n" % (time.time() - 100))
+        self.g.jobs(["%s|PENDING|Resources|N/A|" % jid, "40999999|RUNNING|None|N/A|msa1"])
+        rc, out, err = self.replace(jid, FAKE_SQUEUE_RUNNING="")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("returned %s to reqp/requeue gpu:nvidia_a30:1: not started within 900 s of its move" % jid, out)
+        self.assertIn("started 40999999 after its move at a checkpoint (RUNNING)", out)
+        self.assertIn("scontrol update jobid=%s partition=reqp qos=requeue gres=gpu:nvidia_a30:1 excnodelist=" % jid, self.scontrols())
+        self.assertEqual(os.listdir(records), [])
+
+    def test_the_switch_turns_the_running_moves_off(self):
+        jid = self.running_job()
+        rc, out, err = self.replace(jid, HPCW_CHECKPOINT_MOVES="off")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertNotIn("running job(s)", out)
+        self.assertEqual(self.scontrols(), [])
+
+
 class AvoidTest(PlacementBase):
     """Nodes every job is kept off (31): the ones placement.exclude lists, the ones that end the jobs of two users or
     more within a minute, and the ones whose probe could not read the account's home; and --prefer, a word's own

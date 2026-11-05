@@ -125,6 +125,7 @@ job_usage() {
        hpcworker job usage --project P [--last K]
        hpcworker job share --project P [--last K] [--kind REGEX]
        hpcworker job pack --items \"A B ...\" [--var NAME] [--mps auto|on|off] -- COMMAND [ARG...]
+       hpcworker job mark [--watch SECONDS] [-- FILE...]
        hpcworker job probe [--nodes LIST] [--max N]
        hpcworker job version"
 }
@@ -629,7 +630,8 @@ job_submit() {
   fi
   dep=$(job_after_option ${afters[@]+"${afters[@]}"}) || die "--after is a job id, then :ok or :any (any when left out)"
   local jd; jd=$(job_dir "$project")
-  ( umask 077; mkdir -p "$jd/logs" ) || die "could not make $jd/logs"
+  # (34) the folder a job's checkpoint marker goes in (job mark), made here so the job's own umask never decides it
+  ( umask 077; mkdir -p "$jd/logs" "$jd/checkpoints" ) || die "could not make $jd/logs"
   local args=() o
   while IFS= read -r o; do [ -n "$o" ] && args+=("$o"); done <<< "$opts"
   # a dependency that can never be met (its job failed under afterok, or is gone) ends this job at
@@ -662,7 +664,8 @@ job_submit() {
   local id out rc=0
   # sbatch itself rather than adapter_submit, which puts the script last and so takes no arguments for it
   # the job gets the caller's environment, not hpcworker's (sbatch exports the whole environment)
-  out=$(job_caller_env; sbatch --parsable "${args[@]}" "$script" "$@" 2>&1) || rc=$?
+  # (34) every job is handed the folder of its checkpoint marker, which job mark writes and job replace reads
+  out=$(job_caller_env; export HPCW_CHECKPOINTS="$jd/checkpoints"; sbatch --parsable "${args[@]}" "$script" "$@" 2>&1) || rc=$?
   id=$(printf '%s\n' "$out" | slurm_parse_submit 2>/dev/null) || id=""
   if [ $rc != 0 ] || [ -z "$id" ]; then
     out=$(printf '%s' "$out" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
@@ -1000,6 +1003,7 @@ job_replace() {
     [ "$only" = " " ] || case "$only" in *" $base "*) ;; *) continue;; esac   # --job: these alone
     case "$reason" in Priority|Resources|ReqNodeNotAvail*|QOS*) ;; *) continue;; esac
     case "$dep" in ""|"(null)") ;; *) continue;; esac  # one that waits on another job is not waiting for a card
+    [ -f "$(move_record_dir)/$base" ] && continue  # (34) moved at a checkpoint: its start or return is job_move_running's
     need="" project="" line="" log=""
     for p in ${projects[@]+"${projects[@]}"}; do line=$(job_known "$p" "$base"); [ -n "$line" ] && { project=$p; break; }; done
     if [ -n "$line" ]; then
@@ -1016,6 +1020,8 @@ job_replace() {
     job_replace_one "$target" "$jname" "$parts" "$qos" "$cpus" "$jmem" "$tl" "$tres" "$excl" "$need" "$project" "$log" "$dry" "$gain" < /dev/null
   done <<< "$own"
   echo "HPCW-JOB replace looked at $((looked > most ? most : looked)) pending job(s), moved $REPLACE_MOVED"
+  # (34) then the running ones: each placed GPU job just after a checkpoint, moved where a free card runs it faster
+  job_move_running "$dry" "$gain" "$only" ${projects[@]+"${projects[@]}"}
 }
 
 job_usage_report() {
@@ -1142,6 +1148,7 @@ cmd_job() {
     probe) job_probe "$@";;
     share) job_share_report "$@";;
     pack) job_pack "$@";;
+    mark) job_mark "$@";;
     version) echo "HPCW-JOB version $VERSION interface $HPCW_JOB_INTERFACE";;
     *) job_usage;;
   esac
