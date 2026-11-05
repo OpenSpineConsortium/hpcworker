@@ -1504,6 +1504,68 @@ a person takes the line away or the failures age out; the probe's verdict ends w
 used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use, and its peak on the
 card where the site gathers `gres/gpumem` (a framework that preallocates reads its share of the card it held, not its need).
 
+## Sharing a card, and moving a running job at a checkpoint (version 33)
+
+A lab lead, 2026-11-05: "MAKE SURE THIS TYPE OF BEHAVIOR IS MEASURED AND INCORPORATED INTO THE DYNAMIC SMART GPU
+REASSIGNER! MAKE IT BASED ON SOME SORT OF SUPPORTED UTILITY, EITHER FROM NVIDIA OR SLURM OR WHOEVER!" Some kinds of GPU
+job use a small part of their card: that day a JAX training run held about 9.5 GB of a 141 GB card and 62 to 87 per
+cent of its compute. Such a card could run several of them at once. Framework 33 measures each kind's share of its card
+from its own runs, says how many fit one card, runs that many side by side in one job, and designs the move of a running
+job to a better card at a checkpoint.
+
+**What the site supports** (Slurm 23.02.6 at Wayne State, read 2026-11-05):
+- `GresTypes` is `gpu` alone. Slurm offers no `gres/shard` and no `gres/mps`, so it cannot be asked for a part of a
+  card. Where a site configures shards, the placement asks for them first (below).
+- `jobacct_gather/linux` with the GPU gres gathers each step's `gres/gpumem` (peak card memory) and `gres/gpuutil`
+  (card use, per cent), and `AccountingStorageTRES` keeps them. So `sstat` reads a running step's share and `sacct`
+  (`TRESUsageInMax`, `TRESUsageInAve`) a finished one's, with no tool of hpcworker's on the node.
+- NVIDIA's MPS control daemon (`nvidia-cuda-mps-control`) is installed. A user may start one inside a job, for that
+  job's card alone, with its pipe and log folders in the job's scratch, so the job's processes share the card's compute
+  at once rather than taking turns.
+
+**`job share --project P [--last K] [--kind REGEX]`** reads the last K finished jobs of the project's ledger with one
+sacct. For each kind (the job's name with a trailing run index taken off: `_s3`, `_7`, or as `--kind` names it) it
+prints the runs read, the peak card memory (`gres/gpumem`, the largest of its runs), the mean card use
+(`gres/gpuutil`, the mean of its runs) and, for each card type of the placement file, how many fit one card:
+- by memory, the card's memory over 1.2 times the peak;
+- by compute, `HPCW_SHARE_FLOOR` (0.5) over the share left to each when N share it, so that no run is expected below
+  half its solo rate: N at most 1 / (use x floor), with use the mean card use as a fraction;
+- the smaller of the two, at least 1.
+
+The numbers are a forecast from the kind's own history, read again at every call. They are written to
+`<state>/jobs/<project>/share.tsv`, one line a kind, so a caller reads the N without a second sacct. A measurement of N
+side by side (below) tells the real rate, and the README of a project records it beside the forecast.
+
+**`job pack --items "A B C" [--var NAME] [--mps auto|on|off] -- COMMAND [ARG...]`** runs COMMAND once an item, side by
+side, inside the job it is called in:
+- each child has `NAME` (default `HPCW_PACK_ITEM`) set to its item and `HPCW_PACK=1` set, and its lines go to the job's
+  log with the item before them;
+- with `--mps auto` (the default), when the job holds a card (`CUDA_VISIBLE_DEVICES` set) and the control daemon is
+  installed, one MPS daemon is started for the job, its pipe and log folders under the job's scratch, and stopped when
+  the last child ends; `--mps off` lets the children take turns on the card, as two processes do without MPS;
+- Slurm's TERM is passed to every child, and the job ends with the worst child's exit.
+
+A project's job script calls `job pack` and keeps to its own items; each child is a whole run of the project's own, with
+its own folder, key and record. A job that runs N children asks N times one run's cores and host memory.
+
+**Shards, where a site has them.** A site whose `GresTypes` lists `shard` can give a job a part of a card through
+Slurm itself, each run a job of its own; this framework does not ask for shards yet, since the site it was measured on
+has none, and `job pack` is the way to share a card there.
+
+**Moving a running job at a checkpoint (designed; not yet built).** A kind that resumes from its last checkpoint can be
+moved while it runs, at almost no cost, just after a checkpoint. The job says so by writing a marker,
+`$HPCW_CHECKPOINT_FILE` (hpcworker hands every placed job the path `<state>/jobs/<project>/checkpoints/<id>`), touched
+each time a checkpoint is safely written. `job replace` then looks at this account's RUNNING placed jobs too:
+- one whose marker is younger than `HPCW_CHECKPOINT_FRESH` seconds (600);
+- that runs on a card the placement ranks below a free card it fits now (by its placed `gpu_mem` and `gpu_arch`, never
+  outside them);
+- where the move is expected to gain more than `--gain`, by the kind's measured rate on each card type when there is
+  one, else by the card's place in the placement file;
+- is requeued held (`scontrol requeuehold`), its gres, partition and QoS set to the free card's (a never-preempted QoS
+  where there is one, since a preemptable one loses an H200 to its owners' jobs within minutes), and released.
+The move is one line of `replace.log` and of the job's log; a job not started within `HPCW_CHECKPOINT_RETURN` seconds
+(900) of the move is moved back to where it ran. Slurm keeps the job's id, so every job that waits on it still does.
+
 ## Files
 
 ```
