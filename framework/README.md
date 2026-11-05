@@ -1454,13 +1454,38 @@ debug QoS on reqp, prip and secp (one job at a time), prip/primary, secp/seconda
 beside the ledger (`<project>/placed/<id>`; one framework 30 placed is read from the race at the head of its log),
 and `job replace` races this account's own pending jobs again (with `--runners`, the autoscaler's runner jobs
 too). A job is moved with one `scontrol update` when another placement would start it sooner by more than
-`--gain` seconds (900), never when it is about to start where it is, never twice within `HPCW_REPLACE_HOLD`
-seconds (1800), never in its first `--age` seconds (600), and never when it waits on a dependency, is an array,
-or is not one hpcworker placed; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
+`--gain` seconds (300), never when it is about to start where it is, never twice within `HPCW_REPLACE_HOLD`
+seconds (600), never in its first `--age` seconds (120), and never when it waits on a dependency or is not one
+hpcworker placed. From framework 32 `job submit --placement` places an array too, and `job replace` moves an array's
+waiting tasks as one, those that have started staying where they are, so workers that claim from a shared queue spread
+onto whatever card frees; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
 `<state>/jobs/replace.log`. When Slurm refuses a move, a runner job is cancelled (the autoscaler queues one again,
 placed afresh) and any other job is left where it is: its environment, which a resubmission would need, is never
 kept, since it may hold a credential. The autoscaler's controller runs `job probe` and then `job replace --runners`
 every `replace_every` seconds of its autoscale.conf (300), inside its own Slurm job; nothing here runs on a login node.
+
+`sbatch --test-only` answers over running jobs alone, so where others' pending jobs outrank this account's it says a
+card frees soon while the account's jobs wait there behind priority for hours. From framework 32 such a wait is
+evidence the race believes over the estimate: where a job of this account no larger than the one being placed (its
+cores, memory and cards) has been pending for `Priority` longer than `HPCW_WAIT_MIN` seconds (900), counted from its
+submission or its last move and held to `HPCW_WAIT_CAP` (86400), no placement there is taken to start the job sooner
+than now plus that wait, and a job waiting for priority where it is is never "about to start" there. Each wait is
+written to `<state>/placement.waits` and read back for `HPCW_WAIT_FRESH` seconds (3600), so a job moved out of such
+a queue is not moved straight back into it once the jobs that showed the wait have left. A placement's table says
+when an estimate was raised so ("behind priority").
+
+A placement is only as good as the card's fit, and the record a job was placed for binds every later move: `job
+replace` races only the cards of its `gpu_mem` and `gpu_arch`. An architecture belongs in a job's `--gpu-arch` once a
+run of the job's own kind has been seen to take a training step on it, by the kind's own progress record, never by its
+GPU use or a running state: on one site a JAX kind trained on a Blackwell card step for step as on a Hopper one, while a
+torch kind held the same card at 95 per cent and took no step, and a card of 11 GB ran out of memory on every case of
+a job placed for 24.
+
+A project may hold its own rule of which jobs it runs at all: from framework 32 `job submit` runs an executable
+`<state>/jobs/<project>/admit`, where one is, with the job's class, its script and the sbatch options it would be
+queued with, before anything is asked or queued, `--check` included; a nonzero exit refuses the job with the admission's
+own words ("HPCW-JOB refused NAME: the project's admission: ..."). A project that runs every GPU job on a launched
+pipeline, say, refuses there a GPU job whose script is none of its pipeline's.
 
 `--prefer P[,P]...` on `job submit --placement` and `job place` names the partitions a caller would rather have: the
 earliest of them is taken unless another placement starts the job more than `HPCW_PLACEMENT_PREFER` seconds (600)
@@ -1476,7 +1501,8 @@ reads `fail`, and a busy one `unknown`, which holds nothing against it. The firs
 a person takes the line away or the failures age out; the probe's verdict ends when the hour does.
 
 `job usage --project P` sets each job name's memory and cores asked beside its measured peak memory and mean cores
-used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use.
+used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use, and its peak on the
+card where the site gathers `gres/gpumem` (a framework that preallocates reads its share of the card it held, not its need).
 
 ## Files
 
