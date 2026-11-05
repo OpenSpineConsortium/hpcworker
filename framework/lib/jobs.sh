@@ -379,6 +379,61 @@ job_own_jobs() { # this account's jobs, one squeue a process: ID|NAME|STATE|PART
   [ -n "$OWN_JOBS" ] && printf '%s\n' "$OWN_JOBS"
   return 0
 }
+# ---- the wait behind priority (32) ------------------------------------------------------------------
+# sbatch --test-only answers over running jobs alone, so where pending jobs of others outrank ours it says a card frees
+# soon while our jobs wait there for hours with the reason Priority. A site that gives this account the lowest fairshare
+# shows it on every busy partition: on 5 November job replace moved a wave of an account's GPU jobs from cards that freed
+# within the hour into the requeue QoS, where test-only said "now" and the jobs sat behind priority all morning. A job of
+# ours no larger than the one being placed (its cores, memory and cards) and pending there for Priority longer than
+# HPCW_WAIT_MIN seconds (900) is the evidence: no placement there is believed to start the job sooner than now plus the
+# longest such wait, counted from the job's submission or its last move and held to HPCW_WAIT_CAP (86400). Each wait seen
+# is written to <state>/placement.waits, so the evidence outlives the jobs that gave it, which may themselves be moved
+# out, for HPCW_WAIT_FRESH seconds (3600), and a job is not moved back into the queue it was just moved out of.
+WAIT_ROWS="" WAIT_READ=0
+job_waits_file() { printf '%s/placement.waits' "$STATE_DIR"; }
+job_mem_mb() { # 32G, 62.50G, 16000M, 4T or a bare count of MB -> whole MB, 0 when unreadable
+  printf '%s\n' "$1" | awk '{ v = $0 + 0; u = toupper(substr($0, length($0), 1))
+    if (u == "K") v /= 1024; else if (u == "G") v *= 1024; else if (u == "T") v *= 1048576; else if (u != "M" && $0 !~ /^[0-9.]+$/) v = 0
+    printf "%d\n", v }'
+}
+job_waits() { # "EPOCH PARTITION QOS CPUS MEM_MB GPUS WAIT" lines: this account's jobs waiting for priority now, and the fresh ones recorded
+  if [ $WAIT_READ = 0 ]; then
+    WAIT_READ=1
+    local now id st parts qos reason cpus mem tres sub base at last wait gpus p min=${HPCW_WAIT_MIN:-900} f live=""
+    now=$(date +%s)
+    while IFS='|' read -r id _ st parts qos reason cpus mem _ tres _ sub _; do
+      [ "$st" = PENDING ] && [ "$reason" = Priority ] || continue
+      at=$(date -d "${sub/T/ }" +%s 2>/dev/null) || continue
+      base=${id%%_*}; last=$(tail -n 1 "$STATE_DIR/jobs/.moves/$base" 2>/dev/null)
+      [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -gt "$at" ] && at=$last
+      wait=$((now - at)); [ "$wait" -ge "$min" ] || continue
+      [ "$wait" -le "${HPCW_WAIT_CAP:-86400}" ] || wait=${HPCW_WAIT_CAP:-86400}
+      gpus=0; case "$tres" in *gpu:*) gpus=${tres##*:}; [[ "$gpus" =~ ^[0-9]+$ ]] || gpus=1;; esac
+      for p in ${parts//,/ }; do live="$live$now $p $qos ${cpus:-1} $(job_mem_mb "$mem") $gpus $wait"$'\n'; done
+    done < <(job_own_jobs)
+    f=$(job_waits_file)
+    if [ -n "$live" ]; then
+      ( umask 077; mkdir -p "$(dirname "$f")" && printf '%s' "$live" >> "$f"
+        if [ "$(wc -l < "$f")" -gt 4000 ]; then tail -n 2000 "$f" > "$f.new" && mv -f "$f.new" "$f"; fi ) 2>/dev/null
+    fi
+    WAIT_ROWS=$( { printf '%s' "$live"; awk -v t="$((now - ${HPCW_WAIT_FRESH:-3600}))" 'NF == 7 && $1 ~ /^[0-9]+$/ && $1 >= t' "$f" 2>/dev/null; } )
+  fi
+  [ -n "$WAIT_ROWS" ] && printf '%s\n' "$WAIT_ROWS"
+  return 0
+}
+job_wait_floor() { # PARTITION QOS CPUS MEM GPUS -> seconds a job of that shape is believed to wait there at least, 0 for none
+  local cpus=${3:-1} mem gpus=${5:-0}; mem=$(job_mem_mb "${4:-0}")
+  [[ "$cpus" =~ ^[0-9]+$ ]] || cpus=1
+  job_waits | awk -v p="$1" -v q="$2" -v c="$cpus" -v m="$mem" -v g="$gpus" '
+    $2 == p && $3 == q && $4 + 0 <= c + 0 && $5 + 0 <= m + 0 && $6 + 0 <= g + 0 && $7 + 0 > w { w = $7 + 0 }
+    END { print w + 0 }'
+}
+job_race_shape() { # sbatch options... -> "CPUS MEM" the race asks with (1 and 0 where not given)
+  local a cpus=1 mem=0
+  for a in "$@"; do case "$a" in --cpus-per-task=*) cpus=${a#*=};; --mem=*) mem=${a#*=};; esac; done
+  printf '%s %s' "$cpus" "$mem"
+}
+
 ASK_SAID=""
 job_ask() { # PARTITION QOS GRES EXCLUDE SCRIPT ARGS... -> epoch seconds of the start sbatch --test-only gives, else 1 with its words in ASK_SAID
   local part="$1" qos="$2" gres="$3" excl="$4" script="$5" opts out at; shift 5
@@ -406,8 +461,9 @@ job_race() { # GPUS RESUMES SCRIPT ARGS...: the groups on stdin -> PLACE_CHOICE 
   # (600) sooner, so a preference is honoured while it costs the job little, and never holds it long from a free card.
   local gpus="$1" resumes="$2" script="$3"; shift 3
   local q pre max parts gres excl cards part at tie=${HPCW_PLACEMENT_TIE:-300} now held got ok best="" best_at="" best_pre="" won
-  local pgot pok pat pbest="" pbest_at="" window=${HPCW_PLACEMENT_PREFER:-600}
+  local pgot pok pat pbest="" pbest_at="" window=${HPCW_PLACEMENT_PREFER:-600} shape floor said
   now=$(date +%s); PLACE_TABLE="" PLACE_AT=""
+  shape=$(job_race_shape "$@")
   while read -r q pre max parts gres excl cards; do
     [ -n "$q" ] || continue
     if [ "$max" != - ]; then
@@ -418,8 +474,11 @@ job_race() { # GPUS RESUMES SCRIPT ARGS...: the groups on stdin -> PLACE_CHOICE 
     for part in ${parts//,/ }; do
       if at=$(job_ask "$part" "$q" "$gres" "$excl" "$script" "$@"); then
         [ "$at" -lt "$now" ] && at=$now
+        # (32) where a job of ours no larger has waited behind priority, test-only's answer is no sooner than that wait
+        said=""; floor=$(job_wait_floor "$part" "$q" "${shape%% *}" "${shape#* }" "$([ "$gres" = - ] && echo 0 || echo "$gpus")")
+        if [ "$floor" -gt 0 ] && [ "$at" -lt $((now + floor)) ]; then at=$((now + floor)); said=", behind priority: a job of this account's no larger has waited $((floor / 60)) min there"; fi
         got="$got$at $part"$'\n'
-        PLACE_TABLE="$PLACE_TABLE$part/$q $([ "$gres" = - ] && echo cpu || echo "$gres of ${cards//,/ }") start $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ) in $(( (at - now) / 60 )) min$([ "$pre" = yes ] && echo ", preemptable")"$'\n'
+        PLACE_TABLE="$PLACE_TABLE$part/$q $([ "$gres" = - ] && echo cpu || echo "$gres of ${cards//,/ }") start $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ) in $(( (at - now) / 60 )) min$([ "$pre" = yes ] && echo ", preemptable")$said"$'\n'
       else
         PLACE_TABLE="$PLACE_TABLE$part/$q $([ "$gres" = - ] && echo cpu || echo "$gres") refused: $ASK_SAID"$'\n'
       fi
@@ -820,9 +879,13 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   local race_args=("--job-name=$jname" "--cpus-per-task=$cpus" "--mem=$jmem")
   [[ "$tl" =~ ^[0-9:-]+$ ]] && race_args+=("--time=$tl")
   # where it stands now, each of its partitions asked alone, as the race asks the others
-  local cur="" at p now
+  local cur="" at p now floor
+  now=$(date +%s)
   for p in ${parts//,/ }; do
     at=$(job_ask "$p" "$qos" "$gres" "$excl" "" "${race_args[@]}") || continue
+    # (32) a job waiting for priority where it is waits at least as long again as it has: its own wait is the evidence
+    floor=$(job_wait_floor "$p" "$qos" "$cpus" "$jmem" "$([ "$gres" = - ] && echo 0 || echo "$gpus")")
+    [ "$floor" -gt 0 ] && [ "$at" -lt $((now + floor)) ] && at=$((now + floor))
     if [ -z "$cur" ] || [ "$at" -lt "$cur" ]; then cur=$at; fi
   done
   job_need_place "$class" "$gpus" "$gpumem" "$archs" "$rq" "" "${race_args[@]}" || { echo "HPCW-JOB kept $id $jname: $PLACE_WHY"; return 0; }

@@ -1464,6 +1464,23 @@ placed afresh) and any other job is left where it is: its environment, which a r
 kept, since it may hold a credential. The autoscaler's controller runs `job probe` and then `job replace --runners`
 every `replace_every` seconds of its autoscale.conf (300), inside its own Slurm job; nothing here runs on a login node.
 
+`sbatch --test-only` answers over running jobs alone, so where others' pending jobs outrank this account's it says a
+card frees soon while the account's jobs wait there behind priority for hours. From framework 32 such a wait is
+evidence the race believes over the estimate: where a job of this account no larger than the one being placed (its
+cores, memory and cards) has been pending for `Priority` longer than `HPCW_WAIT_MIN` seconds (900), counted from its
+submission or its last move and held to `HPCW_WAIT_CAP` (86400), no placement there is taken to start the job sooner
+than now plus that wait, and a job waiting for priority where it is is never "about to start" there. Each wait is
+written to `<state>/placement.waits` and read back for `HPCW_WAIT_FRESH` seconds (3600), so a job moved out of such
+a queue is not moved straight back into it once the jobs that showed the wait have left. A placement's table says
+when an estimate was raised so ("behind priority").
+
+A placement is only as good as the card's fit, and the record a job was placed for binds every later move: `job
+replace` races only the cards of its `gpu_mem` and `gpu_arch`. An architecture belongs in a job's `--gpu-arch` once a
+run of the job's own kind has been seen to take a training step on it, by the kind's own progress record, never by its
+GPU use or a running state: on one site a JAX kind trained on a Blackwell card step for step as on a Hopper one, while a
+torch kind held the same card at 95 per cent and took no step, and a card of 11 GB ran out of memory on every case of
+a job placed for 24.
+
 `--prefer P[,P]...` on `job submit --placement` and `job place` names the partitions a caller would rather have: the
 earliest of them is taken unless another placement starts the job more than `HPCW_PLACEMENT_PREFER` seconds (600)
 sooner, and `job replace` keeps the preference when it races the job again.
