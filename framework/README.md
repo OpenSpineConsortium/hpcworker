@@ -1532,6 +1532,8 @@ prints the runs read, the peak card memory (`gres/gpumem`, the largest of its ru
   half its solo rate: N at most 1 / (use x floor), with use the mean card use as a fraction;
 - the smaller of the two, at least 1.
 
+Under MPS the site's accounting still gathers each run's card memory but reads its card use as 0, so the use is taken
+from runs that held a card alone; a kind measured only under MPS gets its N from memory and from the packing measured.
 The numbers are a forecast from the kind's own history, read again at every call. They are written to
 `<state>/jobs/<project>/share.tsv`, one line a kind, so a caller reads the N without a second sacct. A measurement of N
 side by side (below) tells the real rate, and the README of a project records it beside the forecast.

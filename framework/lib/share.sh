@@ -50,11 +50,12 @@ job_share_report() {
     BEGIN { n = split(ENVIRON["ACCT"], l, "\n")
       for (i = 1; i <= n; i++) { split(l[i], f, "|"); if (f[1] !~ /\.batch$/ || f[4] !~ /COMPLETED|TIMEOUT|CANCELLED|FAILED|PREEMPTED/) continue
         base = f[1]; sub(/[._].*/, "", base); m = field(f[2], "gres/gpumem"); if (m == "") continue
-        u = field(f[3], "gres/gpuutil"); if (u == "") u = field(f[2], "gres/gpuutil")
-        mem[base] = mb(m) / 1024; use[base] = u + 0 }
+        # under MPS the accounting reads the card use of a run as 0 (5 November): such a run gives its memory and no use
+        u = field(f[3], "gres/gpuutil"); if (u == "" || u + 0 == 0) u = field(f[2], "gres/gpuutil")
+        mem[base] = mb(m) / 1024; if (u + 0 > 0) { use[base] = u + 0; used[base] = 1 } }
       nc = split(ENVIRON["CARDS"], c, "\n"); floor = ENVIRON["FLOOR"] + 0 }
-    ($1 in mem) { k = $2; if (!(k in runs)) order[++nk] = k; runs[k]++; if (mem[$1] > peak[k]) peak[k] = mem[$1]; sum[k] += use[$1] }
-    END { for (i = 1; i <= nk; i++) { k = order[i]; u = sum[k] / runs[k]; fits = ""
+    ($1 in mem) { k = $2; if (!(k in runs)) order[++nk] = k; runs[k]++; if (mem[$1] > peak[k]) peak[k] = mem[$1]; if ($1 in used) { sum[k] += use[$1]; nu[k]++ } }
+    END { for (i = 1; i <= nk; i++) { k = order[i]; u = (nu[k] > 0) ? sum[k] / nu[k] : 0; fits = ""
         for (j = 1; j <= nc; j++) { split(c[j], cm, " "); if (cm[1] == "") continue
           bym = (peak[k] > 0) ? int(cm[2] / (peak[k] * 1.2)) : 1; byc = (u > 0) ? int(100 / (u * floor)) : bym
           nfit = (bym < byc) ? bym : byc; if (nfit < 1) nfit = 1; fits = fits sprintf(" %s:%d", cm[1], nfit) }
