@@ -189,7 +189,7 @@ class PlacementTest(PlacementBase):
         self.assertIn("HPCW-JOB placement hpcw_auto_o-r chose reqp,prip,secp/debug (never preempted)", out)
         opts = [l for l in out.splitlines() if l.startswith("HPCW-JOB options ")]
         self.assertEqual(len(opts), 1, out)
-        self.assertRegex(opts[0], r"^HPCW-JOB options --partition=reqp,prip,secp --qos=debug( --account=\S+)? --no-requeue --open-mode=append$")
+        self.assertRegex(opts[0], r"^HPCW-JOB options --partition=reqp,prip,secp --qos=debug( --account=\S+)? --constraint=avx2 --no-requeue --open-mode=append$")
         self.assertEqual(self.submitted(), [])
         for c in self.asked():
             self.assertIn("--wrap=true", c)
@@ -203,6 +203,38 @@ class PlacementTest(PlacementBase):
         rc, out, err = self.run_tool("job place --class sometimes")
         self.assertNotEqual(rc, 0)
         self.assertIn("--class is cpu, batch, gpu or runner", out + err)
+
+    def test_a_runner_job_asks_for_its_class_feature_and_a_partition_with_no_such_node_drops_out(self):
+        # (35) the placement file's "constraint runner avx2": the CI check took 25 to 56 minutes on a partition whose
+        # only nodes in service lack the feature, against 8 to 14 elsewhere; there test-only refuses the feature
+        self.plan("reqp - 0 debug", "prip - 0 debug", "secp - refuse debug", "prip - 900 primary", "secp - refuse secondary",
+                  "reqp - 2400 requeue")
+        rc, out, err = self.run_tool("job place --class runner --name hpcw_auto_o-r --time 2:00:00 --cpus 4 --mem 16G")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB placement hpcw_auto_o-r chose reqp,prip/debug (never preempted)", out)
+        self.assertIn("HPCW-JOB placement hpcw_auto_o-r secp/debug cpu refused: ", out)
+        opts = [l for l in out.splitlines() if l.startswith("HPCW-JOB options ")]
+        self.assertRegex(opts[0], r"^HPCW-JOB options --partition=reqp,prip --qos=debug( --account=\S+)? --constraint=avx2 --no-requeue --open-mode=append$")
+        asked = self.asked()
+        self.assertEqual(len(asked), 6, asked)
+        for c in asked:
+            self.assertIn("--constraint=avx2", c)
+        # a class the file names no constraint for asks with none
+        rc, out, err = self.run_tool("job place --class cpu --name plain --time 1:00:00 --cpus 1 --mem 1G")
+        self.assertEqual(rc, 0, (out, err))
+        for c in self.asked()[len(asked):]:
+            self.assertNotIn("--constraint", c)
+        self.assertNotIn("--constraint", [l for l in out.splitlines() if l.startswith("HPCW-JOB options ")][0])
+
+    def test_a_constraint_that_is_no_plain_feature_name_places_nothing(self):
+        f = os.path.join(self.g.shared, "profiles", "testsite.placement")
+        with open(f, "a", newline="\n") as fh:
+            fh.write("constraint gpu avx2&h200\n")
+        self.plan("galhp * 0", "gmsap * 0", "reqp * 0")
+        rc, out, err = self.run_tool("job place --class gpu --name g --time 1:00:00 --cpus 4 --mem 16G")
+        self.assertNotEqual(rc, 0, (out, err))
+        self.assertIn("the placement file's constraint for gpu is no plain feature name", out + err)
+        self.assertEqual(self.asked(), [])
 
 
 class ReplaceTest(PlacementBase):
@@ -335,6 +367,19 @@ class ReplaceTest(PlacementBase):
         self.assertIn("HPCW-JOB moved 40970001 demo-old reqp/requeue gpu:nvidia_h200:1 -> reqp/requeue gpu:1 (preemptable, requeued)", out)
         # its race asked 48 GB or more of Ada or Hopper: the A30s and every card outside those stay out
         self.assertEqual(self.updates(), ["scontrol update jobid=40970001 partition=reqp qos=requeue gres=gpu:1 excnodelist=arw1,arw4,rom1,tta1,voh1,ymh1 requeue=1"])
+
+    def test_a_runner_job_is_raced_with_its_class_feature_and_takes_it_when_moved(self):
+        # (35) a runner job queued before the placement file named its feature is raced with it and moved with it
+        self.plan("reqp - 20000 requeue", "prip - 0 primary", "secp - refuse secondary")
+        runner = ("40970002", "hpcw_auto_o-r", "PENDING", "reqp", "requeue", "Priority", "4", "16G", "2:00:00", "N/A", "", self.OLD, "(null)")
+        rc, out, err = self.run_tool("job replace --runners", FAKE_SQUEUE_LIST=own(runner))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved 40970002 hpcw_auto_o-r reqp/requeue -> prip/primary (never preempted)", out)
+        self.assertEqual(self.updates(), ["scontrol update jobid=40970002 partition=prip qos=primary features=avx2"])
+        asked = self.asked()
+        self.assertTrue(asked)
+        for c in asked:
+            self.assertIn("--constraint=avx2", c)
 
     def test_a_refused_move_cancels_a_runner_job_and_keeps_any_other(self):
         jid, _ = self.placed()

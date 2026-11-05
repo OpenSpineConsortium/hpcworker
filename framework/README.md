@@ -1638,6 +1638,35 @@ log:
 the pending one: `HPCW-JOB replace looked at N running job(s) just after a checkpoint, moved M`.
 `HPCW_CHECKPOINT_MOVES=off` turns the running moves and their returns off.
 
+## A node feature for a class of jobs (version 35)
+
+A placement chooses a partition and a QoS, never a kind of node, so a job of a class whose speed depends on the node's
+cores could land on the slowest nodes a partition holds. On 5 November 2026 SchwingNet's required check, a serial
+unittest run that takes 8 to 14 minutes on the EPYC 74F3 and Xeon Gold 6142 nodes and on GitHub's machines, took 25 to
+56 minutes on every autoscaled runner job that started on an asx node (4-socket AMD Opterons, features
+`asx,amd,avx,10e`, no `avx2`), and on asx1 it ran into the workflow's 55-minute limit and the merge queue dropped its
+group. The job was not short of cores (1 h 2 min of CPU in 57 min 50 s on its 4); its cores were slow: copying the
+runner's files out of the image took 81 seconds there against 17 on an mdt node. The runner class's debug candidates
+race three partitions as one submission, and the one of them whose nodes in service are all asx took the debug QoS's
+one runner job nearly every time.
+
+The placement file may now name a feature every job of a class asks for:
+
+```
+#   constraint CLASS FEATURE
+constraint runner avx2
+```
+
+CLASS is `cpu` (which `batch` reads too), `gpu` or `runner`; FEATURE is one plain feature name as sinfo's `%f` lists it,
+and a line naming anything else (`avx2&h200`) places nothing for its class and says why. Every candidate of the class is
+asked with `--constraint=FEATURE`, so a partition with no such node is refused by its own `sbatch --test-only` and drops
+out of the race, and the choice carries it: `job place` prints `--constraint=FEATURE` among the options, which
+tools/grid_runner.sh's autoscaler already puts on its sbatch line. `job replace --runners` races a runner job with it and
+a move adds `features=FEATURE` to the job, so one queued before the line was written takes it too. Wayne State names it
+for runner jobs alone; a class with no line asks as before. Still unconstrained: a chain's jobs (`--start`, its lanes)
+and an autoscaled runner job when no placement answers, which take the site's batch queue as tools/grid_runner.sh names
+it.
+
 ## Files
 
 ```
