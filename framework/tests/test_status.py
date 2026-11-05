@@ -473,7 +473,7 @@ class Framework9Compat(Base):
     def test_version_says_32(self):
         rc, out, err = self.g.run("version")
         self.assertEqual(out.strip(), "%s (shared copy at %s)" % (G.CURRENT_VERSION, self.g.shared_spelled))
-        self.assertEqual(G.CURRENT_VERSION, "31")
+        self.assertEqual(G.CURRENT_VERSION, "32")
 
 
 class SuccessorOfAnEndedJob(Base):

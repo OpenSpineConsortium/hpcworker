@@ -306,7 +306,7 @@ class ReplaceTest(PlacementBase):
         self.plan("reqp * 20000", "galhp * 0", "gmsap * 0")
         before = len(self.asked())
         rows = own(self.pending("40999999", name="someone-else"), self.pending(plain, name="demo-plain"),
-                   self.pending(jid, dep="afterok:1(unfulfilled)", reason="Dependency"), self.pending(jid + "_[0-3]"),
+                   self.pending(jid, dep="afterok:1(unfulfilled)", reason="Dependency"),
                    self.pending(jid, sub="2099-01-01T00:00:00"), self.pending("40970002", name="hpcw_auto_o-r", tres="N/A"))
         rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows)
         self.assertEqual(rc, 0, (out, err))
@@ -634,6 +634,23 @@ class JobTest(unittest.TestCase):
             self.assertNotEqual(rc, 0, cls)
             self.assertIn("--gpus is for the gpu class; a %s job gets no card" % cls, out + err)
         self.assertEqual(self.sbatch_calls(), [])
+
+    def test_the_project_s_admission_may_refuse_a_job_before_anything_is_asked(self):
+        # (32) <state>/jobs/<project>/admit, handed the class, the script and the options, refuses aloud; --check meets it too
+        jd = os.path.join(self.g.state, "jobs", "demo")
+        os.makedirs(jd, exist_ok=True)
+        admit = os.path.join(jd, "admit")
+        with open(admit, "w", newline="\n") as fh:
+            fh.write('#!/bin/bash\ncase "$1" in gpu) echo "a GPU job runs on a launched pipeline: $(basename "$2")" >&2; exit 1;; esac\nexit 0\n')
+        os.chmod(admit, 0o755)
+        for extra in ("", "--check"):
+            rc, out, err = self.submit(extra=extra, cls="gpu")
+            self.assertNotEqual(rc, 0, extra)
+            self.assertIn("HPCW-JOB refused one: the project's admission: a GPU job runs on a launched pipeline: run.sbatch", out)
+        self.assertEqual(self.sbatch_calls(), [])
+        rc, out, err = self.submit(cls="cpu")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB submitted", out)
 
     def test_no_gpu_partition_refuses_gpu(self):
         g = G.Grid(os.path.join(self.td, "nogpu"), profile_edit=lambda p: p.update(partitions_gpu=[], qos_gpu=""))

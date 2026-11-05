@@ -1481,6 +1481,12 @@ GPU use or a running state: on one site a JAX kind trained on a Blackwell card s
 torch kind held the same card at 95 per cent and took no step, and a card of 11 GB ran out of memory on every case of
 a job placed for 24.
 
+A project may hold its own rule of which jobs it runs at all: from framework 32 `job submit` runs an executable
+`<state>/jobs/<project>/admit`, where one is, with the job's class, its script and the sbatch options it would be
+queued with, before anything is asked or queued, `--check` included; a nonzero exit refuses the job with the admission's
+own words ("HPCW-JOB refused NAME: the project's admission: ..."). A project that runs every GPU job on a launched
+pipeline, say, refuses there a GPU job whose script is none of its pipeline's.
+
 `--prefer P[,P]...` on `job submit --placement` and `job place` names the partitions a caller would rather have: the
 earliest of them is taken unless another placement starts the job more than `HPCW_PLACEMENT_PREFER` seconds (600)
 sooner, and `job replace` keeps the preference when it races the job again.

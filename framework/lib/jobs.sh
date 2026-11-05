@@ -643,6 +643,14 @@ job_submit() {
   [ -n "$cpus" ] && args+=("--cpus-per-task=$cpus")
   [ -n "$mem" ] && args+=("--mem=$mem")
   local part qos; part=$(printf '%s\n' "$opts" | sed -n 's/^--partition=//p'); qos=$(printf '%s\n' "$opts" | sed -n 's/^--qos=//p')
+  # (32) the project's own admission: an executable <state>/jobs/<project>/admit, handed the class, the script and the
+  # sbatch options, may refuse a job before anything is asked or queued (a project's rule of which jobs it runs at all,
+  # such as every GPU job on a launched pipeline); its words are the refusal's, and --check meets it as a submission does
+  local admit="$jd/admit" said
+  if [ -x "$admit" ]; then
+    said=$("$admit" "$class" "$script" "${args[@]}" 2>&1) \
+      || { echo "HPCW-JOB refused $name: the project's admission: $(printf '%s' "$said" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//' | cut -c1-400)"; return 1; }
+  fi
   if [ $check = 1 ]; then
     local t rc=0; t=$(job_caller_env; sbatch --test-only "${args[@]}" "$script" "$@" 2>&1) || rc=$?
     t=$(printf '%s' "$t" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
