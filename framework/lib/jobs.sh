@@ -544,7 +544,7 @@ job_need_write() { # PROJECT ID CLASS GPUS GPU_MEM ARCHS REQUEUE [PREFER]: what 
 
 job_submit() {
   local project="" name="" class="" time="" cpus="" mem="" gpus=1 dir="$PWD" check=0 afters=() array="" want="" requeue="" type=""
-  local placement="" gpumem=0 gpuarch="" prefer=""
+  local placement="" gpumem=0 gpuarch="" prefer="" gpus_named=0
   while [ $# -gt 0 ]; do case "$1" in
     --project) project="${2:-}"; shift 2 || job_usage;;
     --prefer) prefer="${2:-}"; shift 2 || job_usage;;
@@ -553,7 +553,7 @@ job_submit() {
     --time) time="${2:-}"; shift 2 || job_usage;;
     --cpus) cpus="${2:-}"; shift 2 || job_usage;;
     --mem) mem="${2:-}"; shift 2 || job_usage;;
-    --gpus) gpus="${2:-}"; shift 2 || job_usage;;
+    --gpus) gpus="${2:-}"; gpus_named=1; shift 2 || job_usage;;
     --gpu-type) type="${2:-}"; shift 2 || job_usage;;
     --partition) want="${2:-}"; shift 2 || job_usage;;
     --requeue) requeue=yes; shift;;
@@ -576,6 +576,9 @@ job_submit() {
   [ -z "$mem" ] || [[ "$mem" =~ $HPCW_JOB_MEM_RE ]] || die "--mem is a number with K, M, G or T after it"
   [ -z "$want" ] || [[ "$want" =~ ^[A-Za-z0-9_.-]{1,64}(,[A-Za-z0-9_.-]{1,64}){0,7}$ ]] || die "--partition is a partition's name, or up to eight joined by commas"
   [[ "$gpus" =~ ^[1-8]$ ]] || die "--gpus is 1 to 8"
+  # (32) only the gpu class asks for a card: a batch or cpu job named with --gpus once started on a node with no card and
+  # nothing said why, so the request is refused aloud, and a GPU job on the batch partition is --class gpu --partition <it>
+  [ "${gpus_named:-0}" = 0 ] || [ "$class" = gpu ] || die "--gpus is for the gpu class; a $class job gets no card (a GPU job on the batch partition is --class gpu --partition ${P_partition_cpu_batch:-<the batch partition>})"
   [ -z "$type" ] || [[ "$type" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || die "--gpu-type is one GPU type's name, as sinfo's GRES column gives it"
   [ -z "$array" ] || [[ "$array" =~ $HPCW_JOB_ARRAY_RE ]] || die "--array is task numbers and ranges (0-63, 1,3,5-9, 0-99:2) with an optional %N limit"
   case "$dir" in /*) [ -d "$dir" ] || die "--dir $dir is not a folder";; *) die "--dir must be an absolute path";; esac

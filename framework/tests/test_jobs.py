@@ -627,6 +627,14 @@ class JobTest(unittest.TestCase):
         rc, out, err = self.g.run("job submit --project demo --name one --class cpu --dir relative -- run.sbatch")
         self.assertNotEqual(rc, 0)
 
+    def test_a_card_asked_of_a_class_that_gets_none_is_refused_aloud(self):
+        # (32) a batch job sent with --gpus 1 started on a node with no card, and nothing said why
+        for cls in ("batch", "cpu"):
+            rc, out, err = self.submit(extra="--gpus 1", cls=cls)
+            self.assertNotEqual(rc, 0, cls)
+            self.assertIn("--gpus is for the gpu class; a %s job gets no card" % cls, out + err)
+        self.assertEqual(self.sbatch_calls(), [])
+
     def test_no_gpu_partition_refuses_gpu(self):
         g = G.Grid(os.path.join(self.td, "nogpu"), profile_edit=lambda p: p.update(partitions_gpu=[], qos_gpu=""))
         os.makedirs(os.path.join(self.td, "nogpu"), exist_ok=True)
