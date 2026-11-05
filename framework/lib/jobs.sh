@@ -299,13 +299,16 @@ job_bad_nodes() { # the nodes that end jobs at once: one sacct a process, the no
   fi
   printf '%s' "$BAD_NODES"
 }
+# a Slurm host list as one word; ] comes first in the bracket since a backslash is no escape inside one, and an escaped ]
+# there would close it and refuse every plain node name
+HPCW_JOB_HOSTLIST_RE='^[][A-Za-z0-9_.,-]+$'
 job_exclude_file() { printf '%s/placement.exclude' "$STATE_DIR"; }
 job_listed_nodes() { # the nodes a person has listed to keep every job off, spaced: <state>/placement.exclude and HPCW_PLACEMENT_EXCLUDE
   # One node or Slurm host list a line (msa[2-3]), # starting a comment, or a comma list in the variable: a node
-  # the site keeps in service that cannot run our jobs (2026-11-04: msa2, without the home file system).
+  # the site keeps in service that cannot run our jobs (2026-11-04: an H200 node, some hours without the home file system).
   local f w out=""; f=$(job_exclude_file)
   for w in $( { [ -r "$f" ] && sed 's/#.*//' "$f"; printf '%s\n' "${HPCW_PLACEMENT_EXCLUDE:-}" | tr ',' '\n'; } | tr -s ' \t' '\n' ); do
-    [[ "$w" =~ ^[A-Za-z0-9_.,\[\]-]+$ ]] || continue
+    [[ "$w" =~ $HPCW_JOB_HOSTLIST_RE ]] || continue
     case "$w" in *\[*) out="$out $(scontrol show hostnames "$w" 2>/dev/null | tr '\n' ' ')";; *) out="$out $w";; esac
   done
   printf '%s' "${out# }"
@@ -964,7 +967,7 @@ job_usage_report() {
 }
 
 job_probe() {
-  # A node that takes jobs but cannot run ours (2026-11-04: msa2, back in service without the home file system,
+  # A node that takes jobs but cannot run ours (2026-11-04: an H200 node, back in service without the home file system,
   # ended every job in its first second) is found before a job lands there: a one-minute job of one core on the
   # node itself, which reads this account's home and state folder and nothing else. --immediate gives it 10
   # seconds to start, so a busy node is no failure: it reads "unknown" and is asked again at the next probe. A
@@ -979,7 +982,7 @@ job_probe() {
     *) job_usage;;
   esac; done
   [[ "$most" =~ ^[1-9][0-9]{0,2}$ ]] || die "--max is 1 to 999"
-  [ -z "$nodes" ] || [[ "$nodes" =~ ^[A-Za-z0-9_.,\[\]-]+$ ]] || die "--nodes is a Slurm host list"
+  [ -z "$nodes" ] || [[ "$nodes" =~ $HPCW_JOB_HOSTLIST_RE ]] || die "--nodes is a Slurm host list"
   [ -n "${SLURM_JOB_ID:-}" ] || die "job probe starts jobs of its own on the nodes it asks; run it inside a Slurm job (the autoscaler's controller), never on a login node"
   load_profile
   [ "$P_scheduler" = slurm ] || die "hpcworker job speaks Slurm only for now; this site's scheduler is $P_scheduler"
@@ -1019,7 +1022,7 @@ job_probe() {
     elif printf '%s' "$out" | grep -qiE 'immediate|unable to allocate|not available|resources|priority|reservation|timed out|socket|invalid'; then said=unknown
     elif [ $rc = 124 ]; then said=unknown
     else said=fail; fi
-    ( umask 077; echo "$node $(date +%s) $said" >> "$f" ) 2>/dev/null
+    ( umask 077; mkdir -p "$(dirname "$f")" && echo "$node $(date +%s) $said" >> "$f" ) 2>/dev/null
     echo "HPCW-JOB probe $node $said$([ "$said" = fail ] && echo ": $(printf '%s' "$out" | job_clean | tr '\n' ' ' | cut -c1-160)")"
   done <<< "$order"
   # the record keeps its last thousand lines
