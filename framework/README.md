@@ -1584,7 +1584,8 @@ This sets `$HPCW_CHECKPOINTS/$SLURM_JOB_ID` to the time of the oldest named file
 it sets the marker to now. A job that runs several runs side by side (`job pack`) names each run's checkpoint. Its
 marker is then only as fresh as the stalest of them, and stays untouched while any of them has none yet, so a move
 never costs a run more than the time since its own last checkpoint. Outside a job hpcworker submitted, `job mark` says
-so and marks nothing.
+so and marks nothing. A watcher ends once the process that started it has (34.1), so a job script run by hand where a
+job's variables were inherited, in a box or a test, leaves no loop behind.
 
 **What a move needs.** After the pending jobs, `job replace` looks at each of this account's running placed GPU jobs
 (not an array's task) whose marker is younger than `HPCW_CHECKPOINT_FRESH` seconds (600). It moves one only when all of
@@ -1634,7 +1635,9 @@ log:
 - `HPCW-JOB returned ID ...` and `HPCW-JOB started ID ...`;
 - `HPCW-JOB kept ID NAME: ...`.
 
-`--dry-run` prints `would-move-running`, `would-return`, and `stays ... :` with the reason a job stays. The count follows
+`--dry-run` prints `would-move-running`, `would-return`, and `stays ... :` with the reason a job stays. Of the reasons met
+over the free cards, the most telling one is kept: a waiting job first, then a card that would lose the job time, then a
+missing rate (34.1). The count follows
 the pending one: `HPCW-JOB replace looked at N running job(s) just after a checkpoint, moved M`.
 `HPCW_CHECKPOINT_MOVES=off` turns the running moves and their returns off.
 

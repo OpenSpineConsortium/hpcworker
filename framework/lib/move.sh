@@ -41,7 +41,13 @@ job_mark() {
   fi
   move_mark_once "$HPCW_CHECKPOINTS/$id" ${files[@]+"${files[@]}"}
   [ -n "$every" ] || return 0
-  while sleep "$every"; do move_mark_once "$HPCW_CHECKPOINTS/$id" ${files[@]+"${files[@]}"}; done
+  # (34.1) a watcher never outlives what started it: a job script ends it with itself, and a script run by hand where the
+  # job's variables were inherited (a box, a test) leaves no loop behind
+  local caller=$PPID
+  while sleep "$every"; do
+    kill -0 "$caller" 2>/dev/null || return 0
+    move_mark_once "$HPCW_CHECKPOINTS/$id" ${files[@]+"${files[@]}"}
+  done
 }
 
 move_secs() { # SLURM_TIME (D-HH:MM:SS, HH:MM:SS or MM:SS) -> whole seconds; 1 for UNLIMITED or anything unreadable
@@ -116,17 +122,24 @@ move_gain() { # RATE_NOW RATE_THERE HORIZON LOST -> whole seconds the move is ex
   awk -v a="$1" -v b="$2" -v h="$3" -v lost="$4" 'BEGIN { if (b <= 0) { print -1; exit } printf "%d\n", h * (1 - a / b) - lost }'
 }
 
+move_why() { # RANK TEXT: TEXT kept as the reason the job stays when it says more than the one kept, by RANK (first of a rank kept)
+  [ "$1" -gt "${MOVE_WHY_RANK:-0}" ] || return 0
+  MOVE_WHY=$2 MOVE_WHY_RANK=$1
+}
+
 move_best() { # ID NAME NEED CPUS MEM_MB GPUS TYPE_NOW HORIZON LOST -> MOVE_TO "PART QOS PRE TYPE NODE", MOVE_SAVES; 1 with MOVE_WHY
   local id=$1 jname=$2 need=$3 cpus=$4 mb=$5 gpus=$6 now_type=$7 horizon=$8 lost=$9 rate_now rate p q pre t node cores mem saves
-  MOVE_TO="" MOVE_SAVES=0 MOVE_WHY="no other card it fits is free now"
+  MOVE_TO="" MOVE_SAVES=0 MOVE_WHY="no other card it fits is free now" MOVE_WHY_RANK=0
   rate_now=$(move_rate "$MOVE_PROJECT" "$jname" "$now_type") || { MOVE_WHY="no measured rate for it on $now_type"; return 1; }
   while read -r p q pre t node cores mem; do
     [ -n "$p" ] && [ "$t" != "$now_type" ] || continue
-    rate=$(move_rate "$MOVE_PROJECT" "$jname" "$t") || { MOVE_WHY="no measured rate for it on the free $t card"; continue; }
+    # (34.1) the reason kept is the most telling one met, a waiting job before a loss before a missing rate, never merely
+    # the last card looked at: a free L40S without a rate once hid that the free H200 would have lost the job time
+    rate=$(move_rate "$MOVE_PROJECT" "$jname" "$t") || { move_why 1 "no measured rate for it on the free $t card"; continue; }
     saves=$(move_gain "$rate_now" "$rate" "$horizon" "$lost")
-    [ "$saves" -gt 0 ] || MOVE_WHY="the free $t card would not run it faster by the time it has left"
+    [ "$saves" -gt 0 ] || move_why 2 "the free $t card would not run it faster by the time it has left"
     [ "$saves" -gt "$MOVE_SAVES" ] || continue
-    if move_waiting "$p" "$cores" "$mem" "$id"; then MOVE_WHY="a waiting job fits the free $t card on $node first"; continue; fi
+    if move_waiting "$p" "$cores" "$mem" "$id"; then move_why 3 "a waiting job fits the free $t card on $node first"; continue; fi
     MOVE_TO="$p $q $pre $t $node" MOVE_SAVES=$saves
   done < <(move_free_cards "$need" "$cpus" "$mb" "$gpus")
   [ -n "$MOVE_TO" ] || return 1
