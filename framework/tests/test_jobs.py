@@ -620,6 +620,28 @@ class CheckpointMoveTest(PlacementBase):
         self.assertIn("scontrol update jobid=%s partition=reqp qos=requeue gres=gpu:nvidia_a30:1 excnodelist=" % jid, self.scontrols())
         self.assertEqual(os.listdir(records), [])
 
+    def test_a_watcher_ends_with_the_script_that_started_it(self):
+        # (34.1) job mark --watch in the background of a script that ends leaves no loop behind: the marker stops moving
+        env = {"SLURM_JOB_ID": "4343", "HPCW_CHECKPOINTS": G.posix(self.marks)}
+        script = "bash '%s' job mark --watch 1 > /dev/null 2>&1 & sleep 2" % self.g.tool
+        rc, out, err = G.bash(script, env=self.g.env(**env), timeout=60)
+        self.assertEqual(rc, 0, (out, err))
+        marker = os.path.join(self.marks, "4343")
+        time.sleep(3)
+        first = os.path.getmtime(marker)
+        time.sleep(3)
+        self.assertEqual(os.path.getmtime(marker), first, "the watcher went on marking after its script had ended")
+
+    def test_the_reason_kept_is_the_most_telling_not_the_last_card_seen(self):
+        # (34.1) a free L40S without a rate looked at after the free H200 once hid that the H200 would lose the job time
+        l40s = ("NodeName=alh1 CPUAlloc=8 CPUEfctv=64 CPUTot=64 RealMemory=769200 AllocMem=100000 State=MIXED Partitions=galhp,reqp "
+                "CfgTRES=cpu=64,mem=769200M,gres/gpu=4,gres/gpu:nvidia_l40s=4 AllocTRES=cpu=8,mem=100000M,gres/gpu=3,gres/gpu:nvidia_l40s=3")
+        jid = self.running_job(rates=("nvidia_a30 1000", "nvidia_h200 1030"))
+        rc, out, err = self.replace(jid, "--dry-run", nodes=(self.A30_NODE, self.H200_NODE, l40s))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("the free nvidia_h200 card would not run it faster by the time it has left", out)
+        self.assertNotIn("no measured rate", out)
+
     def test_the_switch_turns_the_running_moves_off(self):
         jid = self.running_job()
         rc, out, err = self.replace(jid, HPCW_CHECKPOINT_MOVES="off")
