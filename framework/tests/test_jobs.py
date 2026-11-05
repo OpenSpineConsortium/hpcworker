@@ -422,27 +422,29 @@ class ShareTest(PlacementBase):
 
     def test_a_kind_s_share_and_how_many_fit_each_card(self):
         ids = []
-        for name in ("dg_rot_cios_base_s1", "dg_rot_cios_base_s2", "big_s1"):
+        for name in ("dg_rot_cios_base_s1", "dg_rot_cios_base_s2", "big_s1", "dg_rot_cios_base_s3"):
             rc, out, err = self.submit("", name=name)
             self.assertEqual(rc, 0, (out, err))
             ids.append(self.job_id(out))
-        a, b, c = ids
+        a, b, c, d = ids
         acct = "\n".join([
             "%s.batch|cpu=01:20:00,gres/gpumem=12960M,gres/gpuutil=80,mem=41825712K|cpu=01:00:00,gres/gpumem=9000M,gres/gpuutil=60|COMPLETED" % a,
             "%s.batch|cpu=01:20:00,gres/gpumem=13000M,gres/gpuutil=90|cpu=01:00:00,gres/gpuutil=70|COMPLETED" % b,
             "%s.batch|cpu=01:00:00,gres/gpumem=40000M,gres/gpuutil=95|cpu=01:00:00,gres/gpuutil=95|COMPLETED" % c,
+            # a run under MPS: its card memory is gathered and its card use read as 0, which says nothing of its use
+            "%s.batch|cpu=01:00:00,gres/gpumem=12000M,gres/gpuutil=0|cpu=01:00:00,gres/gpuutil=0|COMPLETED" % d,
             "%s|||COMPLETED" % a])
         rc, out, err = self.run_tool("job share --project demo", FAKE_SACCT=acct)
         self.assertEqual(rc, 0, (out, err))
-        # two runs of one kind: peak 12.7 GB, mean use 65 per cent; an H200 holds 141 GB, an A30 24
+        # three runs of one kind, one under MPS: peak 12.7 GB, mean use 65 per cent of the two that held a card alone
         line = [l for l in out.splitlines() if l.startswith("HPCW-JOB share dg_rot_cios_base ")][0]
-        self.assertIn("runs 2 card peak 12.7G use 65%", line)
+        self.assertIn("runs 3 card peak 12.7G use 65%", line)
         self.assertIn("nvidia_h200:3", line)       # by compute: 100 / (65 x 0.5) = 3.07; by memory 9
         self.assertIn("nvidia_a30:1", line)        # by memory: 24 / (12.7 x 1.2) = 1.57
         big = [l for l in out.splitlines() if l.startswith("HPCW-JOB share big ")][0]
         self.assertIn("nvidia_h200:2", big)        # 100 / (95 x 0.5) = 2.1
         with open(os.path.join(self.g.state, "jobs", "demo", "share.tsv")) as fh:
-            self.assertIn("dg_rot_cios_base\t2\t12.7\t65\t", fh.read())
+            self.assertIn("dg_rot_cios_base\t3\t12.7\t65\t", fh.read())
 
     def pack(self, extra, command, **env):
         return self.run_tool("job pack %s -- bash -c %s" % (extra, G.shq(command)) if hasattr(G, "shq")
