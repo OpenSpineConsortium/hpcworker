@@ -240,7 +240,7 @@ class ReplaceTest(PlacementBase):
     def test_no_move_without_the_margin_or_where_it_is_about_to_start(self):
         jid, _ = self.placed()
         rows = own(self.pending(jid))
-        for plan in (("reqp * 1000", "galhp * 600", "gmsap * 600"), ("reqp * 60", "galhp * 0", "gmsap * 0")):
+        for plan in (("reqp * 700", "galhp * 600", "gmsap * 600"), ("reqp * 60", "galhp * 0", "gmsap * 0")):
             self.plan(*plan)
             rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows)
             self.assertEqual(rc, 0, (out, err))
@@ -308,6 +308,49 @@ class ReplaceTest(PlacementBase):
         self.assertEqual(cancels, ["scancel 40970002"])
 
 
+class ArrayTest(PlacementBase):
+    """Framework 32: an array is placed as a job is, and its waiting tasks are raced as one, each a worker that may start on
+    any card that fits; the ones that have started stay."""
+
+    OLD = ReplaceTest.OLD
+    placed = ReplaceTest.placed
+    pending = ReplaceTest.pending
+
+    def test_an_array_is_placed_over_every_card_that_fits(self):
+        self.plan("reqp * 0", "galhp * 3600", "gmsap * 3600")
+        rc, out, err = self.submit("--placement auto --gpu-mem 24 --array 0-7%4", name="seg", cls="gpu")
+        self.assertEqual(rc, 0, (out, err))
+        call = self.submitted()[-1]
+        self.assertIn("--partition=reqp ", call)
+        self.assertIn("--gres=gpu:1 ", call)
+        self.assertIn("--array=0-7%4", call)
+        self.assertIn("--exclude=%s " % REQP_OUT, call)
+        with open(os.path.join(self.g.state, "jobs", "demo", "placed", self.job_id(out))) as fh:
+            self.assertIn("gpu_mem=24", fh.read())
+
+    def test_an_array_s_waiting_tasks_move_as_one_and_the_started_stay(self):
+        jid, _ = self.placed(name="seg", extra="--placement auto --gpu-mem 24 --array 0-7%4")
+        self.plan("reqp * 20000", "galhp * 0", "gmsap * 30000")
+        started = (jid + "_0", "demo-seg", "RUNNING", "reqp", "requeue", "None", "4", "32G", "4:00:00", "gres:gpu:1", REQP_OUT, self.OLD, "(null)")
+        waiting = self.pending(jid + "_[1-2,5-7:2%4]", name="demo-seg")
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(started, waiting))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("moved 1", out)
+        tasks = ",".join("%s_%d" % (jid, i) for i in (1, 2, 5, 7))
+        self.assertEqual(self.updates(), ["scontrol update jobid=%s partition=galhp,gmsap qos=gpu gres=gpu:1 excnodelist=" % tasks])
+        # one look a hold: the array's record says when it last moved
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(started, waiting))
+        self.assertEqual(len(self.updates()), 1)
+
+    def test_an_array_hpcworker_did_not_place_is_left_alone(self):
+        rc, out, err = self.submit("--array 0-3", name="plain", cls="gpu")
+        self.assertEqual(rc, 0, (out, err))
+        self.plan("reqp * 20000", "galhp * 0", "gmsap * 0")
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.pending(self.job_id(out) + "_[0-3]", name="demo-plain", parts="gvohp")))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.updates(), [])
+
+
 class UsageTest(PlacementBase):
     def test_asked_against_used_per_name(self):
         rc, out, err = self.submit("", name="train")
@@ -318,7 +361,16 @@ class UsageTest(PlacementBase):
                           "%s|64G||8|05:00.000|01:00:00|OUT_OF_MEMORY" % b, "%s.batch||1972.50M|8|05:00.000|01:00:00|OUT_OF_MEMORY" % b])
         rc, out, err = self.run_tool("job usage --project demo", FAKE_SACCT=acct)
         self.assertEqual(rc, 0, (out, err))
-        self.assertIn("HPCW-JOB usage train runs 2 mem asked 64G peak 4.3G fit 7G cores asked 8 used 1.4 out-of-memory", out)
+        self.assertIn("HPCW-JOB usage train runs 2 mem asked 64G peak 4.3G fit 7G cores asked 8 used 1.4 card peak 0.0G out-of-memory", out)
+
+    def test_the_peak_on_the_card_is_read_where_the_site_gathers_it(self):
+        rc, out, err = self.submit("", name="seg")
+        a = self.job_id(out)
+        acct = "\n".join(["%s|96G||8|01:00:00|01:00:00|COMPLETED|" % a,
+                          "%s.batch||31879756K|8|01:00:00|01:00:00|COMPLETED|cpu=01:04:17,gres/gpumem=16022M,gres/gpuutil=90,mem=31879756K" % a])
+        rc, out, err = self.run_tool("job usage --project demo", FAKE_SACCT=acct)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("card peak 15.6G", out)
 
 
 class AvoidTest(PlacementBase):

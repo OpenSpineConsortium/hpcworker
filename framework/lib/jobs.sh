@@ -37,8 +37,8 @@
 #   hpcworker job replace [--project P]... [--runners] [--dry-run] [--job ID]... [--gain S] [--age S]
 #                     this account's pending jobs that hpcworker placed (every project's ledger unless
 #                     --project names some; with --runners the autoscaler's runner jobs too) raced
-#                     again, each moved with scontrol update when another placement starts it sooner
-#                     by more than --gain seconds (900); "HPCW-JOB moved|would-move|kept|cancelled"
+#                     again, an array's waiting tasks as one (32), each moved with scontrol update when another
+#                     placement starts it sooner by more than --gain seconds (300); "HPCW-JOB moved|would-move|kept|cancelled"
 #                     lines, then "HPCW-JOB replace looked at N pending job(s), moved M" (31)
 #   hpcworker job usage --project P [--last K]
 #                     per job name of the ledger's last K ended jobs: memory and cores asked against
@@ -526,7 +526,6 @@ job_submit() {
   [ -z "$prefer" ] || [ -n "$placement" ] || die "--prefer is --placement's"
   if [ -n "$placement" ]; then
     [ -z "$want" ] && [ -z "$type" ] || die "--placement chooses the partition and the card; leave out --partition and --gpu-type, and name the need with --gpu-mem and --gpu-arch"
-    [ -z "$array" ] || die "--placement places one job; an array keeps its --partition"
     gpuarch=$(job_arch_set "${gpuarch:-ampere,ada,hopper}") || die "--gpu-arch is a list of $HPCW_ARCHS, or one of them with + for it and every newer one"
   else
     [ "$gpumem" = 0 ] && [ -z "$gpuarch" ] || die "--gpu-mem and --gpu-arch are --placement's"
@@ -599,7 +598,8 @@ job_submit() {
   fi
   local log="$jd/logs/${name}_$id.out"; [ -n "$array" ] && log="$jd/logs/${name}_${id}_%a.out"
   if [ -n "$placement" ]; then
-    { printf '== hpcworker placement for %s, %s UTC: the estimates sbatch --test-only gave, then the choice\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%S)"
+    # an array's tasks each write a log of their own, so only a single job's log opens with the table
+    [ -n "$array" ] || { printf '== hpcworker placement for %s, %s UTC: the estimates sbatch --test-only gave, then the choice\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%S)"
       printf '%s' "$PLACE_TABLE" | sed 's/^/   /'
       printf '   chose %s\n' "$PLACE_CHOICE"; } >> "$log" 2>/dev/null
     job_need_write "$project" "$id" "$class" "$gpus" "$gpumem" "$gpuarch" "$requeue" "$prefer"
@@ -853,7 +853,7 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   if [ $rc = 0 ]; then
     REPLACE_MOVED=$((REPLACE_MOVED + 1))
     echo "HPCW-JOB moved $id $jname $from -> $to, $what"
-    ( umask 077; mkdir -p "$jd/.moves" && echo "$now" >> "$jd/.moves/$id"
+    ( umask 077; mkdir -p "$jd/.moves" && echo "$now" >> "$jd/.moves/${id%%_*}"
       echo "$stamp moved $id $jname $from -> $to, $what" >> "$jd/replace.log" ) 2>/dev/null
     [ -n "$log" ] && [ -f "$log" ] && echo "== hpcworker $stamp: moved while pending from $from to $to, $what" >> "$log" 2>/dev/null
     return 0
@@ -871,13 +871,27 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   return 0
 }
 
+job_array_tasks() { # BASE SPEC -> BASE_i,BASE_j,... for what squeue names 123_[5-7,9%4] or 123_5; 1 for anything else
+  local base=$1 spec=${2#\[} part a b step i out=""
+  spec=${spec%\]}; spec=${spec%%\%*}
+  [[ "$spec" =~ ^[0-9][0-9,:-]*$ ]] || return 1
+  for part in ${spec//,/ }; do
+    step=1
+    case "$part" in *:*) step=${part#*:}; part=${part%:*};; esac
+    a=${part%-*}; b=${part#*-}
+    [[ "$a" =~ ^[0-9]+$ ]] && [[ "$b" =~ ^[0-9]+$ ]] && [[ "$step" =~ ^[1-9][0-9]*$ ]] || return 1
+    for ((i = a; i <= b; i += step)); do out="$out,${base}_$i"; done
+  done
+  printf '%s' "${out#,}"
+}
+
 job_replace() {
   # Framework 31: a placement is a guess made once, from estimates that ignore every pending job and every
   # job that ends before its time limit, so the guess goes stale while a job waits. job replace races this
   # account's own pending jobs again (those hpcworker placed, and with --runners the autoscaler's runner
   # jobs) and moves one, in place with scontrol update, which keeps its id and whatever waits on it, when
   # another placement would start it sooner by more than --gain seconds.
-  local projects=() only=" " runners=0 dry=0 gain=${HPCW_REPLACE_GAIN:-900} age=${HPCW_REPLACE_AGE:-600} hold=${HPCW_REPLACE_HOLD:-1800} most=${HPCW_REPLACE_MAX:-20}
+  local projects=() only=" " runners=0 dry=0 gain=${HPCW_REPLACE_GAIN:-300} age=${HPCW_REPLACE_AGE:-120} hold=${HPCW_REPLACE_HOLD:-600} most=${HPCW_REPLACE_MAX:-20}
   while [ $# -gt 0 ]; do case "$1" in
     --project) projects+=("${2:-}"); shift 2 || job_usage;;
     --runners) runners=1; shift;;
@@ -898,28 +912,32 @@ job_replace() {
     local f; for f in "$STATE_DIR"/jobs/*/jobs.tsv; do [ -s "$f" ] && projects+=("$(basename "$(dirname "$f")")"); done
   fi
   local own; own=$(job_own_jobs) || { echo "HPCW-JOB replace: squeue did not answer; nothing was moved"; return 1; }
-  local now id jname st parts qos reason cpus jmem tl tres excl sub dep line need project log at last looked=0
+  local now id jname st parts qos reason cpus jmem tl tres excl sub dep line need project log at last looked=0 base target
   now=$(date +%s)
   while IFS='|' read -r id jname st parts qos reason cpus jmem tl tres excl sub dep; do
     [ "$st" = PENDING ] || continue
-    [[ "$id" =~ ^[0-9]{1,12}$ ]] || continue          # an array keeps its partitions, as job submit leaves it
-    [ "$only" = " " ] || case "$only" in *" $id "*) ;; *) continue;; esac   # --job: these alone
-    case "$reason" in Priority|Resources|ReqNodeNotAvail*) ;; *) continue;; esac
+    # an array's waiting tasks, as squeue lists them (123_[5-7%4], or 123_5 once one has been moved), are raced
+    # as one under the array's record; each is a worker that may start on any card that fits
+    base=${id%%_*} target=$id
+    [[ "$base" =~ ^[0-9]{1,12}$ ]] || continue
+    if [ "$id" != "$base" ]; then target=$(job_array_tasks "$base" "${id#*_}") || continue; fi
+    [ "$only" = " " ] || case "$only" in *" $base "*) ;; *) continue;; esac   # --job: these alone
+    case "$reason" in Priority|Resources|ReqNodeNotAvail*|QOS*) ;; *) continue;; esac
     case "$dep" in ""|"(null)") ;; *) continue;; esac  # one that waits on another job is not waiting for a card
     need="" project="" line="" log=""
-    for p in ${projects[@]+"${projects[@]}"}; do line=$(job_known "$p" "$id"); [ -n "$line" ] && { project=$p; break; }; done
+    for p in ${projects[@]+"${projects[@]}"}; do line=$(job_known "$p" "$base"); [ -n "$line" ] && { project=$p; break; }; done
     if [ -n "$line" ]; then
-      need=$(job_need_read "$project" "$id" "$line") || continue
+      need=$(job_need_read "$project" "$base" "$line") || continue
       log=$(printf '%s\n' "$line" | cut -f7)
     elif [ $runners = 1 ] && [[ "$jname" == hpcw_auto_* ]] && [[ "$tres" != *gpu* ]]; then
       need="class=runner gpus=1 gpu_mem=0 gpu_arch=- requeue=-"
     else continue; fi
     at=$(date -d "${sub/T/ }" +%s 2>/dev/null) || continue
     [ $((now - at)) -ge "$age" ] || continue
-    last=$(tail -n 1 "$STATE_DIR/jobs/.moves/$id" 2>/dev/null)
+    last=$(tail -n 1 "$STATE_DIR/jobs/.moves/$base" 2>/dev/null)
     [[ "$last" =~ ^[0-9]+$ ]] && [ $((now - last)) -lt "$hold" ] && continue
     looked=$((looked + 1)); [ "$looked" -le "$most" ] || break
-    job_replace_one "$id" "$jname" "$parts" "$qos" "$cpus" "$jmem" "$tl" "$tres" "$excl" "$need" "$project" "$log" "$dry" "$gain" < /dev/null
+    job_replace_one "$target" "$jname" "$parts" "$qos" "$cpus" "$jmem" "$tl" "$tres" "$excl" "$need" "$project" "$log" "$dry" "$gain" < /dev/null
   done <<< "$own"
   echo "HPCW-JOB replace looked at $((looked > most ? most : looked)) pending job(s), moved $REPLACE_MOVED"
 }
@@ -928,7 +946,9 @@ job_usage_report() {
   # What each job name of the project's last K ended jobs asked for beside what it used, from one sacct: the
   # memory asked and the batch step's peak resident memory, the cores asked and the cores used on average
   # (TotalCPU over Elapsed), and a fit of 1.5 times the peak (at least 2 GB). Asking far more than a job uses
-  # keeps it off nodes whose cards are free but whose cores or memory are mostly taken.
+  # keeps it off nodes whose cards are free but whose cores or memory are mostly taken. The peak on the card is the
+  # batch step's gres/gpumem where the site gathers it; a framework that preallocates (JAX) reads its share of whatever
+  # card it held, so that number says what a torch job needs and says nothing of a JAX job's.
   local project="" last=200
   while [ $# -gt 0 ]; do case "$1" in
     --project) project="${2:-}"; shift 2 || job_usage;;
@@ -942,7 +962,7 @@ job_usage_report() {
   ledger=$(job_ledger "$project" "$last")
   [ -n "$ledger" ] || { echo "HPCW-JOB none for $project"; return 0; }
   ids=$(printf '%s\n' "$ledger" | cut -f1 | paste -sd, -)
-  acct=$(LC_ALL=C timeout 60 sacct -n -P -j "$ids" --format=JobID,ReqMem,MaxRSS,AllocCPUS,TotalCPU,Elapsed,State 2>/dev/null | tr -d '\r') \
+  acct=$(LC_ALL=C timeout 60 sacct -n -P -j "$ids" --format=JobID,ReqMem,MaxRSS,AllocCPUS,TotalCPU,Elapsed,State,TRESUsageInMax 2>/dev/null | tr -d '\r') \
     || { echo "HPCW-JOB usage: sacct did not answer"; return 1; }
   printf '%s\n' "$ledger" | ACCT="$acct" LC_ALL=C awk -F'\t' '
     function secs(t,   d, n, p, s, i) { d = 0; if (t ~ /-/) { d = substr(t, 1, index(t, "-") - 1); t = substr(t, index(t, "-") + 1) }
@@ -951,7 +971,9 @@ job_usage_report() {
       if (u == "K") return v / 1048576; if (u == "M") return v / 1024; if (u == "G") return v; if (u == "T") return v * 1024; return v / 1073741824 }
     BEGIN { n = split(ENVIRON["ACCT"], l, "\n")
       for (i = 1; i <= n; i++) { split(l[i], f, "|"); id = f[1]; base = id; sub(/[._].*/, "", base)
-        if (id ~ /\.batch$/) { r = gb(f[3]); if (r > rss[base]) rss[base] = r; continue }
+        if (id ~ /\.batch$/) { r = gb(f[3]); if (r > rss[base]) rss[base] = r
+          if (match(f[8], /gres\/gpumem=[0-9.]+[KMGT]?/)) { c = gb(substr(f[8], RSTART + 12, RLENGTH - 12)); if (c > card[base]) card[base] = c }
+          continue }
         if (id ~ /\./) continue
         a = gb(f[2]); if (a > ask[base]) ask[base] = a; if (f[4] + 0 > cores[base]) cores[base] = f[4] + 0
         e = secs(f[6]); if (e > 0) { u = secs(f[5]) / e; if (u > used[base]) used[base] = u }
@@ -961,9 +983,10 @@ job_usage_report() {
       if (!(nm in runs)) order[++k] = nm
       runs[nm]++; if (ask[id] > mask[nm]) mask[nm] = ask[id]; if (rss[id] > mrss[nm]) mrss[nm] = rss[id]
       if (cores[id] > mcores[nm]) mcores[nm] = cores[id]; if (used[id] > mused[nm]) mused[nm] = used[id]
+      if (card[id] > mcard[nm]) mcard[nm] = card[id]
       if (st[id] ~ /OUT_OF_ME/) oom[nm] = 1 }
     END { for (i = 1; i <= k; i++) { nm = order[i]; fit = mrss[nm] * 1.5; if (fit < 2) fit = 2; fit = int(fit + 0.999)
-        printf "HPCW-JOB usage %s runs %d mem asked %.0fG peak %.1fG fit %dG cores asked %d used %.1f%s\n", nm, runs[nm], mask[nm], mrss[nm], fit, mcores[nm], mused[nm], (oom[nm] ? " out-of-memory" : "") } }'
+        printf "HPCW-JOB usage %s runs %d mem asked %.0fG peak %.1fG fit %dG cores asked %d used %.1f card peak %.1fG%s\n", nm, runs[nm], mask[nm], mrss[nm], fit, mcores[nm], mused[nm], mcard[nm], (oom[nm] ? " out-of-memory" : "") } }'
 }
 
 job_probe() {

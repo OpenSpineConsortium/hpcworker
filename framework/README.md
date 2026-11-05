@@ -1454,9 +1454,11 @@ debug QoS on reqp, prip and secp (one job at a time), prip/primary, secp/seconda
 beside the ledger (`<project>/placed/<id>`; one framework 30 placed is read from the race at the head of its log),
 and `job replace` races this account's own pending jobs again (with `--runners`, the autoscaler's runner jobs
 too). A job is moved with one `scontrol update` when another placement would start it sooner by more than
-`--gain` seconds (900), never when it is about to start where it is, never twice within `HPCW_REPLACE_HOLD`
-seconds (1800), never in its first `--age` seconds (600), and never when it waits on a dependency, is an array,
-or is not one hpcworker placed; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
+`--gain` seconds (300), never when it is about to start where it is, never twice within `HPCW_REPLACE_HOLD`
+seconds (600), never in its first `--age` seconds (120), and never when it waits on a dependency or is not one
+hpcworker placed. From framework 32 `job submit --placement` places an array too, and `job replace` moves an array's
+waiting tasks as one, those that have started staying where they are, so workers that claim from a shared queue spread
+onto whatever card frees; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
 `<state>/jobs/replace.log`. When Slurm refuses a move, a runner job is cancelled (the autoscaler queues one again,
 placed afresh) and any other job is left where it is: its environment, which a resubmission would need, is never
 kept, since it may hold a credential. The autoscaler's controller runs `job probe` and then `job replace --runners`
@@ -1476,7 +1478,8 @@ reads `fail`, and a busy one `unknown`, which holds nothing against it. The firs
 a person takes the line away or the failures age out; the probe's verdict ends when the hour does.
 
 `job usage --project P` sets each job name's memory and cores asked beside its measured peak memory and mean cores
-used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use.
+used, from one sacct, with a fit of 1.5 times the peak, so a project can ask for what its jobs use, and its peak on the
+card where the site gathers `gres/gpumem` (a framework that preallocates reads its share of the card it held, not its need).
 
 ## Files
 
