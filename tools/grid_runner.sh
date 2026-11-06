@@ -16,6 +16,7 @@
 #   tools/grid_runner.sh --install --site S [--version 2.338.0]
 #   tools/grid_runner.sh --start --repo OWNER/NAME --site S [--labels a,b] [--hours 8] [--margin 60]
 #                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q] [--lane N]
+#                        [--constraint FEATURE]
 #   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--lane N] [--now]
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME [--lane N]]
 #   tools/grid_runner.sh --autoscale --repos OWNER/NAME[,OWNER/NAME...] --site S [--max-per-repo 6]
@@ -34,6 +35,13 @@
 # --partition and --qos override) and where the runner's folder is, beside the account's state on
 # the lab volume (shared_state_dir with -runner added). --runner-dir DIR, or HPCW_RUNNER_DIR, names
 # the folder instead, and a command with neither a site nor a folder is refused.
+#
+# --constraint FEATURE asks every job of a chain, and a runner job the autoscaler submits on the
+# site's batch queue, for nodes with that feature (sbatch --constraint), as the site placement file's
+# "constraint runner FEATURE" line asks of the runner jobs hpcworker's race places (framework 35);
+# with a site and no --constraint that line is the default, so a command names nothing for it;
+# --constraint none asks for no feature.
+# A running chain keeps what it was started with: --stop and --start again to give it a new one.
 #
 # --lane N (1 to 9, 1 unless given) names one of several chains for the same repository. A chain
 # serves one GitHub job at a time, so a repository whose pushes start more jobs than one runner
@@ -197,6 +205,7 @@ die() { printf 'grid_runner: %s\n' "$*" >&2; exit 1; }
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value (--help)"; }
 
 MODE="" REPO="" VERSION=latest SITE="" LABELS="" HOURS=8 MARGIN=60 CPUS="" MEM="" GRES="" NOW=0 LANE=1 LANE_GIVEN=0
+CONSTRAINT="" CONSTRAINT_GIVEN=0
 TRAIN_READY=0 HOURS_GIVEN=0 REPOS="" MAX_PER_REPO=${HPCW_AUTOSCALE_MAX_PER_REPO:-6} MAX_TOTAL=${HPCW_AUTOSCALE_MAX_TOTAL:-12} EVERY=60 IDLE=10 CONTROL_HOURS=8
 RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=() HW=${HPCW_RUNNER_HPCWORKER:-} HW_GIVEN=0
 [ -n "$HW" ] && HW_GIVEN=1
@@ -219,6 +228,8 @@ while [ $# -gt 0 ]; do case "$1" in
       --labels) LABELS="$2";; --hours) HOURS="$2"; HOURS_GIVEN=1;; --margin) MARGIN="$2";; --cpus) CPUS="$2";; --mem) MEM="$2";; --gres) GRES="$2";;
       --partition) HPCW_RUNNER_PARTITION="$2"; HPCW_RUNNER_PARTITION_GIVEN=1;; --qos) HPCW_RUNNER_QOS="$2";;
     esac; shift 2;;
+  # not one of the gate's sizes above: a chain the gate starts takes the site's default
+  --constraint) need "$@"; CONSTRAINT="$2"; CONSTRAINT_GIVEN=1; shift 2;;
   --gate-key) need "$@"; MODE=gatekey; GATE_KEY="$2"; shift 2;; --gate-off) MODE=gateoff; shift;;
   --gate-setup) MODE=gatesetup; shift;;
   --now) NOW=1; shift;;
@@ -280,9 +291,16 @@ site_profile() {
   [ -n "${HPCW_RUNNER_PARTITION:-}" ] || HPCW_RUNNER_PARTITION=$(prof_get partition_cpu_batch) || die "profile $f unreadable"
   [ -n "${HPCW_RUNNER_QOS:-}" ] || HPCW_RUNNER_QOS=$(prof_get qos_batch) || die "profile $f unreadable"
   STATE_DIR=$(prof_get shared_state_dir) || die "profile $f unreadable"
+  [ $CONSTRAINT_GIVEN = 1 ] || CONSTRAINT=$(site_constraint)
+}
+site_constraint() { # the site placement file's "constraint runner FEATURE", nothing where it names none
+  awk '$1 == "constraint" && $2 == "runner" { print $3; exit }' "$FW/profiles/$SITE.placement" 2>/dev/null
+  return 0
 }
 case "$MODE" in install|start|stop|status|autoscale|autostop|train|trainstop|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
 [[ "${HPCW_RUNNER_PARTITION:-}${HPCW_RUNNER_QOS:-}" =~ ^[A-Za-z0-9._,-]*$ ]] || die "bad --partition or --qos"
+[ "$CONSTRAINT" = none ] && CONSTRAINT=""
+[ -z "$CONSTRAINT" ] || [[ "$CONSTRAINT" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || die "--constraint is one node feature's name (the site placement file's constraint line too): $CONSTRAINT"
 [[ "$RUNTIME_BIN_GIVEN$RUNTIME_MODULE_GIVEN" =~ ^[A-Za-z0-9._/-]*$ ]] || die "bad --runtime-bin or --runtime-module"
 if [ -z "${HPCW_RUNNER_DIR:-}" ]; then
   [ -n "$STATE_DIR" ] || die "--site S names the site profile (framework/profiles/S.json), which says where the runner's folder is; or name the folder with --runner-dir DIR"
@@ -341,6 +359,7 @@ job_args() {
   [ -n "$CPUS" ] && JOB_ARGS+=(--cpus "$CPUS")
   [ -n "$MEM" ] && JOB_ARGS+=(--mem "$MEM")
   [ -n "$GRES" ] && JOB_ARGS+=(--gres "$GRES")
+  [ -n "$CONSTRAINT" ] && JOB_ARGS+=(--constraint "$CONSTRAINT")
   [ -n "${HPCW_RUNNER_PARTITION:-}" ] && JOB_ARGS+=(--partition "$HPCW_RUNNER_PARTITION")
   [ -n "${HPCW_RUNNER_QOS:-}" ] && JOB_ARGS+=(--qos "$HPCW_RUNNER_QOS")
   QUEUE=()
@@ -350,6 +369,7 @@ job_args() {
   [ -n "$CPUS" ] && SB_FLAGS+=(--cpus-per-task "$CPUS")
   [ -n "$MEM" ] && SB_FLAGS+=(--mem "$MEM")
   [ -n "$GRES" ] && SB_FLAGS+=(--gres "$GRES")
+  [ -n "$CONSTRAINT" ] && SB_FLAGS+=(--constraint "$CONSTRAINT")
   return 0
 }
 job_id() { # OUT: the job number in sbatch --parsable's answer, read from among a site's warnings
@@ -1002,6 +1022,7 @@ control_args() { # what the controller's job is handed, and hands its successor
   [ -n "$CPUS" ] && CONTROL_ARGS+=(--cpus "$CPUS")
   [ -n "$MEM" ] && CONTROL_ARGS+=(--mem "$MEM")
   [ -n "$GRES" ] && CONTROL_ARGS+=(--gres "$GRES")
+  [ -n "$CONSTRAINT" ] && CONTROL_ARGS+=(--constraint "$CONSTRAINT")
   [ -n "${HPCW_RUNNER_PARTITION:-}" ] && CONTROL_ARGS+=(--partition "$HPCW_RUNNER_PARTITION")
   [ -n "${HPCW_RUNNER_QOS:-}" ] && CONTROL_ARGS+=(--qos "$HPCW_RUNNER_QOS")
   [ -n "$HW" ] && CONTROL_ARGS+=(--hpcworker "$HW")

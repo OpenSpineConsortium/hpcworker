@@ -184,7 +184,8 @@ t "  the job is a singleton of the chain's name" [ "$(J "$C1" dependency)" = sin
 t "  with the wall time, the size and the GPU asked" bash -c "[ '$(J "$C1" time)' = 2:00:00 ] && [ '$(J "$C1" cpus)' = 4 ] && [ '$(J "$C1" mem)' = 16G ] && [ '$(J "$C1" gres)' = gpu:1 ]"
 t "  on the site's worker queue, which the job file never names" bash -c "[ '$(J "$C1" partition)' = '$DEF_PART' ] && [ '$(J "$C1" qos)' = '$DEF_QOS' ] && ! grep -q '^#SBATCH --\(partition\|qos\)' '$T/slurm/jobs/$C1/script'"
 t "  from the runner folder, logging under the chain's folder" bash -c "[ '$(J "$C1" dir)' = '$R' ] && [ '$(J "$C1" out)' = '$CH/runner-$C1.log' ]"
-t "  with everything a job needs on its command line" [ "$(J "$C1" args | tr '\n' ' ')" = "--serve --repo $GH_REPO --runner-dir $R --site wayne --runtime-bin $WAYNE_BIN --runtime-module $WAYNE_MOD --hours 2 --margin 30 --labels gpu --cpus 4 --mem 16G --gres gpu:1 --partition $DEF_PART --qos $DEF_QOS " ]
+t "  with everything a job needs on its command line" [ "$(J "$C1" args | tr '\n' ' ')" = "--serve --repo $GH_REPO --runner-dir $R --site wayne --runtime-bin $WAYNE_BIN --runtime-module $WAYNE_MOD --hours 2 --margin 30 --labels gpu --cpus 4 --mem 16G --gres gpu:1 --constraint avx2 --partition $DEF_PART --qos $DEF_QOS " ]
+t "  on nodes with the site placement file's runner feature, which nothing named" [ "$(J "$C1" constraint)" = avx2 ]
 t "  the chain's config says what was asked" bash -c "grep -qx 'labels=grid,wayne,gpu' '$CH/config' && grep -qx 'hours=2' '$CH/config' && grep -qx 'margin=30' '$CH/config' && grep -qx 'version=2.338.0' '$CH/config'"
 gr --start --repo "$GH_REPO"; t "a second chain for the repository is refused while one is queued" has "already queued or running \(job $C1 PENDING\)"
 t "  and nothing was submitted" [ "$(count "^$NAME$")" = 1 ]
@@ -198,7 +199,7 @@ run_job "$C1" APPTAINER_BIND="$HOME:/mnt/home" SINGULARITY_BINDPATH="$HOME" APPT
 t "the job ends well" rc_is 0; t "  and says whose it is" has "== runner job $C1 for $GH_REPO"
 C2=$(newest "^$NAME$")
 t "it queued its successor first" bash -c "[ '$C2' != '$C1' ] && [ '$(J "$C2" dependency)' = 'afterany:$C1,singleton' ]"
-t "  with the same arguments, size and wall time" bash -c "[ \"\$(cat '$T/slurm/jobs/$C2/args')\" = \"\$(cat '$T/slurm/jobs/$C1/args')\" ] && [ '$(J "$C2" time)' = 2:00:00 ] && [ '$(J "$C2" gres)' = gpu:1 ] && [ '$(J "$C2" partition)' = '$DEF_PART' ] && [ '$(J "$C2" qos)' = '$DEF_QOS' ]"
+t "  with the same arguments, size and wall time" bash -c "[ \"\$(cat '$T/slurm/jobs/$C2/args')\" = \"\$(cat '$T/slurm/jobs/$C1/args')\" ] && [ '$(J "$C2" time)' = 2:00:00 ] && [ '$(J "$C2" gres)' = gpu:1 ] && [ '$(J "$C2" partition)' = '$DEF_PART' ] && [ '$(J "$C2" qos)' = '$DEF_QOS' ] && [ '$(J "$C2" constraint)' = avx2 ]"
 t "  and wrote it down" [ "$(cat "$CH/next")" = "$C1 $C2" ]
 t "the wall time and the margin are read from the start time and --hours" has 'wall time ends 1970-01-12T15:46:40Z; the last registration is made before 1970-01-12T15:16:40Z \(30 minutes of margin\)'
 t "the container was given the node's GPU, which --gres asked for" has "image 2.338.0, with the node's GPU"
@@ -238,10 +239,14 @@ gr --stop --repo "$GH_REPO"; t "--stop leaves a running job to finish its GitHub
 t "  so it still runs" [ "$(J "$C4" state)" = RUNNING ]
 gr --stop --repo "$GH_REPO" --now; t "--stop --now cancels the running job too" has "cancelled job $C4"
 t "  which is cancelled" [ "$(J "$C4" state)" = CANCELLED ]
-gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --partition secp --qos secondary
+gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --partition secp --qos secondary --constraint "a&b"
+t "a --constraint that is no plain feature name is refused" has "--constraint is one node feature.s name"
+t "  and nothing was submitted" [ "$(count '^hpcw_runner_OpenSpineConsortium-other$')" = 0 ]
+gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --partition secp --qos secondary --constraint avx512
 t "a chain for another repository starts beside the first" rc_is 0; t "  with its own labels" has 'runs-on: \[self-hosted, grid, wayne, a, b\]'
 O1=$(newest '^hpcw_runner_OpenSpineConsortium-other$'); echo n042 > "$T/slurm/jobs/$O1/node"; set_state "$O1" RUNNING
 t "  on the queue --partition and --qos give over the site's" bash -c "[ '$(J "$O1" partition)' = secp ] && [ '$(J "$O1" qos)' = secondary ]"
+t "  and on the feature --constraint gives over the site's" [ "$(J "$O1" constraint)" = avx512 ]
 gr --status
 t "--status names the runner folder" has "^runner folder: $R\$"
 t "  and the image" has 'runner image: 2.338.0'
@@ -369,7 +374,7 @@ for bad in 0 10 x 1x; do
 done
 t "  and nothing was submitted for it" [ "$(count "$L2NAME")" = 0 ]
 gr --start --repo OpenSpineConsortium/other --site wayne --lane 1; t "--lane 1 is the chain a command without it names, already running" has "a chain for OpenSpineConsortium/other is already queued or running \(job $P1 RUNNING\)"
-gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --lane 2
+gr --start --repo OpenSpineConsortium/other --labels a,b --site wayne --lane 2 --constraint none
 t "--lane 2 starts a second chain beside the running first" rc_is 0; t "  and says which lane" has 'runner chain for OpenSpineConsortium/other, lane 2: job'
 t "  with the same labels, so GitHub hands a job to either" has 'runs-on: \[self-hosted, grid, wayne, a, b\]'
 L2=$(newest "$L2NAME")
@@ -377,6 +382,7 @@ t "  under a Slurm name of its own, a singleton of it" bash -c "[ -n '$L2' ] && 
 t "  logging under a folder of its own" [ "$(J "$L2" out)" = "$OCH+lane2/runner-$L2.log" ]
 t "  whose config names the lane" grep -qx 'lane=2' "$OCH+lane2/config"
 t "  and whose job is handed the lane" [ "$(J "$L2" args | tr '[:space:]' ' ' | grep -c -- '--margin 60 --lane 2 --labels a,b ')" = 1 ]
+t "  and, with --constraint none, no node feature" bash -c "[ -z '$(J "$L2" constraint)' ] && ! grep -qx -- --constraint '$T/slurm/jobs/$L2/args'"
 gr --start --repo OpenSpineConsortium/other --site wayne --lane 2; t "a second --lane 2 is refused while the lane is queued" has "a chain for OpenSpineConsortium/other --lane 2 is already queued or running \(job $L2 PENDING\)"
 t "  naming the stop that ends it" has 'grid_runner.sh --stop --repo OpenSpineConsortium/other --lane 2 ends it'
 gr --status --repo OpenSpineConsortium/other
@@ -441,6 +447,7 @@ t "  and submits one runner job for each, up to the repository's cap" [ "$(count
 t "  none for a repository with nothing queued" [ "$(count "$ON")" = 0 ]
 U1=$(pending "$RN" | head -1)
 t "  each runner job sized as asked, with no dependency" bash -c "[ '$(J "$U1" cpus)' = 4 ] && [ '$(J "$U1" mem)' = 16G ] && [ '$(J "$U1" time)' = 2:00:00 ] && [ -z '$(J "$U1" dependency)' ]"
+t "  on nodes with the site's runner feature" [ "$(J "$U1" constraint)" = avx2 ]
 t "  and handed one GitHub job's work" [ "$(J "$U1" args | tr '[:space:]' ' ' | grep -c -- "--once --repo $GH_REPO .*--hours 2 --margin 60 --cpus 4 --mem 16G .*--idle 10 ")" = 1 ]
 t "  logging under its repository's folder" [ "$(J "$U1" out)" = "$AU/$TPL/runner-$U1.log" ]
 run_job "$AC2" HPCW_AUTOSCALE_LOOKS=1
