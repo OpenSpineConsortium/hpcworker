@@ -21,6 +21,14 @@ candidate runner secp debug no 1
 candidate runner prip primary no
 candidate runner secp secondary no
 candidate runner reqp requeue yes
+# Framework 35: a constraint is a node feature (sinfo's %f, scontrol's AvailableFeatures) every job of the class
+# asks for, in the race's sbatch --test-only and in the options job place prints, so a partition with no such node
+# is refused and drops out of the race. Runner jobs ask for avx2: SchwingNet's required check, a serial unittest
+# run, took 25 to 56 minutes on secp's asx nodes (4-socket AMD Opterons, features asx,amd,avx,10e, no avx2) and
+# 8 to 14 on mdt, sfx and GitHub's machines on 5 November 2026, and ran into its 55-minute limit on asx1; secp's
+# only nodes in service are asx, so the debug QoS's one runner job landed there nearly every time.
+#   constraint CLASS FEATURE
+constraint runner avx2
 # A card is a GPU type as sinfo's GRES column names it, its memory in GB and its architecture; one with a
 # partition after it holds there alone (tesla is a V100 on gvohp and a K20X or older elsewhere).
 #   card GRES_TYPE MEMORY_GB ARCH [PARTITION]

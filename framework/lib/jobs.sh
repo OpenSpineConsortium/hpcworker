@@ -269,6 +269,15 @@ job_candidates() { # CLASS GPU_MEM ARCHS NO_PREEMPT -> "PARTITION QOS PREEMPTABL
     done
   done < <(grep -E '^candidate ' "$f")
 }
+job_class_constraint() { # CLASS -> the node feature the placement file's "constraint CLASS FEATURE" line asks of every job of
+  # the class, nothing where no line names the class; 1 for a line whose feature is no plain name (framework 35)
+  local f c; f=$(job_place_file)
+  [ -r "$f" ] || return 0
+  case "$1" in gpu) c=gpu;; runner) c=runner;; *) c=cpu;; esac
+  c=$(awk -v c="$c" '$1 == "constraint" && $2 == c { print $3; exit }' "$f")
+  [ -z "$c" ] || [[ "$c" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || return 1
+  printf '%s' "$c"
+}
 job_gpu_nodes() { # PARTITION... -> "NODE PARTITION TYPE" a line for each GPU type a node of those partitions holds (? for an untyped card)
   sinfo -h -N -o '%N|%P|%G' 2>/dev/null | awk -F'|' -v ps=" $* " '
     { q = $2; sub(/[*]$/, "", q); if (index(ps, " " q " ") == 0) next
@@ -519,6 +528,8 @@ job_choice_options() { # REQUEUE(yes|no|"") -> PLACE_CHOICE as sbatch options, o
   [ -n "${P_account:-}" ] && printf '%s\n' "--account=$P_account"
   [ "$cg" != - ] && printf '%s\n' "--gres=$cg"
   [ "$cx" != - ] && printf '%s\n' "--exclude=$cx"
+  # (35) the class's node feature, which every candidate was asked with
+  [ -n "${PLACE_CONSTRAINT:-}" ] && printf '%s\n' "--constraint=$PLACE_CONSTRAINT"
   # a job placed where it may be preempted is requeued and resumes; every placed job's log is appended to,
   # so the table written first stays at its head
   if [ "$cpre" = yes ] && [ "$1" != no ]; then printf '%s\n' --requeue; else printf '%s\n' --no-requeue; fi
@@ -527,7 +538,11 @@ job_choice_options() { # REQUEUE(yes|no|"") -> PLACE_CHOICE as sbatch options, o
 job_need_place() { # CLASS GPUS GPU_MEM ARCHS REQUEUE SCRIPT ARGS...: the whole race for one need -> PLACE_*, or 1 with why in PLACE_WHY
   local class="$1" gpus="$2" need="$3" archs="$4" requeue="$5" script="$6" cands nopre=0; shift 6
   [ "$requeue" = no ] && nopre=1
-  PLACE_WHY="" PLACE_TABLE="" PLACE_CHOICE=""
+  PLACE_WHY="" PLACE_TABLE="" PLACE_CHOICE="" PLACE_CONSTRAINT=""
+  # (35) a class whose jobs need a node feature asks every candidate with it, so a partition with no such node
+  # is refused by its own sbatch --test-only and drops out of the race, and the choice carries it
+  PLACE_CONSTRAINT=$(job_class_constraint "$class") || { PLACE_WHY="the placement file's constraint for $class is no plain feature name"; return 1; }
+  [ -z "$PLACE_CONSTRAINT" ] || set -- "$@" "--constraint=$PLACE_CONSTRAINT"
   job_avoid_nodes > /dev/null   # read once in this shell, so every race of one job replace shares one sacct
   cands=$(job_candidates "$class" "$need" "$archs" "$nopre")
   if [ -z "$cands" ]; then
@@ -894,11 +909,14 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   [ -n "$excl" ] || excl=-
   local race_args=("--job-name=$jname" "--cpus-per-task=$cpus" "--mem=$jmem")
   [[ "$tl" =~ ^[0-9:-]+$ ]] && race_args+=("--time=$tl")
-  # where it stands now, each of its partitions asked alone, as the race asks the others
-  local cur="" at p now floor
+  # where it stands now, each of its partitions asked alone, as the race asks the others, with the class's
+  # node feature (35) as the race asks with it
+  local cur="" at p now floor here=("${race_args[@]}") feature
+  feature=$(job_class_constraint "$class") || feature=""
+  [ -z "$feature" ] || here+=("--constraint=$feature")
   now=$(date +%s)
   for p in ${parts//,/ }; do
-    at=$(job_ask "$p" "$qos" "$gres" "$excl" "" "${race_args[@]}") || continue
+    at=$(job_ask "$p" "$qos" "$gres" "$excl" "" "${here[@]}") || continue
     # (32) a job waiting for priority where it is waits at least as long again as it has: its own wait is the evidence
     floor=$(job_wait_floor "$p" "$qos" "$cpus" "$jmem" "$([ "$gres" = - ] && echo 0 || echo "$gpus")")
     [ "$floor" -gt 0 ] && [ "$at" -lt $((now + floor)) ] && at=$((now + floor))
@@ -927,6 +945,8 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   # a job sent where it may be preempted must be requeued then, not ended (PreemptMode=REQUEUE ends a job
   # that may not requeue); only a job that never said --no-requeue is ever sent there
   [ "$bpre" = yes ] && upd+=("requeue=1")
+  # (35) the class's node feature goes with the move, so a job queued before the placement file named it takes it too
+  [ -n "${PLACE_CONSTRAINT:-}" ] && upd+=("features=$PLACE_CONSTRAINT")
   out=$(scontrol update "${upd[@]}" 2>&1) || rc=$?
   local stamp jd; stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); jd="$STATE_DIR/jobs"
   if [ $rc = 0 ]; then
