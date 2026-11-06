@@ -7,7 +7,7 @@
 # script with no `#SBATCH --time=` line (every job has a wall time), and an --output whose folder is not
 # there (the real one takes such a job, which then never starts); each refusal is also written to
 # $SHIM_SLURM/refused. Each job is a folder $SHIM_SLURM/jobs/<id>/ with one file per field (name, state,
-# dir, out, begin, dependency, partition, qos, time, cpus, mem, gres, extra (the options hpcworker's job place adds),
+# dir, out, begin, dependency, partition, qos, time, cpus, mem, gres, constraint, extra (the options hpcworker's job place adds),
 # args one per line, and script, a copy
 # taken at submission as Slurm keeps one); an option on the command line outranks the script's #SBATCH
 # line, as it does for sbatch; the name, the time and the output fall back to those lines, while the
@@ -36,7 +36,7 @@ refused() { printf '%s: refused by the test shim: %s\n' "$me" "$*" | tee -a "$S/
 case " $* " in *" /rs/"*|*"=/rs/"*) refused "a real cluster path in $*";; esac
 
 if [ "$me" = sbatch ]; then
-  parsable=0 dir=$(pwd) name="" part="" qos="" begin="" dep="" script="" out="" time="" cpus="" mem="" gres=""
+  parsable=0 dir=$(pwd) name="" part="" qos="" begin="" dep="" script="" out="" time="" cpus="" mem="" gres="" feat=""
   while [ $# -gt 0 ]; do case "$1" in
     --parsable) parsable=1; shift;;
     -D|--chdir) dir=$2; shift 2;; --chdir=*) dir=${1#*=}; shift;;
@@ -50,6 +50,7 @@ if [ "$me" = sbatch ]; then
     -c|--cpus-per-task) cpus=$2; shift 2;; --cpus-per-task=*) cpus=${1#*=}; shift;;
     --mem) mem=$2; shift 2;; --mem=*) mem=${1#*=}; shift;;
     --gres) gres=$2; shift 2;; --gres=*) gres=${1#*=}; shift;;
+    -C|--constraint) feat=$2; shift 2;; --constraint=*) feat=${1#*=}; shift;;
     # what hpcworker's job place adds beside the partition and QoS, kept in the job's file extra
     --account=*|--exclude=*|--open-mode=*|--requeue|--no-requeue) extra="${extra:-}$1 "; shift;;
     -*) echo "sbatch: unsupported option $1 (test shim)" >&2; exit 2;;
@@ -73,7 +74,7 @@ if [ "$me" = sbatch ]; then
   printf '%s\n' "$name" > "$J/name"; echo PENDING > "$J/state"; printf '%s\n' "$dir" > "$J/dir"; printf '%s\n' "$out" > "$J/out"
   printf '%s\n' "$part" > "$J/partition"; printf '%s\n' "$qos" > "$J/qos"; printf '%s\n' "$begin" > "$J/begin"; printf '%s\n' "$dep" > "$J/dependency"
   printf '%s\n' "$time" > "$J/time"; printf '%s\n' "$cpus" > "$J/cpus"; printf '%s\n' "$mem" > "$J/mem"; printf '%s\n' "$gres" > "$J/gres"
-  printf '%s\n' "${extra:-}" > "$J/extra"
+  printf '%s\n' "${extra:-}" > "$J/extra"; printf '%s\n' "$feat" > "$J/constraint"
   : > "$J/args"; for a in "$@"; do printf '%s\n' "$a" >> "$J/args"; done
   cp "$script" "$J/script"
   if [ -f "$S/finish/$key" ]; then head -1 "$S/finish/$key" > "$J/state"; tail -n +2 "$S/finish/$key" > "$out"; fi
