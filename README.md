@@ -314,8 +314,10 @@ an EL7 node is not, hence a container) as a SIF under the folder's `image/` and 
 it once, so a flag the site's Apptainer refuses is seen there and never in a chain; `--start --repo
 OWNER/NAME --site wayne` starts the chain (`--hours`, `--margin`, `--cpus`, `--mem`, `--gres`,
 `--labels`; with `--gres` naming a GPU the container is given it, `--nv`). A step never reaches the
-scheduler, the home or the lab volume: a job it queued as the account could read all the account
-holds, the `gh` sign-in and the Claude login among them.
+scheduler or the home, nor the lab volume beyond the folders `--ro-bind DIR` names, each bound
+read-only at its own path (a prebuilt environment a check runs, say; never the home, a folder in it
+or one holding it): a job it queued as the account could read all the account holds, the `gh`
+sign-in and the Claude login among them.
 Each job queues its successor first, then registers the runner for one GitHub job at a time with a
 just-in-time credential that the account's own `gh` sign-in mints (three mode-0600 files on the node's
 own disk, gone with the job; GitHub discards the registration itself once the job has run, and the

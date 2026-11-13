@@ -16,7 +16,7 @@
 #   tools/grid_runner.sh --install --site S [--version 2.338.0]
 #   tools/grid_runner.sh --start --repo OWNER/NAME --site S [--labels a,b] [--hours 8] [--margin 60]
 #                        [--cpus 2] [--mem 8G] [--gres gpu:1] [--partition P] [--qos Q] [--lane N]
-#                        [--constraint FEATURE]
+#                        [--constraint FEATURE] [--ro-bind DIR]...
 #   tools/grid_runner.sh --stop --repo OWNER/NAME --site S [--lane N] [--now]
 #   tools/grid_runner.sh --status --site S [--repo OWNER/NAME [--lane N]]
 #   tools/grid_runner.sh --autoscale --repos OWNER/NAME[,OWNER/NAME...] --site S [--max-per-repo 6]
@@ -127,6 +127,14 @@
 # (--containall --cleanenv --no-mount bind-paths), only its own copy of the runner's files and a
 # /tmp on the node's own disk. The install job runs on the chain's queue.
 #
+# --ro-bind DIR (--start and --autoscale, repeatable): DIR is bound into every runner's container
+# read-only at its own path, so a check can run a prebuilt environment kept on the lab volume (a
+# pixi or conda folder, say) and sees nothing else of the volume. DIR is an absolute folder that
+# exists where the chain is started, and never
+# the account's home, a folder inside it or one holding it. Each job hands it on to its successor
+# and the controller to its runner jobs; a node that lacks DIR runs the container without it and
+# the job's log says so.
+#
 # --start: on the login node file work, one `gh api` (the repository must be private or internal;
 # GitHub advises against self-hosted runners on a public repository, whose forks' pull requests
 # could run code on the grid), one squeue (one chain per repository, lane and account: a job of the
@@ -209,6 +217,7 @@ CONSTRAINT="" CONSTRAINT_GIVEN=0
 TRAIN_READY=0 HOURS_GIVEN=0 REPOS="" MAX_PER_REPO=${HPCW_AUTOSCALE_MAX_PER_REPO:-6} MAX_TOTAL=${HPCW_AUTOSCALE_MAX_TOTAL:-12} EVERY=60 IDLE=10 CONTROL_HOURS=8
 RUNTIME_BIN_GIVEN="" RUNTIME_MODULE_GIVEN="" GATE_KEY="" STARTOPTS=() HW=${HPCW_RUNNER_HPCWORKER:-} HW_GIVEN=0
 [ -n "$HW" ] && HW_GIVEN=1
+RO_BINDS=()   # --ro-bind's folders, each bound read-only into every runner's container
 while [ $# -gt 0 ]; do case "$1" in
   --install) MODE=install; shift;; --start) MODE=start; shift;; --stop) MODE=stop; shift;; --status) MODE=status; shift;;
   --repo) need "$@"; REPO="$2"; shift 2;; --version) need "$@"; VERSION="$2"; shift 2;;
@@ -230,6 +239,7 @@ while [ $# -gt 0 ]; do case "$1" in
     esac; shift 2;;
   # not one of the gate's sizes above: a chain the gate starts takes the site's default
   --constraint) need "$@"; CONSTRAINT="$2"; CONSTRAINT_GIVEN=1; shift 2;;
+  --ro-bind) need "$@"; RO_BINDS+=("$2"); shift 2;;
   --gate-key) need "$@"; MODE=gatekey; GATE_KEY="$2"; shift 2;; --gate-off) MODE=gateoff; shift;;
   --gate-setup) MODE=gatesetup; shift;;
   --now) NOW=1; shift;;
@@ -268,6 +278,15 @@ fi
 case "$MODE" in autoscale|control|train|trainjob) [ -n "$REPOS" ] || die "--${MODE/trainjob/train-job} needs --repos OWNER/NAME[,OWNER/NAME...]";; esac
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
+ro_bind_ok() { # DIR: a folder the runner's container may see read-only, never the home nor what holds it
+  local h=${HOME%/}
+  [[ "$1" =~ ^(/[A-Za-z0-9._-]+)+$ ]] || die "--ro-bind takes an absolute folder named with letters, digits, . _ and - alone: $1"
+  case "$1/" in */./*|*/../*) die "--ro-bind takes a folder with no . or .. in its path: $1";; esac
+  case "$1/" in "$h"/*) die "--ro-bind $1 is in the account's home, which the container never sees";; esac
+  case "$h/" in "$1"/*) die "--ro-bind $1 holds the account's home, which the container never sees";; esac
+  case "$MODE" in start|autoscale) [ -d "$1" ] || die "--ro-bind $1 is no folder here";; esac
+}
+for rb in ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do ro_bind_ok "$rb"; done
 case "$MODE" in start|stop|serve|once|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
 USER=${USER:-$(id -un)}; export USER   # the profile reader expands $USER in the lab volume's path
 HERE=$(cd "$(dirname "$0")" && pwd) || die "cannot find the folder of $0"
@@ -354,6 +373,7 @@ job_args() {
   [ -n "$RUNTIME_BIN_GIVEN" ] && SITE_ARGS+=(--runtime-bin "$RUNTIME_BIN_GIVEN")
   [ -n "$RUNTIME_MODULE_GIVEN" ] && SITE_ARGS+=(--runtime-module "$RUNTIME_MODULE_GIVEN")
   JOB_ARGS=(--repo "$REPO" "${SITE_ARGS[@]}" --hours "$HOURS" --margin "$MARGIN")
+  for rb in ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do JOB_ARGS+=(--ro-bind "$rb"); done
   [ "$LANE" = 1 ] || JOB_ARGS+=(--lane "$LANE")
   [ -n "$LABELS" ] && JOB_ARGS+=(--labels "$LABELS")
   [ -n "$CPUS" ] && JOB_ARGS+=(--cpus "$CPUS")
@@ -431,7 +451,7 @@ chain_start() {
   rm -f "$CHAIN/STOP" "$CHAIN/next" "$CHAIN/next.submitting" "$CHAIN/failures"
   job_args
   { printf 'repo=%s\nlane=%s\nversion=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nstarted=%s\n' "$REPO" "$LANE" "$v" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$(date -u +%FT%TZ)"
-    printf 'sbatch=%s\n' "${SB_FLAGS[*]}"; } > "$CHAIN/config" || die "cannot write $CHAIN/config"
+    printf 'sbatch=%s\nro_binds=%s\n' "${SB_FLAGS[*]}" "${RO_BINDS[*]-}"; } > "$CHAIN/config" || die "cannot write $CHAIN/config"
   out=$(SB --parsable --job-name "$JOB_NAME" --dependency=singleton "${SB_FLAGS[@]}" -D "$ROOT" --output "$CHAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${JOB_ARGS[@]}" 2>&1) \
     || die "sbatch refused the chain's first job: $out"
   say "runner chain for $REPO${LANE_OPT:+, lane $LANE}: job $(job_id "$out" || printf '%s' "$out"), $HOURS h of wall time a job, a successor queued by each; runner image $v"
@@ -746,11 +766,17 @@ load_runtime() { # the given path, else the module, else PATH
 # The image sets ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1, which would pour the runner's whole trace
 # into the chain's log on the volume; it is turned off, and _diag on the node keeps the trace. With
 # --gres naming a GPU, --nv gives the container the node's GPU.
-RCMD=() NV=(); case "$GRES" in *gpu*) NV=(--nv);; esac
+RCMD=() NV=() RO=(); case "$GRES" in *gpu*) NV=(--nv);; esac
+ro_binds() { # RO: each --ro-bind folder the node has, read-only at its own path; one it lacks is said and left out
+  local rb; RO=()
+  for rb in ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do
+    if [ -d "$rb" ]; then RO+=(-B "$rb:$rb:ro"); else log "--ro-bind $rb is not on $(hostname -s): the container goes without it"; fi
+  done
+}
 runner_cmd() { # IMAGE HOME CMD...: RCMD is the command line
   local image="$1" home="$2"; shift 2
   RCMD=("$RUNTIME_BIN" exec --containall --cleanenv --no-mount bind-paths ${NV[@]+"${NV[@]}"} --env ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=false
-    --pwd /home/runner --home "$home:/home/runner" -B "$NT/tmp:/tmp" "$image" "$@")
+    --pwd /home/runner --home "$home:/home/runner" -B "$NT/tmp:/tmp" ${RO[@]+"${RO[@]}"} "$image" "$@")
 }
 runner_tree() { # IMAGE DEST: the runner's files copied out of the image onto the node's disk (the image is read-only, and the runner writes beside its own files)
   mkdir -p "$2" && chmod 700 "$2" || return 1
@@ -951,6 +977,7 @@ serve() {
   node_tmp || { chain_failed "no node-local temp on $(hostname -s)"; return 1; }
   load_runtime || { chain_failed "no apptainer on $(hostname -s)"; return 2; }
   runtime_env
+  ro_binds
   IMAGE="$IMAGES/actions-runner-$IMAGE_VERSION.sif"
   [ -s "$IMAGE" ] || { log "no runner image at $IMAGE (tools/grid_runner.sh --install)"; chain_failed "no runner image"; return 3; }
   HOME_DIR="$NT/home"
@@ -1018,6 +1045,7 @@ control_args() { # what the controller's job is handed, and hands its successor
   job_args
   CONTROL_ARGS=(--control --repos "$REPOS" "${SITE_ARGS[@]}" --hours "$HOURS" --margin "$MARGIN"
     --max-per-repo "$MAX_PER_REPO" --max-total "$MAX_TOTAL" --every "$EVERY" --idle "$IDLE")
+  for rb in ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do CONTROL_ARGS+=(--ro-bind "$rb"); done
   [ -n "$LABELS" ] && CONTROL_ARGS+=(--labels "$LABELS")
   [ -n "$CPUS" ] && CONTROL_ARGS+=(--cpus "$CPUS")
   [ -n "$MEM" ] && CONTROL_ARGS+=(--mem "$MEM")
@@ -1054,7 +1082,7 @@ auto_start() {
   control_args
   { printf 'repos=%s\nmax_per_repo=%s\nmax_total=%s\nevery=%s\nidle=%s\nlabels=%s\nsite=%s\nhours=%s\nmargin=%s\nversion=%s\nstarted=%s\n' \
       "$REPOS" "$MAX_PER_REPO" "$MAX_TOTAL" "$EVERY" "$IDLE" "grid${SITE:+,$SITE}${LABELS:+,$LABELS}" "$SITE" "$HOURS" "$MARGIN" "$v" "$(date -u +%FT%TZ)"
-    printf 'runner_sbatch=%s\nplacement=%s\nreplace_every=%s\n' "${SB_FLAGS[*]}" "${HW:-none}" "${HPCW_RUNNER_REPLACE_EVERY:-300}"; } > "$AUTO/autoscale.conf" || die "cannot write $AUTO/autoscale.conf"
+    printf 'runner_sbatch=%s\nplacement=%s\nreplace_every=%s\nro_binds=%s\n' "${SB_FLAGS[*]}" "${HW:-none}" "${HPCW_RUNNER_REPLACE_EVERY:-300}" "${RO_BINDS[*]-}"; } > "$AUTO/autoscale.conf" || die "cannot write $AUTO/autoscale.conf"
   out=$(SB --parsable --job-name "$AUTO_JOB_NAME" --dependency=singleton "${CONTROL_FLAGS[@]}" -D "$ROOT" --output "$AUTO/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${CONTROL_ARGS[@]}" 2>&1) \
     || die "sbatch refused the controller's job: $out"
   say "autoscale controller: job $(job_id "$out" || printf '%s' "$out"), $CONTROL_HOURS h a job, a successor queued by each; it looks every $EVERY s at ${REPOS//,/, }"

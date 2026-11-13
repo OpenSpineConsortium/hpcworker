@@ -91,7 +91,7 @@ jit_requests() { cat "$T/gh/jit/requests" 2>/dev/null; }
 n_jit() { grep -c 'generate-jitconfig' "$T/gh/calls"; }
 deleted() { cat "$T/gh/deleted" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 status_field() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$CH/status.json" "$1" 2>/dev/null; }
-clear_runs() { rm -f "$T/apptainer/runs" "$T/gh/deleted"; : > "$T/sleeps"; }
+clear_runs() { rm -f "$T/apptainer/runs" "$T/apptainer/binds" "$T/gh/deleted"; : > "$T/sleeps"; }
 fresh() { rm -f "$CH/STOP" "$CH/failures"; clear_runs; }   # a chain a person started again, as far as a job can tell
 note_starts() { case "$(status_field note)" in "$1"*) return 0;; esac; return 1; }
 minted() { printf '%s\n' "$OUT" | sed -n "s/.*registered runner $1 (id \([0-9]*\),.*/\1/p" | head -1; }
@@ -116,6 +116,14 @@ gr --start --repo "$GH_REPO" --labels grid; t "grid is every chain's label" has 
 gr --start --repo "$GH_REPO" --labels 'a b'; t "labels are names" has 'comma-separated'
 gr --start --repo "$GH_REPO" --hours 0; t "--hours is 1 to 336" has -- '--hours is'
 gr --start --repo "$GH_REPO" --hours 2 --margin 120; t "--margin is under the wall time" has -- '--margin is'
+# --ro-bind: an absolute folder that is here, bound read-only, never the home, inside it or holding it
+mkdir -p "$T/envs/pixi"
+gr --start --repo "$GH_REPO" --ro-bind relative/envs; t "--ro-bind is an absolute folder" all 'ro-bind takes an absolute folder' 'relative/envs'
+gr --start --repo "$GH_REPO" --ro-bind "$T/envs:/x"; t "  whose name holds no colon, which a bind would split on" has 'ro-bind takes an absolute folder'
+gr --start --repo "$GH_REPO" --ro-bind "$T/envs/../home"; t "  with no .. in its path" has 'no \. or \.\. in its path'
+gr --start --repo "$GH_REPO" --ro-bind "$HOME/.config"; t "  never inside the account's home" has "is in the account's home"
+gr --start --repo "$GH_REPO" --ro-bind "$T"; t "  never a folder that holds it" has "holds the account's home"
+gr --start --repo "$GH_REPO" --ro-bind "$T/envs/none"; t "  and one that is here" has 'envs/none is no folder here'
 gr --start --repo "$GH_REPO" --mem 8GB; t "--mem is as sbatch takes it" has 'bad --mem'
 gr --start --repo "$GH_REPO" --gres 'gpu;1'; t "--gres is checked" has 'bad --gres'
 gr --bogus; t "an unknown option is refused" has 'unknown option --bogus'
@@ -406,6 +414,28 @@ t "the successor meets the lane's STOP" has 'STOP is set'; t "  and says how to 
 t "  queuing nothing more" [ "$(count "$L2NAME")" = 3 ]
 gr --stop --repo OpenSpineConsortium/other --now; t "the first chain stops on its own word" has "cancelled job $P1"
 
+echo "== --ro-bind: a chain's runners see a folder of the volume, read-only at its own path"
+RB="$T/envs/pixi"; L3NAME='^hpcw_runner_OpenSpineConsortium-other\+lane3$'
+gr --start --repo OpenSpineConsortium/other --site wayne --lane 3 --ro-bind "$RB"; B1=$(newest "$L3NAME")
+t "a chain started with --ro-bind is queued" bash -c "[ '$RC' = 0 ] && [ -n '$B1' ]"
+t "  its job handed the folder" [ "$(J "$B1" args | tr '[:space:]' ' ' | grep -c -- " --ro-bind $RB ")" = 1 ]
+t "  and the chain's config records it" grep -qx "ro_binds=$RB" "$OCH+lane3/config"
+echo "$OCH+lane3" > "$T/apptainer/chain"; clear_runs; plan done stop
+run_job "$B1"
+t "its job ends well" rc_is 0; t "  having run one GitHub job" has "== job $B1 ends: 1 GitHub jobs ran"
+t "  in a container that saw the folder at its own path, read-only" grep -qx "$RB $RB ro" "$T/apptainer/binds"
+t "  and nothing else of the test's folder but the node's own temp" bash -c "! grep -v -x -e '$RB $RB ro' -e '/tmp /tmp/$USER/hpcw_runner_$B1/tmp rw' '$T/apptainer/binds'"
+t "  the bind on the runner's own command line" grep -q -- "-B /tmp/$USER/hpcw_runner_$B1/tmp:/tmp -B $RB:$RB:ro .*/home/runner/bin/Runner.Listener run$" "$T/apptainer/calls"
+B2=$(newest "$L3NAME")
+t "  its successor handed the folder too" bash -c "[ '$B2' != '$B1' ] && [ \"\$(cat '$T/slurm/jobs/$B2/args')\" = \"\$(cat '$T/slurm/jobs/$B1/args')\" ]"
+run_job "$B2"; t "  and meeting the lane's STOP" has 'STOP is set'
+gr --start --repo OpenSpineConsortium/other --site wayne --lane 3 --ro-bind "$RB"; B3=$(newest "$L3NAME")
+mv "$RB" "$RB.gone"; clear_runs; plan stop
+run_job "$B3"
+t "a node without the folder runs the container without it" bash -c "[ '$RC' = 0 ] && [ -s '$T/apptainer/binds' ] && ! grep -q '$RB' '$T/apptainer/binds'"
+t "  and its log says so" has "--ro-bind $RB is not on [^ ]+: the container goes without it"
+mv "$RB.gone" "$RB"; run_job "$(newest "$L3NAME")"; t "  its successor meets the lane's STOP" has 'STOP is set'
+
 echo "== autoscale: one runner job for each queued job"
 pending() { local j; for j in $(ids "$1"); do [ "$(J "$j" state)" = PENDING ] && echo "$j"; done; return 0; }
 AU="$R/autoscale"; TPL=OpenSpineConsortium-symphony-template; RN="^hpcw_auto_$TPL\$"; ON='^hpcw_auto_OpenSpineConsortium-other$'
@@ -544,6 +574,18 @@ gr --autoscale-stop --site wayne --now
 gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker none
 t "--hpcworker none keeps the batch queue" has "runner jobs keep the site's batch queue: --hpcworker none"
 t "  and hands the controller none" [ "$(J "$(newest '^hpcw_autoscale$')" args | grep -c -- '--hpcworker')" = 0 ]
+gr --autoscale-stop --site wayne --now
+
+echo "== autoscale: --ro-bind reaches every runner job"
+gr --autoscale --repos "$GH_REPO" --site wayne --hpcworker none --ro-bind "$RB"; AC8=$(newest '^hpcw_autoscale$')
+t "--autoscale --ro-bind hands the controller the folder" [ "$(J "$AC8" args | tr '[:space:]' ' ' | grep -c -- " --ro-bind $RB ")" = 1 ]
+t "  and autoscale.conf records it" grep -qx "ro_binds=$RB" "$AU/autoscale.conf"
+U7=$(newest "$RN"); run_job "$AC8" HPCW_AUTOSCALE_LOOKS=1; U8=$(newest "$RN")
+t "  whose look queues a runner job" bash -c "[ -n '$U8' ] && [ '$U8' != '$U7' ]"
+t "  handed the folder" [ "$(J "$U8" args | tr '[:space:]' ' ' | grep -c -- " --ro-bind $RB ")" = 1 ]
+echo "$AU/$TPL/jobs/$U8" > "$T/apptainer/chain"; clear_runs; plan done
+run_job "$U8"
+t "  which runs its runner with the folder read-only at its own path" bash -c "[ '$RC' = 0 ] && grep -qx '$RB $RB ro' '$T/apptainer/binds'"
 gr --autoscale-stop --site wayne --now
 
 echo "== the merge train"
