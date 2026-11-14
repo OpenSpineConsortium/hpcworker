@@ -1459,7 +1459,7 @@ seconds (600), never in its first `--age` seconds (120), and never when it waits
 hpcworker placed. From framework 32 `job submit --placement` places an array too, and `job replace` moves an array's
 waiting tasks as one, those that have started staying where they are, so workers that claim from a shared queue spread
 onto whatever card frees; `--job ID` narrows it to the jobs named, and `--dry-run` moves nothing and says why each job stays. Each move is a line of its output, of the job's log and of
-`<state>/jobs/replace.log`. When Slurm refuses a move, a runner job is cancelled (the autoscaler queues one again,
+`<state>/jobs/replace.log`, and from version 36 says why. When Slurm refuses a move, a runner job is cancelled (the autoscaler queues one again,
 placed afresh) and any other job is left where it is: its environment, which a resubmission would need, is never
 kept, since it may hold a credential. The autoscaler's controller runs `job probe` and then `job replace --runners`
 every `replace_every` seconds of its autoscale.conf (300), inside its own Slurm job; nothing here runs on a login node.
@@ -1666,6 +1666,41 @@ a move adds `features=FEATURE` to the job, so one queued before the line was wri
 for runner jobs alone; a class with no line asks as before. Still unconstrained: a chain's jobs (`--start`, its lanes)
 and an autoscaled runner job when no placement answers, which take the site's batch queue as tools/grid_runner.sh names
 it.
+
+## A move never strands a job (version 36)
+
+`job replace` raced a pending job with its name, cores, memory and time limit, and with a node feature only where the
+placement file names one for the job's class. What the job asked of a node itself was never read. On 14 November 2026,
+at Wayne State, 25 pending batch jobs that asked `avx2` were raced without it and moved from a partition where most
+nodes offer it to one whose 133 nodes do not. Slurm set their reason to BadConstraints, and since only jobs waiting on
+Priority, Resources, ReqNodeNotAvail or a QoS limit were raced, no later pass looked at them: they would never have
+started, and were moved back by hand.
+
+From version 36:
+
+- **What a job asks goes with it.** The account's jobs are read with their features (squeue's `%f`), and a job is
+  raced with them, beside its class's feature where the placement file names one. A move no longer replaces a job's
+  features with its class's: it adds the class's feature to them, and leaves them alone when the job asks it already.
+- **Only where the job can run.** One `sinfo -h -o '%P|%l|%f'` a pass says what each partition's nodes offer and its
+  time limit. A partition with no node offering every feature the job asks, or with a time limit under the job's own,
+  is no candidate, whatever `sbatch --test-only` says of it, and is not asked. No list of nodes or features is kept in
+  the framework or the placement file for this. Where sinfo names no such partition, or a limit cannot be read, the
+  partition is no candidate either, so an unknown never moves a job.
+- **A stranded job is looked at again.** A job waiting on BadConstraints, or on PartitionTimeLimit, never starts by
+  waiting, so it is raced too, before the others, and moved to a partition that can run it. Where none of the
+  partitions it may take can, it stays, its line says why (`HPCW-JOB kept ID NAME: no partition it may take can run it
+  as it stands: no node of P offers F`), and the next pass looks again. Such a job, for which nothing is asked of
+  `sbatch --test-only`, costs a pass none of its `HPCW_REPLACE_MAX` jobs.
+- **More than a list of features.** A job that asks `a|b`, `[a|b]`, a count or a negation is held against no
+  partition here and is left where it is; `--dry-run` says so.
+- **A job sent without `--placement` is never moved**, as before: no need is kept for it, so no pass races it,
+  whatever it waits on. A test now holds that.
+- **Every move says why.** The move's line, in the output, in `<state>/jobs/replace.log` and in the job's own log,
+  names the job, where it was and where it went, and ends with `since ...`: the start it gains, what sinfo shows of
+  the partition it stood on, or Slurm's reason (`since it waits on BadConstraints: no node of secp offers avx2`).
+
+The running moves of version 34 are as they were: a job moved at a checkpoint that has not started within
+`HPCW_CHECKPOINT_RETURN` seconds goes back where it ran.
 
 ## Files
 

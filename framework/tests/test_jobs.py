@@ -28,6 +28,12 @@ SINFO_NODES = "\n".join(["alh1|galhp|gpu:nvidia_l40s:4(S:0)", "alh1|reqp*|gpu:nv
                          "asx1|secp|(null)", "asx1|reqp*|(null)"])
 # what reqp leaves out for a 24 GB Ampere, Ada or Hopper job: the slices, the mixed node, Blackwell, the tesla cards
 REQP_OUT = "arw1,rom1,tta1,voh1,ymh1"
+# each partition's time limit and the features of its nodes, as sinfo -o '%P|%l|%f' groups them (36): a line for each set
+# of features a partition's nodes offer. No node of secp offers avx2, as at Wayne State, nor do the older ones of prip
+# and reqp, and avx512 is the GPU nodes' alone
+SINFO_FEATURES = "\n".join(["galhp|7-00:00:00|intel,avx2,avx512", "gmsap|7-00:00:00|intel,avx2,avx512", "gvohp|7-00:00:00|intel,avx2",
+                            "reqp*|7-00:00:00|intel,avx2,avx512", "reqp*|7-00:00:00|amd,avx", "prip|7-00:00:00|intel,avx2",
+                            "prip|7-00:00:00|amd,avx", "secp|7-00:00:00|amd,avx"])
 
 
 def own(*rows):
@@ -53,7 +59,7 @@ class PlacementBase(unittest.TestCase):
             fh.write("\n".join(lines) + "\n")
 
     def run_tool(self, args, **env):
-        e = {"FAKE_SINFO": SINFO, "FAKE_SINFO_NODES": SINFO_NODES}
+        e = {"FAKE_SINFO": SINFO, "FAKE_SINFO_NODES": SINFO_NODES, "FAKE_SINFO_FEATURES": SINFO_FEATURES}
         e.update(env)
         return self.g.run(args, **e)
 
@@ -394,6 +400,216 @@ class ReplaceTest(PlacementBase):
         self.assertIn("HPCW-JOB cancelled 40970002 hpcw_auto_o-r: Slurm refused the move to prip/primary", out)
         cancels = [c for c in self.g.calls() if c.startswith("scancel")]
         self.assertEqual(cancels, ["scancel 40970002"])
+
+
+class StrandTest(PlacementBase):
+    """job replace never strands a job (36): a pending job is raced with the node features it asks itself, over the
+    partitions sinfo shows can run it (a node offering each feature, a time limit not under the job's own); one that
+    waits on BadConstraints is raced too, before the others, and moved where it can run; a job sent without
+    --placement is never moved; and every move's line says the job, from where, to where and why."""
+
+    OLD = "2026-01-01T00:00:00"
+
+    def test_what_holds_a_partition_to_a_job(self):
+        # the two readings every move rests on: the features a job asks, as one list, and sinfo's lines of a partition
+        lines = "\n".join(["short|30:00|a,b", "short|30:00|c", "day*|1-00:00:00|a", "open|infinite|(null)", "odd|n/a|a"])
+
+        def said(body):
+            rc, out, err = self.g.source(body, FAKE_SINFO_FEATURES=lines)
+            return rc, out.strip()
+
+        self.assertEqual(said("job_features 'b&a' a 'c,b'"), (0, "b&a&c"))
+        self.assertEqual(said("job_features '(null)' ''"), (0, ""))
+        for more in ("a|b", "[a|b]", "a*2", "a&", "!a"):
+            self.assertEqual(said("job_features '%s'" % more)[0], 1, more)
+        for part, feats, limit, why in (
+                ("short", "a&b", "20:00", ""),
+                ("short", "a&c", "20:00", "no node of short offers a and c"),
+                ("short", "", "1:00:00", "the time limit of short (30:00) is under what the job asks (1:00:00)"),
+                ("day", "a", "1-00:00:00", ""),
+                ("day", "a", "1-00:00:01", "the time limit of day (1-00:00:00) is under what the job asks (1-00:00:01)"),
+                ("day", "", "UNLIMITED", "the time limit of day (1-00:00:00) is under what the job asks (UNLIMITED)"),
+                ("day", "", "Partition_Limit", "the time limit of day (1-00:00:00) cannot be held against what the job asks (Partition_Limit)"),
+                ("odd", "a", "1:00", "the time limit of odd (n/a) cannot be held against what the job asks (1:00)"),
+                ("open", "", "UNLIMITED", ""),
+                ("open", "", "30-00:00:00", ""),
+                ("gone", "", "1:00", "sinfo lists no partition gone")):
+            self.assertEqual(said("job_part_misfit '%s' '%s' '%s'" % (part, feats, limit)), (0, why), (part, feats, limit))
+
+    def placed_cpu(self, name="read"):
+        # a batch job that may not be requeued: its candidates are the two partitions never preempted. The waits an
+        # earlier look recorded (32) are no evidence for this placement, so they are taken away first
+        waits = os.path.join(self.g.state, "placement.waits")
+        if os.path.exists(waits):
+            os.remove(waits)
+        self.plan("secp - 600", "prip - 0")
+        rc, out, err = self.submit("--placement auto --no-requeue", cls="batch", name=name)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("chose prip/primary (never preempted)", out)
+        return self.job_id(out), self.job_log(out)
+
+    def waiting(self, jid, name="demo-read", parts="prip", qos="primary", reason="Priority", feats="(null)", tl="4:00:00"):
+        return (jid, name, "PENDING", parts, qos, reason, "4", "32G", tl, "N/A", "", self.OLD, "(null)", feats)
+
+    def test_a_job_is_never_moved_where_no_node_offers_what_it_asks(self):
+        # 14 November: jobs that asked a feature were raced without it, moved to a partition none of whose nodes offers
+        # it, and waited there for ever. The race asks with the job's own features, over the partitions that offer them
+        jid, _ = self.placed_cpu()
+        self.plan("secp - 0", "prip - 20000")
+        before = len(self.asked())
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.waiting(jid, feats="intel&avx2")))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("looked at 1 pending job(s), moved 0", out)
+        self.assertEqual(self.updates(), [])
+        asked = self.asked()[before:]
+        self.assertTrue(asked)
+        for c in asked:
+            self.assertIn("--constraint=intel&avx2", c)
+            self.assertNotIn("--partition=secp", c)
+        # one that asks nothing of a node is raced as before, and moves
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.waiting(jid)))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.updates(), ["scontrol update jobid=%s partition=secp qos=secondary" % jid])
+
+    def test_a_job_is_never_moved_where_the_time_limit_is_under_its_own(self):
+        jid, _ = self.placed_cpu()
+        self.plan("secp - 0", "prip - 20000")
+        short = SINFO_FEATURES.replace("secp|7-00:00:00|", "secp|2:00:00|")
+        before = len(self.asked())
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.waiting(jid)), FAKE_SINFO_FEATURES=short)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("looked at 1 pending job(s), moved 0", out)
+        self.assertEqual(self.updates(), [])
+        self.assertFalse([c for c in self.asked()[before:] if "--partition=secp" in c], "a partition too short for it is not asked")
+        # a job whose own limit fits there moves, and a partition with no limit takes any job
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.waiting(jid, tl="2:00:00")), FAKE_SINFO_FEATURES=short)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.updates(), ["scontrol update jobid=%s partition=secp qos=secondary" % jid])
+        other, _ = self.placed_cpu(name="long")
+        self.plan("secp - 0", "prip - 20000")
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.waiting(other, name="demo-long", tl="30-00:00:00")),
+                                     FAKE_SINFO_FEATURES=SINFO_FEATURES.replace("secp|7-00:00:00|", "secp|infinite|"))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.updates()[1:], ["scontrol update jobid=%s partition=secp qos=secondary" % other])
+        # one that already waits where the limit is under its own never starts there: it is raced too, and moved
+        over, _ = self.placed_cpu(name="over")
+        self.plan("secp - 0", "prip - 3600")
+        row = own(self.waiting(over, name="demo-over", parts="secp", qos="secondary", reason="PartitionTimeLimit"))
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=row, FAKE_SINFO_FEATURES=short)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved %s demo-over secp/secondary -> prip/primary (never preempted), estimate none -> " % over, out)
+        self.assertIn(", since it waits on PartitionTimeLimit: the time limit of secp (2:00:00) is under what the job asks (4:00:00)", out)
+
+    def test_a_job_on_bad_constraints_moves_where_it_can_run_and_the_line_says_why(self):
+        jid, log = self.placed_cpu()
+        # where it is, test-only still names a start: sinfo's features alone say that no node there can run it
+        self.plan("secp - 0", "prip - 3600")
+        before = len(self.asked())
+        stuck = self.waiting(jid, parts="secp", qos="secondary", reason="BadConstraints", feats="avx2")
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(stuck))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved %s demo-read secp/secondary -> prip/primary (never preempted), estimate none -> " % jid, out)
+        self.assertIn("looked at 1 pending job(s), moved 1", out)
+        self.assertEqual(self.updates(), ["scontrol update jobid=%s partition=prip qos=primary" % jid])
+        asked = self.asked()[before:]
+        self.assertTrue(asked)
+        for c in asked:
+            self.assertIn("--constraint=avx2", c)
+            self.assertNotIn("--partition=secp", c)
+        # the job, from, to and why, in hpcworker's own log and in the job's
+        with open(os.path.join(self.g.state, "jobs", "replace.log")) as fh:
+            line = fh.read().splitlines()[-1]
+        self.assertRegex(line, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ moved %s demo-read secp/secondary -> prip/primary \(never preempted\), "
+                               r"estimate none -> \S+, since it waits on BadConstraints: no node of secp offers avx2$" % jid)
+        with open(log) as fh:
+            self.assertIn("moved while pending from secp/secondary to prip/primary (never preempted), estimate none -> ", fh.read())
+
+    def test_a_job_no_partition_can_run_stays_and_is_looked_at_again(self):
+        jid, _ = self.placed_cpu()
+        self.plan("secp - 0", "prip - 0")
+        stuck = self.waiting(jid, parts="secp", qos="secondary", reason="BadConstraints", feats="avx512")
+        for _ in (1, 2):
+            rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(stuck))
+            self.assertEqual(rc, 0, (out, err))
+            self.assertIn("HPCW-JOB kept %s demo-read: no partition it may take can run it as it stands: "
+                          "no node of secp offers avx512; no node of prip offers avx512" % jid, out)
+            self.assertIn("looked at 1 pending job(s), moved 0", out)
+        self.assertEqual(self.updates(), [])
+        # a job nothing can be asked for costs the pass none of its count: the next one is still raced
+        waiter, _ = self.placed_cpu(name="waiter")
+        self.plan("secp - 0", "prip - 20000")
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(stuck, self.waiting(waiter, name="demo-waiter")), HPCW_REPLACE_MAX="1")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("looked at 2 pending job(s), moved 1", out)
+        self.assertEqual(self.updates(), ["scontrol update jobid=%s partition=secp qos=secondary" % waiter])
+
+    def test_a_job_on_bad_constraints_comes_before_the_pass_s_count_runs_out(self):
+        waiter, _ = self.placed_cpu(name="waiter")
+        jid, _ = self.placed_cpu()
+        self.plan("secp - 0", "prip - 0")
+        rows = own(self.waiting(waiter, name="demo-waiter", reason="Resources"),
+                   self.waiting(jid, parts="secp", qos="secondary", reason="BadConstraints", feats="avx2"))
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=rows, HPCW_REPLACE_MAX="1")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB moved %s demo-read secp/secondary -> prip/primary (never preempted)" % jid, out)
+        self.assertIn("looked at 1 pending job(s), moved 1", out)
+
+    def test_nothing_is_moved_when_sinfo_does_not_say_what_the_partitions_offer(self):
+        jid, _ = self.placed_cpu()
+        self.plan("secp - 0", "prip - 20000")
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=own(self.waiting(jid)), FAKE_SINFO_FEATURES="")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB kept %s demo-read: no partition it may take can run it as it stands: sinfo lists no partition secp" % jid, out)
+        self.assertEqual(self.updates(), [])
+
+    def test_a_job_asking_more_than_a_list_of_features_is_left_where_it_is(self):
+        jid, _ = self.placed_cpu()
+        self.plan("secp - 0", "prip - 20000")
+        before = len(self.asked())
+        row = own(self.waiting(jid, feats="avx2|avx512"))
+        rc, out, err = self.run_tool("job replace --dry-run", FAKE_SQUEUE_LIST=row)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("HPCW-JOB stays %s demo-read prip/primary: it asks avx2|avx512 of a node, more than a list of features, "
+                      "which no partition is held to here" % jid, out)
+        rc, out, err = self.run_tool("job replace", FAKE_SQUEUE_LIST=row)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(len(self.asked()), before, "nothing was raced")
+        self.assertEqual(self.updates(), [])
+
+    def test_a_move_keeps_the_features_a_job_asks_beside_its_class_s(self):
+        # (35) a move set features=<the class's> alone, which took away whatever the job had asked itself
+        self.plan("reqp - 20000 requeue", "prip - 0 primary", "secp - 0 secondary")
+        runner = ("40970002", "hpcw_auto_o-r", "PENDING", "reqp", "requeue", "Priority", "4", "16G", "2:00:00", "N/A", "", self.OLD, "(null)")
+        rc, out, err = self.run_tool("job replace --runners", FAKE_SQUEUE_LIST=own(runner + ("intel",)))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.updates(), ["scontrol update jobid=40970002 partition=prip qos=primary features=intel&avx2"])
+        asked = self.asked()
+        self.assertTrue(asked)
+        for c in asked:
+            self.assertIn("--constraint=intel&avx2", c)
+            self.assertNotIn("--partition=secp", c)
+        # one that asks its class's feature already keeps what it has: the move sets no feature
+        other = ("40970003",) + runner[1:] + ("avx2,intel",)
+        rc, out, err = self.run_tool("job replace --runners", FAKE_SQUEUE_LIST=own(other))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.updates()[1:], ["scontrol update jobid=40970003 partition=prip qos=primary"])
+
+    def test_a_job_sent_without_placement_is_never_moved(self):
+        # its sender named where it runs, so no need is kept for it and no race is ever run, whatever it waits on
+        rc, out, err = self.submit("--partition reqp --no-requeue", cls="batch", name="byhand")
+        self.assertEqual(rc, 0, (out, err))
+        jid = self.job_id(out)
+        self.assertFalse(os.path.exists(os.path.join(self.g.state, "jobs", "demo", "placed", jid)))
+        self.plan("secp - 0", "prip - 0", "reqp - 20000")
+        before = len(self.asked())
+        for reason in ("Priority", "BadConstraints"):
+            row = own(self.waiting(jid, name="demo-byhand", parts="reqp", qos="requeue", reason=reason, feats="avx2"))
+            for args in ("job replace", "job replace --job %s" % jid, "job replace --project demo --dry-run"):
+                rc, out, err = self.run_tool(args, FAKE_SQUEUE_LIST=row)
+                self.assertEqual(rc, 0, (out, err))
+                self.assertIn("looked at 0 pending job(s), moved 0", out)
+        self.assertEqual(len(self.asked()), before, "nothing was raced")
+        self.assertEqual(self.updates(), [])
 
 
 class ArrayTest(PlacementBase):
