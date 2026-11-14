@@ -383,12 +383,68 @@ job_estimate() { # START_TEXT -> epoch seconds of "to start at YYYY-MM-DDTHH:MM:
   [ -n "$at" ] && date -d "${at/T/ }" +%s 2>/dev/null
 }
 OWN_JOBS="" OWN_JOBS_READ=0
-job_own_jobs() { # this account's jobs, one squeue a process: ID|NAME|STATE|PARTITIONS|QOS|REASON|CPUS|MEM|TIME|TRES|EXCLUDED|SUBMITTED|DEPENDENCY
+job_own_jobs() { # this account's jobs, one squeue a process: ID|NAME|STATE|PARTITIONS|QOS|REASON|CPUS|MEM|TIME|TRES|EXCLUDED|SUBMITTED|DEPENDENCY|FEATURES
+  # (36) what a job asks of a node comes last, since it alone may hold a | of its own (a|b)
   if [ $OWN_JOBS_READ = 0 ]; then
-    OWN_JOBS=$(squeue -h -u "${USER:-$(id -un)}" -o '%i|%j|%T|%P|%q|%r|%C|%m|%l|%b|%x|%V|%E' 2>/dev/null) || return 1
+    OWN_JOBS=$(squeue -h -u "${USER:-$(id -un)}" -o '%i|%j|%T|%P|%q|%r|%C|%m|%l|%b|%x|%V|%E|%f' 2>/dev/null) || return 1
     OWN_JOBS_READ=1
   fi
   [ -n "$OWN_JOBS" ] && printf '%s\n' "$OWN_JOBS"
+  return 0
+}
+# ---- what a partition can run (36) --------------------------------------------------------------------
+# job replace raced a pending job with its name, cores, memory and limit, and with a node feature only where the
+# placement file names one for the job's class. A job that asked a feature itself was raced without it, moved to a
+# partition none of whose nodes offers it, and waited there on BadConstraints, a reason no later pass looked at: it
+# never started and was never moved again (2026-11-14 at Wayne State, 25 jobs, each moved back by hand). A queued job
+# is now raced with what it asks, as squeue's %f gives it, and only over the partitions sinfo shows can run it: a node
+# offering every feature asked, and a time limit not under the job's own. No list of nodes or features is kept here:
+# sinfo's word decides, and where sinfo gives none no job is moved.
+job_features() { # LIST... -> the features the lists name, each once in the order met, joined by &; 1 for more than a list
+  # squeue's %f is what a job asks of a node as it asked it: (null) for nothing, a&b or a,b for every one of them.
+  # More than that (a|b, [a|b], a*2, !a) is held against no partition here, so job replace leaves such a job be
+  local l w out="" re='^[A-Za-z0-9_.-]+([&,][A-Za-z0-9_.-]+)*$'
+  for l in "$@"; do
+    case "$l" in ""|"(null)") continue;; esac
+    [[ "$l" =~ $re ]] || return 1
+    for w in ${l//[&,]/ }; do case "&$out&" in *"&$w&"*) ;; *) out="${out:+$out&}$w";; esac; done
+  done
+  printf '%s' "$out"
+}
+job_limit_s() { # a time limit as squeue and sinfo print one (M:SS, H:MM:SS, D-H:MM:SS) -> whole seconds, inf for none; 1 for anything else
+  local re='^(([0-9]{1,5})-)?(([0-9]{1,3}):)?([0-9]{1,5}):([0-9]{1,2})$'
+  case "$1" in infinite|UNLIMITED) printf 'inf'; return 0;; esac
+  [[ "$1" =~ $re ]] || return 1
+  printf '%s' $(( 10#${BASH_REMATCH[2]:-0} * 86400 + 10#${BASH_REMATCH[4]:-0} * 3600 + 10#${BASH_REMATCH[5]} * 60 + 10#${BASH_REMATCH[6]} ))
+}
+PART_ROWS="" PART_ROWS_READ=0
+job_part_rows() { # each partition's time limit and what its nodes offer, one sinfo a process: PARTITION|LIMIT|FEATURES, a line for each set of features
+  if [ $PART_ROWS_READ = 0 ]; then
+    PART_ROWS_READ=1
+    PART_ROWS=$(sinfo -h -o '%P|%l|%f' 2>/dev/null | job_clean)
+  fi
+  [ -n "$PART_ROWS" ] && printf '%s\n' "$PART_ROWS"
+  return 0
+}
+job_part_misfit() { # PARTITION FEATURES LIMIT -> why the partition cannot run a job asking those features (joined by &) and that time limit; nothing when it can
+  local part=$1 feats=$2 limit=$3 rows pl ps js
+  rows=$(job_part_rows | awk -F'|' -v p="$part" '{ q = $1; sub(/[*]$/, "", q); if (q == p) print $2 "|" $3 }')
+  [ -n "$rows" ] || { printf 'sinfo lists no partition %s' "$part"; return 0; }
+  # every feature on one node: a partition whose nodes offer them only between them runs no job that asks them all
+  if [ -n "$feats" ] && ! printf '%s\n' "$rows" | awk -F'|' -v want="$feats" '
+      BEGIN { n = split(want, w, "&") }
+      { split("", has); m = split($2, h, ","); for (i = 1; i <= m; i++) has[h[i]] = 1
+        ok = 1; for (i = 1; i <= n; i++) if (!(w[i] in has)) ok = 0
+        if (ok) found = 1 }
+      END { exit found ? 0 : 1 }'; then
+    printf 'no node of %s offers %s' "$part" "${feats//&/ and }"; return 0
+  fi
+  # a limit that cannot be read is held to be too short, so an unknown never moves a job; no limit takes any job
+  pl=${rows%%|*}
+  ps=$(job_limit_s "$pl") || { printf 'the time limit of %s (%s) cannot be held against what the job asks (%s)' "$part" "$pl" "$limit"; return 0; }
+  [ "$ps" = inf ] && return 0
+  js=$(job_limit_s "$limit") || { printf 'the time limit of %s (%s) cannot be held against what the job asks (%s)' "$part" "$pl" "$limit"; return 0; }
+  if [ "$js" = inf ] || [ "$js" -gt "$ps" ]; then printf 'the time limit of %s (%s) is under what the job asks (%s)' "$part" "$pl" "$limit"; fi
   return 0
 }
 # ---- the wait behind priority (32) ------------------------------------------------------------------
@@ -460,7 +516,7 @@ job_ask() { # PARTITION QOS GRES EXCLUDE SCRIPT ARGS... -> epoch seconds of the 
   if [ -n "$at" ]; then printf '%s' "$at"; return 0; fi
   ASK_SAID=$(printf '%s' "$out" | sed 's/^sbatch: error: //' | cut -c1-120); return 1
 }
-PLACE_TABLE="" PLACE_CHOICE="" PLACE_AT="" PLACE_WHY="" PLACE_PREFER=""
+PLACE_TABLE="" PLACE_CHOICE="" PLACE_AT="" PLACE_WHY="" PLACE_PREFER="" PLACE_ASKS="" PLACE_LIMIT=""
 job_race() { # GPUS RESUMES SCRIPT ARGS...: the groups on stdin -> PLACE_CHOICE "PARTITIONS QOS PREEMPTABLE GRES EXCLUDE", PLACE_AT and PLACE_TABLE; 1 when none answered
   # Each partition is asked alone, since given several, sbatch --test-only answers for the first of them and
   # not the earliest (Slurm 23.02 at Wayne State, 2026-11-04). A group's estimate is its earliest partition's,
@@ -542,13 +598,28 @@ job_need_place() { # CLASS GPUS GPU_MEM ARCHS REQUEUE SCRIPT ARGS...: the whole 
   # (35) a class whose jobs need a node feature asks every candidate with it, so a partition with no such node
   # is refused by its own sbatch --test-only and drops out of the race, and the choice carries it
   PLACE_CONSTRAINT=$(job_class_constraint "$class") || { PLACE_WHY="the placement file's constraint for $class is no plain feature name"; return 1; }
-  [ -z "$PLACE_CONSTRAINT" ] || set -- "$@" "--constraint=$PLACE_CONSTRAINT"
+  # (36) a queued job is asked with what it asks of a node itself too (PLACE_ASKS, which job replace reads from squeue)
+  local want="" line why kept="" misfits=""
+  want=$(job_features "${PLACE_ASKS:-}" "$PLACE_CONSTRAINT") || want=$PLACE_CONSTRAINT
+  [ -z "$want" ] || set -- "$@" "--constraint=$want"
   job_avoid_nodes > /dev/null   # read once in this shell, so every race of one job replace shares one sacct
   cands=$(job_candidates "$class" "$need" "$archs" "$nopre")
   if [ -z "$cands" ]; then
     if [ "$class" = gpu ]; then PLACE_WHY="no partition of this site holds a card of ${need} GB or more of ${archs// /, }$([ $nopre = 1 ] && echo " that is never preempted (--no-requeue)")"
     else PLACE_WHY="this site's placement file names no $class candidate$([ $nopre = 1 ] && echo " that is never preempted (--no-requeue)")"; fi
     return 1
+  fi
+  # (36) and it is raced only over the partitions sinfo shows can run it (PLACE_LIMIT, its time limit, says it is a
+  # queued job): one with no node offering every feature asked, or with a time limit under the job's own, is no
+  # candidate, whatever sbatch --test-only would say of it
+  if [ -n "${PLACE_LIMIT:-}" ]; then
+    while read -r line; do
+      why=$(job_part_misfit "${line%% *}" "$want" "$PLACE_LIMIT")
+      if [ -z "$why" ]; then kept="$kept$line"$'\n'
+      else case "; $misfits; " in *"; $why; "*) ;; *) misfits="${misfits:+$misfits; }$why";; esac; fi
+    done <<< "$cands"
+    cands=${kept%$'\n'}
+    [ -n "$cands" ] || { PLACE_WHY="no partition it may take can run it as it stands: $misfits"; return 1; }
   fi
   job_race "$gpus" "$requeue" "$script" "$@" < <(printf '%s\n' "$cands" | job_groups "$gpus") && return 0
   PLACE_WHY="no candidate placement answered sbatch --test-only: $(printf '%s' "$PLACE_TABLE" | tail -n 3 | tr '\n' ' ')"
@@ -891,9 +962,9 @@ job_same_set() { # LIST LIST -> 0 when the two comma lists name the same members
 }
 job_iso() { if [ -n "${1:-}" ]; then date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; else printf 'none'; fi; }
 
-REPLACE_MOVED=0
-job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PROJECT LOG DRY GAIN: race one pending job again, and move it when that pays
-  local id=$1 jname=$2 parts=$3 qos=$4 cpus=$5 jmem=$6 tl=$7 tres=$8 excl=${9:--} need=${10} project=${11} log=${12} dry=${13} gain=${14}
+REPLACE_MOVED=0 REPLACE_RACED=1
+job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PROJECT LOG DRY GAIN FEATURES REASON: race one pending job again, and move it when that pays
+  local id=$1 jname=$2 parts=$3 qos=$4 cpus=$5 jmem=$6 tl=$7 tres=$8 excl=${9:--} need=${10} project=${11} log=${12} dry=${13} gain=${14} feats=${15:-} reason=${16:-}
   local class="" gpus=1 gpumem=0 archs="" rq="" kv gres=- n prefer=""
   for kv in $need; do case "$kv" in
     class=*) class=${kv#*=};; gpus=*) gpus=${kv#*=};; gpu_mem=*) gpumem=${kv#*=};; gpu_arch=*) archs=${kv#*=};; requeue=*) rq=${kv#*=};;
@@ -909,22 +980,39 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   [ -n "$excl" ] || excl=-
   local race_args=("--job-name=$jname" "--cpus-per-task=$cpus" "--mem=$jmem")
   [[ "$tl" =~ ^[0-9:-]+$ ]] && race_args+=("--time=$tl")
+  local from="$parts/$qos$([ "$gres" != - ] && echo " $gres")"
+  # (36) what the job asks of a node itself: the race asks with it and a move never takes it away. More than a list
+  # of features is held against no partition here, so such a job stays where its sender or Slurm put it
+  local asks
+  asks=$(job_features "$feats") || { REPLACE_RACED=0; [ "$dry" = 1 ] && echo "HPCW-JOB stays $id $jname $from: it asks $feats of a node, more than a list of features, which no partition is held to here"; return 0; }
   # where it stands now, each of its partitions asked alone, as the race asks the others, with the class's
-  # node feature (35) as the race asks with it
-  local cur="" at p now floor here=("${race_args[@]}") feature
+  # node feature (35) as the race asks with it; a partition sinfo shows cannot run it (36) is not asked, since
+  # sbatch --test-only may name a start there all the same
+  local cur="" at p now floor here=("${race_args[@]}") feature want misfits="" why asked=0
   feature=$(job_class_constraint "$class") || feature=""
-  [ -z "$feature" ] || here+=("--constraint=$feature")
+  want=$(job_features "$asks" "$feature") || want=$asks
+  [ -z "$want" ] || here+=("--constraint=$want")
   now=$(date +%s)
   for p in ${parts//,/ }; do
+    why=$(job_part_misfit "$p" "$want" "$tl")
+    if [ -n "$why" ]; then misfits="${misfits:+$misfits; }$why"; continue; fi
+    asked=1
     at=$(job_ask "$p" "$qos" "$gres" "$excl" "" "${here[@]}") || continue
     # (32) a job waiting for priority where it is waits at least as long again as it has: its own wait is the evidence
     floor=$(job_wait_floor "$p" "$qos" "$cpus" "$jmem" "$([ "$gres" = - ] && echo 0 || echo "$gpus")")
     [ "$floor" -gt 0 ] && [ "$at" -lt $((now + floor)) ] && at=$((now + floor))
     if [ -z "$cur" ] || [ "$at" -lt "$cur" ]; then cur=$at; fi
   done
-  job_need_place "$class" "$gpus" "$gpumem" "$archs" "$rq" "" "${race_args[@]}" || { echo "HPCW-JOB kept $id $jname: $PLACE_WHY"; return 0; }
+  PLACE_ASKS=$asks PLACE_LIMIT=${tl:--}
+  if ! job_need_place "$class" "$gpus" "$gpumem" "$archs" "$rq" "" "${race_args[@]}"; then
+    PLACE_ASKS="" PLACE_LIMIT=""
+    # a job no sbatch --test-only was asked for costs the pass none of its count (job_replace)
+    [ $asked = 0 ] && [ -z "$PLACE_TABLE" ] && REPLACE_RACED=0
+    echo "HPCW-JOB kept $id $jname: $PLACE_WHY"; return 0
+  fi
+  PLACE_ASKS="" PLACE_LIMIT=""
   local bp bq bpre bg bx; read -r bp bq bpre bg bx <<< "$PLACE_CHOICE"
-  local from="$parts/$qos$([ "$gres" != - ] && echo " $gres")" to
+  local to
   to="$(job_choice_text)"
   local what="estimate $(job_iso "$cur") -> $(job_iso "$PLACE_AT")"
   # a dry run says why each job stays, so a person can read the race the way the move would have
@@ -936,7 +1024,12 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
     [ "$cur" -le $((now + 120)) ] && { stays "about to start there"; return 0; }
     [ "$PLACE_AT" -lt $((cur - gain)) ] || { stays "$to starts it no sooner by ${gain} s"; return 0; }
   fi
-  if [ "$dry" = 1 ]; then echo "HPCW-JOB would-move $id $jname $from -> $to, $what"; return 0; fi
+  # (36) why it moves, on every line of the move: Slurm's own reason where the job can never start where it is, else
+  # what sinfo shows of the partitions it stands on, else the start it gains
+  local since="it starts sooner there by more than $gain s"
+  [ -n "$cur" ] || since=${misfits:-"sbatch --test-only names no start where it is"}
+  case "$reason" in BadConstraints|PartitionTimeLimit) since="it waits on $reason${misfits:+: $misfits}";; esac
+  if [ "$dry" = 1 ]; then echo "HPCW-JOB would-move $id $jname $from -> $to, $what, since $since"; return 0; fi
   local upd=("jobid=$id" "partition=$bp" "qos=$bq") out rc=0
   if [ "$bg" != - ]; then
     upd+=("gres=$bg")
@@ -945,16 +1038,17 @@ job_replace_one() { # ID NAME PARTITIONS QOS CPUS MEM TIME TRES EXCLUDED NEED PR
   # a job sent where it may be preempted must be requeued then, not ended (PreemptMode=REQUEUE ends a job
   # that may not requeue); only a job that never said --no-requeue is ever sent there
   [ "$bpre" = yes ] && upd+=("requeue=1")
-  # (35) the class's node feature goes with the move, so a job queued before the placement file named it takes it too
-  [ -n "${PLACE_CONSTRAINT:-}" ] && upd+=("features=$PLACE_CONSTRAINT")
+  # (35) the class's node feature goes with the move, so a job queued before the placement file named it takes it
+  # too, (36) beside what the job asks itself; one that asks the class's already keeps its features as they are
+  if [ -n "${PLACE_CONSTRAINT:-}" ]; then case "&$asks&" in *"&$PLACE_CONSTRAINT&"*) ;; *) upd+=("features=$want");; esac; fi
   out=$(scontrol update "${upd[@]}" 2>&1) || rc=$?
   local stamp jd; stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); jd="$STATE_DIR/jobs"
   if [ $rc = 0 ]; then
     REPLACE_MOVED=$((REPLACE_MOVED + 1))
-    echo "HPCW-JOB moved $id $jname $from -> $to, $what"
+    echo "HPCW-JOB moved $id $jname $from -> $to, $what, since $since"
     ( umask 077; mkdir -p "$jd/.moves" && echo "$now" >> "$jd/.moves/${id%%_*}"
-      echo "$stamp moved $id $jname $from -> $to, $what" >> "$jd/replace.log" ) 2>/dev/null
-    [ -n "$log" ] && [ -f "$log" ] && echo "== hpcworker $stamp: moved while pending from $from to $to, $what" >> "$log" 2>/dev/null
+      echo "$stamp moved $id $jname $from -> $to, $what, since $since" >> "$jd/replace.log" ) 2>/dev/null
+    [ -n "$log" ] && [ -f "$log" ] && echo "== hpcworker $stamp: moved while pending from $from to $to, $what, since $since" >> "$log" 2>/dev/null
     return 0
   fi
   out=$(printf '%s' "$out" | job_clean | tr '\n' ' ' | sed 's/[[:space:]]*$//')
@@ -990,6 +1084,9 @@ job_replace() {
   # account's own pending jobs again (those hpcworker placed, and with --runners the autoscaler's runner
   # jobs) and moves one, in place with scontrol update, which keeps its id and whatever waits on it, when
   # another placement would start it sooner by more than --gain seconds.
+  # Framework 36: it never strands one. A job is raced with the node features it asks itself, over the partitions
+  # sinfo shows can run it (job_part_misfit), and one that waits where it can never start (BadConstraints, or
+  # PartitionTimeLimit) is raced too, ahead of the others, and moved where it can run or left where it is.
   local projects=() only=" " runners=0 dry=0 gain=${HPCW_REPLACE_GAIN:-300} age=${HPCW_REPLACE_AGE:-120} hold=${HPCW_REPLACE_HOLD:-600} most=${HPCW_REPLACE_MAX:-20}
   while [ $# -gt 0 ]; do case "$1" in
     --project) projects+=("${2:-}"); shift 2 || job_usage;;
@@ -1011,9 +1108,13 @@ job_replace() {
     local f; for f in "$STATE_DIR"/jobs/*/jobs.tsv; do [ -s "$f" ] && projects+=("$(basename "$(dirname "$f")")"); done
   fi
   local own; own=$(job_own_jobs) || { echo "HPCW-JOB replace: squeue did not answer; nothing was moved"; return 1; }
-  local now id jname st parts qos reason cpus jmem tl tres excl sub dep line need project log at last looked=0 base target
+  local now id jname st parts qos reason cpus jmem tl tres excl sub dep feats line need project log at last looked=0 raced=0 base target
+  # (36) the jobs that can never start where they stand come first, so the pass's count never runs out ahead of
+  # them; one sinfo, read here, serves every race of the pass
+  own=$(printf '%s\n' "$own" | awk -F'|' '$6 == "BadConstraints" || $6 == "PartitionTimeLimit"'; printf '%s\n' "$own" | awk -F'|' '$6 != "BadConstraints" && $6 != "PartitionTimeLimit"')
+  job_part_rows > /dev/null
   now=$(date +%s)
-  while IFS='|' read -r id jname st parts qos reason cpus jmem tl tres excl sub dep; do
+  while IFS='|' read -r id jname st parts qos reason cpus jmem tl tres excl sub dep feats; do
     [ "$st" = PENDING ] || continue
     # an array's waiting tasks, as squeue lists them (123_[5-7%4], or 123_5 once one has been moved), are raced
     # as one under the array's record; each is a worker that may start on any card that fits
@@ -1021,7 +1122,7 @@ job_replace() {
     [[ "$base" =~ ^[0-9]{1,12}$ ]] || continue
     if [ "$id" != "$base" ]; then target=$(job_array_tasks "$base" "${id#*_}") || continue; fi
     [ "$only" = " " ] || case "$only" in *" $base "*) ;; *) continue;; esac   # --job: these alone
-    case "$reason" in Priority|Resources|ReqNodeNotAvail*|QOS*) ;; *) continue;; esac
+    case "$reason" in Priority|Resources|ReqNodeNotAvail*|QOS*|BadConstraints|PartitionTimeLimit) ;; *) continue;; esac
     case "$dep" in ""|"(null)") ;; *) continue;; esac  # one that waits on another job is not waiting for a card
     [ -f "$(move_record_dir)/$base" ] && continue  # (34) moved at a checkpoint: its start or return is job_move_running's
     need="" project="" line="" log=""
@@ -1036,10 +1137,14 @@ job_replace() {
     [ $((now - at)) -ge "$age" ] || continue
     last=$(tail -n 1 "$STATE_DIR/jobs/.moves/$base" 2>/dev/null)
     [[ "$last" =~ ^[0-9]+$ ]] && [ $((now - last)) -lt "$hold" ] && continue
-    looked=$((looked + 1)); [ "$looked" -le "$most" ] || break
-    job_replace_one "$target" "$jname" "$parts" "$qos" "$cpus" "$jmem" "$tl" "$tres" "$excl" "$need" "$project" "$log" "$dry" "$gain" < /dev/null
+    # the count of a pass bounds what it asks of sbatch --test-only: a job nothing was asked for (36: no partition
+    # it may take can run it, or it asks more than a list of features) is looked at and costs none of it
+    [ "$raced" -lt "$most" ] || break
+    looked=$((looked + 1)); REPLACE_RACED=1
+    job_replace_one "$target" "$jname" "$parts" "$qos" "$cpus" "$jmem" "$tl" "$tres" "$excl" "$need" "$project" "$log" "$dry" "$gain" "$feats" "$reason" < /dev/null
+    raced=$((raced + REPLACE_RACED))
   done <<< "$own"
-  echo "HPCW-JOB replace looked at $((looked > most ? most : looked)) pending job(s), moved $REPLACE_MOVED"
+  echo "HPCW-JOB replace looked at $looked pending job(s), moved $REPLACE_MOVED"
   # (34) then the running ones: each placed GPU job just after a checkpoint, moved where a free card runs it faster
   job_move_running "$dry" "$gain" "$only" ${projects[@]+"${projects[@]}"}
 }
