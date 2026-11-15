@@ -127,6 +127,11 @@
 # (--containall --cleanenv --no-mount bind-paths), only its own copy of the runner's files and a
 # /tmp on the node's own disk. The install job runs on the chain's queue.
 #
+# The site placement file's "bind runner DIR" lines (framework/profiles/S.placement) name folders every
+# chain and the controller bind as if --ro-bind named them, each once beside the ones it names, so a restart
+# without --ro-bind keeps the site's prebuilt check environment; HPCW_RUNNER_SITE_BINDS, when set, names the
+# folders in their place (empty: none). A site folder is checked by its form alone where the command runs.
+#
 # --ro-bind DIR (--start and --autoscale, repeatable): DIR is bound into every runner's container
 # read-only at its own path, so a check can run a prebuilt environment kept on the lab volume (a
 # pixi or conda folder, say) and sees nothing else of the volume. DIR is an absolute folder that
@@ -278,13 +283,16 @@ fi
 case "$MODE" in autoscale|control|train|trainjob) [ -n "$REPOS" ] || die "--${MODE/trainjob/train-job} needs --repos OWNER/NAME[,OWNER/NAME...]";; esac
 [ -z "$MEM" ] || [[ "$MEM" =~ ^[0-9]+[KMGTkmgt]?$ ]] || die "bad --mem $MEM (as sbatch takes it: 8G)"
 [ -z "$GRES" ] || [[ "$GRES" =~ ^[A-Za-z0-9:._,-]+$ ]] || die "bad --gres $GRES"
-ro_bind_ok() { # DIR: a folder the runner's container may see read-only, never the home nor what holds it
+ro_bind_ok() { # DIR: ro_bind_form's folder, and one that is here when a chain or the controller is started
+  ro_bind_form "$1"
+  case "$MODE" in start|autoscale) [ -d "$1" ] || die "--ro-bind $1 is no folder here";; esac
+}
+ro_bind_form() { # DIR: a folder the runner's container may see read-only, never the home nor what holds it
   local h=${HOME%/}
   [[ "$1" =~ ^(/[A-Za-z0-9._-]+)+$ ]] || die "--ro-bind takes an absolute folder named with letters, digits, . _ and - alone: $1"
   case "$1/" in */./*|*/../*) die "--ro-bind takes a folder with no . or .. in its path: $1";; esac
   case "$1/" in "$h"/*) die "--ro-bind $1 is in the account's home, which the container never sees";; esac
   case "$h/" in "$1"/*) die "--ro-bind $1 holds the account's home, which the container never sees";; esac
-  case "$MODE" in start|autoscale) [ -d "$1" ] || die "--ro-bind $1 is no folder here";; esac
 }
 for rb in ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do ro_bind_ok "$rb"; done
 case "$MODE" in start|stop|serve|once|gatekey|gateoff|gatesetup) [ -n "$REPO" ] || die "--$MODE needs --repo OWNER/NAME";; esac
@@ -311,10 +319,24 @@ site_profile() {
   [ -n "${HPCW_RUNNER_QOS:-}" ] || HPCW_RUNNER_QOS=$(prof_get qos_batch) || die "profile $f unreadable"
   STATE_DIR=$(prof_get shared_state_dir) || die "profile $f unreadable"
   [ $CONSTRAINT_GIVEN = 1 ] || CONSTRAINT=$(site_constraint)
+  case "$MODE" in start|autoscale) site_binds_add;; esac
 }
 site_constraint() { # the site placement file's "constraint runner FEATURE", nothing where it names none
   awk '$1 == "constraint" && $2 == "runner" { print $3; exit }' "$FW/profiles/$SITE.placement" 2>/dev/null
   return 0
+}
+site_binds() { # the site placement file's "bind runner DIR" folders, one a line; HPCW_RUNNER_SITE_BINDS, when set, in their place
+  if [ -n "${HPCW_RUNNER_SITE_BINDS+x}" ]; then printf '%s\n' $HPCW_RUNNER_SITE_BINDS; return 0; fi
+  awk '$1 == "bind" && $2 == "runner" && NF == 3 { print $3 }' "$FW/profiles/$SITE.placement" 2>/dev/null
+  return 0
+}
+site_binds_add() { # the site's runner folders join --ro-bind's, each once, checked by form: each node's probe says whether it is there
+  local rb
+  while IFS= read -r rb; do
+    [ -n "$rb" ] || continue
+    case " ${RO_BINDS[*]-} " in *" $rb "*) continue;; esac
+    ro_bind_form "$rb"; RO_BINDS+=("$rb")
+  done < <(site_binds)
 }
 case "$MODE" in install|start|stop|status|autoscale|autostop|train|trainstop|gatekey|gateoff|gatesetup) [ -z "$SITE" ] || site_profile;; esac
 [[ "${HPCW_RUNNER_PARTITION:-}${HPCW_RUNNER_QOS:-}" =~ ^[A-Za-z0-9._,-]*$ ]] || die "bad --partition or --qos"
@@ -340,6 +362,7 @@ SB_ENV=(env -u GITHUB_TOKEN -u GH_TOKEN); case "$MODE" in serve|pull|once|contro
 SB() { "${SB_ENV[@]}" "$SBATCH" "$@"; }
 SQ() { "${SB_ENV[@]}" "$SQUEUE" "$@"; }
 SC() { "${SB_ENV[@]}" "$SCANCEL" "$@"; }
+SACCT=$(slurm_bin sacct 2>/dev/null) || SACCT=sacct
 # a network call that hangs must not hold a job's minute (or a person's terminal) for ever
 # (--gate-setup sets NET_FG: a person's Ctrl-C must reach gh, which a timeout's own process group would hide)
 net() { if command -v timeout >/dev/null 2>&1; then timeout ${NET_FG:+--foreground} 300 "$@"; else "$@"; fi; }
@@ -954,40 +977,75 @@ chain_served() { rm -f "$CHAIN/failures"; }
 
 # Before a runner job registers, unregisters or asks GitHub anything, its node is probed: the runner's folder
 # and every --ro-bind folder give a listing within HPCW_RUNNER_PROBE_SECS seconds (10), and the node's /tmp,
-# where the runner's work folder is made, has HPCW_RUNNER_MIN_FREE_GB free (20). A node that fails is one line
-# of <runner dir>/bad-nodes (the time, the node, the job, the reason), and every runner job submitted in the
-# next HPCW_RUNNER_BAD_HOURS hours (3), the controller's and a chain's successor alike, is kept off it with
-# --exclude (2026-11-14: checks failed for runner jobs whose container had no /rs, and runners warned of 63 MB
-# left). It is not counted as a failure to serve: the node is kept off, so no later job meets it.
+# where the runner's work folder is made, has HPCW_RUNNER_MIN_FREE_GB free (20); a listing that errs and one
+# that does not come back in time are said apart (error, timeout). A node that fails is one line of
+# <runner dir>/bad-nodes (the time, the node, the job, the reason), written within HPCW_RUNNER_PROBE_SECS
+# seconds or left, and a chain's job queues its successor within HPCW_RUNNER_QUEUE_SECS seconds (60) or leaves
+# it, since both sit on the volume the node may have lost. Every runner job submitted in the next
+# HPCW_RUNNER_BAD_HOURS hours (3), the controller's and a chain's successor alike, is kept off it with
+# --exclude, and off each node where a runner job of the same submitter failed within two minutes, ended in
+# this refusal (exit 5) or lost its node, as sacct says, since a node that lost the volume writes no line
+# there. A check that lands on a node without the lab's folders fails however it is written, so the node is
+# kept off; it is not counted as a failure to serve, since no later job meets it.
 PROBE_WHY=""
-read_within() { # DIR -> 0 when a listing of DIR comes back good in time; a read that hangs is left behind, never waited for
+read_within() { # DIR -> 0 when a listing comes back good in time; 1 when it errs (READ_ERR says how); 2 when none comes in time
   local fd r=""
-  exec {fd}< <(ls -f -- "$1" > /dev/null 2>&1; echo "$?")
-  read -r -t "${HPCW_RUNNER_PROBE_SECS:-10}" -u "$fd" r
+  exec {fd}< <(e=$(ls -f -- "$1" 2>&1 > /dev/null); rc=$?; printf '%s %s\n' "$rc" "$(printf '%s' "$e" | tr '\n' ' ' | cut -c1-200)")
+  read -r -t "${HPCW_RUNNER_PROBE_SECS:-10}" -u "$fd" r || { exec {fd}<&-; return 2; }
   exec {fd}<&-
+  READ_ERR=${r#* }
+  [ "${r%% *}" = 0 ] || return 1
+}
+within() { # SECS CMD...: 0 when CMD ends well within SECS seconds, its output in this job's log; 2 when it has not, left behind, never waited for
+  local secs=$1 fd o r=""; shift
+  exec {o}>&1
+  exec {fd}< <("$@" 1>&"$o"; echo "$?")
+  read -r -t "$secs" -u "$fd" r || { exec {fd}<&- {o}>&-; return 2; }
+  exec {fd}<&- {o}>&-
   [ "$r" = 0 ]
 }
 node_probe() { # 0 when this node can serve a runner; else PROBE_WHY says why
-  local d free floor=${HPCW_RUNNER_MIN_FREE_GB:-20}
+  local d free floor=${HPCW_RUNNER_MIN_FREE_GB:-20} secs=${HPCW_RUNNER_PROBE_SECS:-10}
   for d in "$ROOT" ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do
-    read_within "$d" || { PROBE_WHY="$d gave no listing within ${HPCW_RUNNER_PROBE_SECS:-10} s"; return 1; }
+    read_within "$d" && continue
+    if [ $? = 2 ]; then PROBE_WHY="$d gave no listing within $secs s (timeout)"; else PROBE_WHY="$d could not be listed (error: $READ_ERR)"; fi
+    return 1
   done
   free=$(df -Pk /tmp 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }')
   [ -n "$free" ] || { PROBE_WHY="df gave no free space for /tmp"; return 1; }
   [ "$free" -ge $((floor * 1048576)) ] || { PROBE_WHY="/tmp has $((free / 1024)) MB free, under the floor of $floor GB"; return 1; }
 }
-node_refused() { # the node failed its probe: written down, said in one line, and a chain's successor queued off it
-  local node="${SLURMD_NODENAME:-$(hostname -s)}"
-  printf '%s %s %s %s\n' "$(now)" "$node" "$SLURM_JOB_ID" "$PROBE_WHY" >> "$ROOT/bad-nodes"
+append_line() { printf '%s\n' "$1" >> "$2"; }   # LINE FILE
+node_refused() { # the node failed its probe: written down and its successor queued, each within its time, and said in one line
+  local node="${SLURMD_NODENAME:-$(hostname -s)}" secs=${HPCW_RUNNER_PROBE_SECS:-10} qsecs=${HPCW_RUNNER_QUEUE_SECS:-60}
+  within "$secs" append_line "$(now) $node $SLURM_JOB_ID $PROBE_WHY" "$ROOT/bad-nodes" \
+    || log "bad-nodes took no line within $secs s: the submitting side keeps $node off by sacct alone"
   log "node $node fails the runner's probe ($PROBE_WHY): nothing registered; runner jobs are kept off it until $(iso $(( $(now) + ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 )))"
   status_write failed "node $node fails the runner's probe: $PROBE_WHY"
   [ "$MODE" = once ] && return 0
-  job_args; successor
+  job_args
+  within "$qsecs" successor; [ $? != 2 ] || log "the next job was not queued within $qsecs s: the queuing is left behind, never waited for"
 }
-bad_nodes() { # the nodes a runner job failed its probe on in the last HPCW_RUNNER_BAD_HOURS hours (3), comma-joined
+bad_nodes_file() { # the nodes bad-nodes names in the last HPCW_RUNNER_BAD_HOURS hours (3), one a line
   [ -f "$ROOT/bad-nodes" ] || return 0
-  awk -v t="$(( $(now) - ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 ))" '$1 ~ /^[0-9]+$/ && $1 >= t && $2 ~ /^[A-Za-z0-9_.-]+$/ && !($2 in s) {
-    s[$2] = 1; o = o (o == "" ? "" : ",") $2 } END { printf "%s", o }' "$ROOT/bad-nodes"
+  awk -v t="$(( $(now) - ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 ))" '$1 ~ /^[0-9]+$/ && $1 >= t && $2 ~ /^[A-Za-z0-9_.-]+$/ { print $2 }' "$ROOT/bad-nodes"
+}
+runner_names() { # the Slurm names of the runner jobs this submitter queues: its chain's, or the controller's one a repository
+  local r o=""
+  [ "$MODE" = serve ] && o=$JOB_NAME
+  for r in ${REPOS//,/ }; do o="$o${o:+,}$(auto_name "$r")"; done
+  printf '%s' "$o"
+}
+sacct_nodes() { # nodes where this submitter's runner jobs failed within two minutes, ended in the probe's refusal or lost their node, one a line
+  local names since to=(); names=$(runner_names); [ -n "$names" ] || return 0
+  since=$(date -u -d "@$(( $(now) - ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 ))" +%FT%T 2>/dev/null) || return 0
+  command -v timeout > /dev/null 2>&1 && to=(timeout 30)
+  ${to[@]+"${to[@]}"} "${SB_ENV[@]}" "$SACCT" -X -n -P -u "$USER" --name "$names" -S "$since" -o NodeList,State,ExitCode,Elapsed 2>/dev/null |
+    awk -F'|' '$1 ~ /^[A-Za-z0-9_.-]+$/ && ($2 == "NODE_FAIL" || ($2 == "FAILED" && ($3 == "5:0" || $4 ~ /^00:0[01]:[0-5][0-9]$/))) { print $1 }'
+  return 0
+}
+bad_nodes() { # the nodes runner jobs are kept off, comma-joined: bad-nodes' and sacct's, each once
+  { bad_nodes_file; sacct_nodes; } | awk 'NF && !($1 in s) { s[$1] = 1; o = o (o == "" ? "" : ",") $1 } END { printf "%s", o }'
 }
 keep_off() { # FLAG...: the flags again, one a line, an --exclude among them joined with the nodes kept off into one
   local f ex; ex=$(bad_nodes)

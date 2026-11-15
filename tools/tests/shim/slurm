@@ -123,7 +123,7 @@ if [ "$me" = sacct ]; then
     [ -z "$ids" ] || case ",$ids," in *",$J,"*) ;; *) continue;; esac
     [ -z "$names" ] || case ",$names," in *",$nm,"*) ;; *) continue;; esac
     row=""; IFS=, read -r -a fl <<< "$fields"
-    for f in "${fl[@]}"; do case "$f" in JobID) v=$J;; JobName) v=$nm;; State) v=$(fld "$J" state);; *) v="";; esac; row="$row${row:+$sep}$v"; done
+    for f in "${fl[@]}"; do case "$f" in JobID) v=$J;; JobName) v=$nm;; State) v=$(fld "$J" state);; NodeList) v=$(fld "$J" node);; ExitCode) v=$(fld "$J" exitcode);; Elapsed) v=$(fld "$J" elapsed);; *) v="";; esac; row="$row${row:+$sep}$v"; done
     printf '%s\n' "$row"
   done
   exit 0

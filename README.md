@@ -314,7 +314,7 @@ an EL7 node is not, hence a container) as a SIF under the folder's `image/` and 
 it once, so a flag the site's Apptainer refuses is seen there and never in a chain; `--start --repo
 OWNER/NAME --site wayne` starts the chain (`--hours`, `--margin`, `--cpus`, `--mem`, `--gres`,
 `--labels`; with `--gres` naming a GPU the container is given it, `--nv`). A step never reaches the
-scheduler or the home, nor the lab volume beyond the folders `--ro-bind DIR` names, each bound
+scheduler or the home, nor the lab volume beyond the folders `--ro-bind DIR` and the site placement file's `bind runner DIR` lines name, each bound
 read-only at its own path (a prebuilt environment a check runs, say; never the home, a folder in it
 or one holding it): a job it queued as the account could read all the account holds, the `gh`
 sign-in and the Claude login among them.
@@ -344,7 +344,7 @@ job taken. It never holds more than `--max-per-repo` runner jobs for one reposit
 (12), pending ones counted, read again at every look from `autoscale/autoscale.conf` under the runner's folder,
 where a person may change them up to 1000 each (a value above is held to 1000, and logged), Slurm's own limits on the
 account's jobs being the ceiling past that; the runner jobs take the site's CPU batch queue alone; `--status` shows it, and `--autoscale-stop` ends it, cancelling the controller's
-queued job and every runner job not yet started. Before a runner job registers anything it probes its node: its runner folder and every `--ro-bind` folder give a listing within `HPCW_RUNNER_PROBE_SECS` seconds (10) and the node's `/tmp` has `HPCW_RUNNER_MIN_FREE_GB` free (20); a node that fails is one line of `bad-nodes` under the runner's folder (the time, the node, the job, the reason), the job ends with nothing registered (exit 5), and every runner job submitted in the next `HPCW_RUNNER_BAD_HOURS` hours (3), the controller's and a chain's successor alike, is kept off it with `--exclude`. Every job of a chain and every runner job the autoscaler submits asks
+queued job and every runner job not yet started. Before a runner job registers anything it probes its node: its runner folder and every `--ro-bind` folder give a listing within `HPCW_RUNNER_PROBE_SECS` seconds (10, a listing that errs said apart from one that times out) and the node's `/tmp` has `HPCW_RUNNER_MIN_FREE_GB` free (20); a node that fails is one line of `bad-nodes` under the runner's folder (the time, the node, the job, the reason), written within that time or left, its successor queued within `HPCW_RUNNER_QUEUE_SECS` seconds (60) or left; the submitting side also keeps runner jobs off each node where one of its own failed within two minutes, ended in the probe's refusal or lost its node, as `sacct` says, since a node that lost the volume writes no line, the job ends with nothing registered (exit 5), and every runner job submitted in the next `HPCW_RUNNER_BAD_HOURS` hours (3), the controller's and a chain's successor alike, is kept off it with `--exclude`. Every job of a chain and every runner job the autoscaler submits asks
 for nodes with the feature the site placement file's `constraint runner FEATURE` line names (`avx2` at Wayne State:
 SchwingNet's serial check ran 25 to 56 minutes on the 4-socket Opterons without it, 8 to 14 elsewhere, framework
 35), or the one `--constraint FEATURE` names; a chain started before keeps what it was started with until it is
