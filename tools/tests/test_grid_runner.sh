@@ -30,7 +30,7 @@ if [ -n "${KEEP_T:-}" ]; then echo "keeping $T"; else trap cleanup EXIT; fi
 export HOME="$T/home" USER=${USER:-$(id -un)}
 mkdir -p "$HOME" "$T/bin"
 for s in slurm gh nosleep apptainer; do cp "$SHIMS/$s" "$T/bin/$s.shim" && chmod 755 "$T/bin/$s.shim"; done
-for s in sbatch squeue scancel; do ln -s slurm.shim "$T/bin/$s"; done
+for s in sbatch squeue scancel sacct; do ln -s slurm.shim "$T/bin/$s"; done
 ln -s gh.shim "$T/bin/gh"; ln -s nosleep.shim "$T/bin/sleep"; ln -s apptainer.shim "$T/bin/apptainer"
 # a login node's banner may ban programs by name (framework/README.md, "The login node"): every
 # person's command here runs with a stand-in for each of them first on PATH, which writes down any
@@ -43,6 +43,7 @@ export PATH="$T/bin:$PATH" SHIM_SLURM="$T/slurm" SHIM_SLURM_ROOT="$T" SHIM_GH="$
 export HPCW_RUNNER_DIR="$T/runner"   # never the lab volume's default
 export HPCW_RUNNER_CLOCK="$T/clock"
 export HPCW_RUNNER_HPCWORKER=none   # the fixed batch queue unless a test names an hpcworker, so the checkout's own never races here
+export HPCW_RUNNER_MIN_FREE_GB=0    # the probe's disk floor, which a test names where it is tested: the test's machine may hold less than a node
 unset HPCW_RUNNER_PARTITION HPCW_RUNNER_QOS SLURM_JOB_ID SLURM_JOB_START_TIME SLURM_JOB_END_TIME TMPDIR
 export GITHUB_TOKEN=ghp_testtoken_must_not_leak GH_TOKEN=gho_testtoken_must_not_leak
 mkdir -p "$T/slurm" "$T/gh" "$T/apptainer/tree/home/runner/bin"
@@ -71,6 +72,9 @@ all() { local p; for p in "$@"; do has "$p" || return 1; done; }
 lacks() { ! has "$1"; }
 rc_is() { [ "$RC" = "$1" ]; }
 TO=(); command -v timeout >/dev/null 2>&1 && TO=(timeout 120)
+# the site placement file's runner folders are the grid's, never this machine's: every command here names its
+# own, and the test of the site's folder below reads them as the site gives them
+export HPCW_RUNNER_SITE_BINDS=
 gr() { OUT=$(PATH="$T/banned:$PATH" ${TO[@]+"${TO[@]}"} bash "$GR" "$@" 2>&1); RC=$?; }
 J() { cat "$T/slurm/jobs/$1/$2" 2>/dev/null; }
 ids() { local j; for j in $(ls "$T/slurm/jobs" 2>/dev/null | sort -n); do [[ "$(J "$j" name)" =~ $1 ]] && echo "$j"; done; return 0; }
@@ -432,9 +436,18 @@ run_job "$B2"; t "  and meeting the lane's STOP" has 'STOP is set'
 gr --start --repo OpenSpineConsortium/other --site wayne --lane 3 --ro-bind "$RB"; B3=$(newest "$L3NAME")
 mv "$RB" "$RB.gone"; clear_runs; plan stop
 run_job "$B3"
-t "a node without the folder runs the container without it" bash -c "[ '$RC' = 0 ] && [ -s '$T/apptainer/binds' ] && ! grep -q '$RB' '$T/apptainer/binds'"
-t "  and its log says so" has "--ro-bind $RB is not on [^ ]+: the container goes without it"
-mv "$RB.gone" "$RB"; run_job "$(newest "$L3NAME")"; t "  its successor meets the lane's STOP" has 'STOP is set'
+t "a node without the folder fails its probe, running no container" bash -c "[ '$RC' = 5 ] && [ ! -s '$T/apptainer/binds' ]"
+t "  and its log says so, as an error" has "node [^ ]+ fails the runner's probe \($RB could not be listed \(error: [^)]*\)\): nothing registered"
+t "  having registered nothing" lacks 'registered runner'
+B4=$(newest "$L3NAME")
+t "  its successor queued, kept off the node" bash -c "[ '$B4' != '$B3' ] && grep -q -- '--exclude=$(hostname -s) ' '$T/slurm/jobs/$B4/extra'"
+mv "$RB.gone" "$RB"; mkdir -p "$T/slowls"
+printf '#!/bin/sh\ncase "$*" in *"%s"*) exec /bin/sleep 5;; esac\nexec /bin/ls "$@"\n' "$RB" > "$T/slowls/ls"; chmod 755 "$T/slowls/ls"
+clear_runs; run_job "$B4" PATH="$T/slowls:$PATH" HPCW_RUNNER_PROBE_SECS=1
+t "a node whose folder gives no listing in time fails its probe, running no container" bash -c "[ '$RC' = 5 ] && [ ! -s '$T/apptainer/binds' ]"
+t "  and its log says so as a timeout, apart from an error" has "node [^ ]+ fails the runner's probe \($RB gave no listing within 1 s \(timeout\)\): nothing registered"
+rm -f "$R/bad-nodes"; date -u +%FT%TZ > "$OCH+lane3/STOP"
+run_job "$B4"; t "  its successor meets the lane's STOP" has 'STOP is set'
 
 echo "== autoscale: one runner job for each queued job"
 pending() { local j; for j in $(ids "$1"); do [ "$(J "$j" state)" = PENDING ] && echo "$j"; done; return 0; }
@@ -518,6 +531,18 @@ t "a chain still starts beside it" [ -n "$L4" ]; gr --stop --repo OpenSpineConso
 gr --autoscale --repos "$GH_REPO" --site wayne; t "--autoscale after a stop starts again" rc_is 0; t "  and takes STOP away" [ ! -e "$AU/STOP" ]
 gr --autoscale-stop --site wayne --now; t "--autoscale-stop --now cancels the running controller too" has 'cancelled job'
 
+echo "== the site placement file's runner folder: --autoscale with no --ro-bind keeps it"
+# the folder is the grid's own, so the test's sbatch refuses the controller's job for naming it, as it refuses
+# every real cluster path: what is read is that the folder reached autoscale.conf and the controller's sbatch line
+WRB=$(awk '$1 == "bind" && $2 == "runner" { print $3; exit }' "$REPO/framework/profiles/wayne.placement")
+t "no sbatch call was refused before the site's folder is read" [ ! -e "$T/slurm/refused" ]
+OUT=$(env -u HPCW_RUNNER_SITE_BINDS PATH="$T/banned:$PATH" ${TO[@]+"${TO[@]}"} bash "$GR" --autoscale --repos "$GH_REPO" --site wayne 2>&1); RC=$?
+t "--autoscale --site wayne with no --ro-bind writes the site's folder into autoscale.conf" bash -c "[ -n '$WRB' ] && grep -qx 'ro_binds=$WRB' '$AU/autoscale.conf'"
+t "  and asks sbatch for the controller with it" [ "$(grep -- '^sbatch .*--job-name hpcw_autoscale ' "$T/slurm/calls" | tail -n 1 | tr '[:space:]' ' ' | grep -c -- " --ro-bind $WRB ")" = 1 ]
+t "  which the test's sbatch refuses only for naming a real cluster path" bash -c "[ -s '$T/slurm/refused' ] && ! grep -v -- 'a real cluster path in .*--job-name hpcw_autoscale ' '$T/slurm/refused'"
+rm -f "$T/slurm/refused"   # that one refusal was asked for; the end of the test still finds any other
+gr --autoscale-stop --site wayne --now
+
 echo "== autoscale: runner jobs placed by hpcworker's race, and pending jobs placed again"
 # a stand-in for framework/bin/hpcworker: its version, a placement on prip/primary (or none, STANDIN_PLACE=fail)
 # and one move by job replace, each call written down; it never sees a token
@@ -587,6 +612,52 @@ echo "$AU/$TPL/jobs/$U8" > "$T/apptainer/chain"; clear_runs; plan done
 run_job "$U8"
 t "  which runs its runner with the folder read-only at its own path" bash -c "[ '$RC' = 0 ] && grep -qx '$RB $RB ro' '$T/apptainer/binds'"
 gr --autoscale-stop --site wayne --now
+
+echo "== a node that fails the runner's probe: nothing registered, and runner jobs kept off it for a time"
+PNAME='^hpcw_runner_OpenSpineConsortium-probe$'; HN=$(hostname -s); echo 1000000 > "$T/clock"; rm -f "$R/bad-nodes"
+gr --start --repo OpenSpineConsortium/probe --site wayne; P1=$(newest "$PNAME")
+clear_runs; run_job "$P1" HPCW_RUNNER_MIN_FREE_GB=1000000000
+t "a job whose node has less free disk than the floor ends at once" rc_is 5
+t "  saying the node and why in one line" has "node $HN fails the runner's probe \(/tmp has [0-9]+ MB free, under the floor of 1000000000 GB\): nothing registered"
+t "  having registered nothing and run no container" bash -c "[ ! -s '$T/apptainer/runs' ] && ! grep -q 'registered runner' '$(J "$P1" out)'"
+t "  the node written down with the time, the job and the reason" grep -q "^1000000 $HN $P1 /tmp has [0-9]* MB free" "$R/bad-nodes"
+P2=$(newest "$PNAME")
+t "  its successor queued, kept off the node" bash -c "[ '$P2' != '$P1' ] && grep -q -- '--exclude=$HN ' '$T/slurm/jobs/$P2/extra'"
+echo "$((1000000 - 4 * 3600)) $HN $P1 an older reason" > "$R/bad-nodes"
+echo "$R/OpenSpineConsortium-probe" > "$T/apptainer/chain"; clear_runs; plan done stop
+run_job "$P2"
+t "a node whose failure is older than the window serves again" bash -c "[ '$RC' = 0 ] && grep -q '1 GitHub jobs ran' '$(J "$P2" out)'"
+P3=$(newest "$PNAME")
+t "  and the next job is kept off no node" bash -c "[ '$P3' != '$P2' ] && ! grep -q -- '--exclude' '$T/slurm/jobs/$P3/extra'"
+run_job "$P3"; t "  and meets the chain's STOP" has 'STOP is set'
+echo "== a node where a runner job of the chain failed at once is kept off too, as sacct says, where bad-nodes holds nothing"
+rm -f "$R/bad-nodes"
+for f in 0998 0999; do mkdir -p "$T/slurm/jobs/$f"; echo hpcw_runner_OpenSpineConsortium-probe > "$T/slurm/jobs/$f/name"; echo FAILED > "$T/slurm/jobs/$f/state"; done
+echo lostnode1 > "$T/slurm/jobs/0999/node"; echo 0:53 > "$T/slurm/jobs/0999/exitcode"; echo 00:00:04 > "$T/slurm/jobs/0999/elapsed"
+echo busynode1 > "$T/slurm/jobs/0998/node"; echo 1:0 > "$T/slurm/jobs/0998/exitcode"; echo 01:10:00 > "$T/slurm/jobs/0998/elapsed"
+gr --start --repo OpenSpineConsortium/probe --site wayne; P4=$(newest "$PNAME")
+echo "$R/OpenSpineConsortium-probe" > "$T/apptainer/chain"; clear_runs; plan done stop
+run_job "$P4"; P5=$(newest "$PNAME")
+t "a chain's successor is kept off the node where a runner job of the chain failed at once" bash -c "[ '$P5' != '$P4' ] && grep -q -- '--exclude=lostnode1' '$T/slurm/jobs/$P5/extra'"
+t "  and not off one where a runner job failed after an hour's work" bash -c "! grep -q busynode1 '$T/slurm/jobs/$P5/extra'"
+run_job "$P5"; t "  and meets the chain's STOP" has 'STOP is set'
+rm -rf "$T/slurm/jobs/0998" "$T/slurm/jobs/0999"
+rm -f "$R/bad-nodes"
+echo "== a refused node whose status.json takes no state in time still queues its successor, never waiting for the write"
+# status.json sits on the volume the node may have lost: its rename hangs here as it would on a hung volume
+mkdir -p "$T/slowmv"
+printf '#!/bin/sh\ncase "$*" in *status.json*) exec /bin/sleep 30;; esac\nexec /bin/mv "$@"\n' > "$T/slowmv/mv"; chmod 755 "$T/slowmv/mv"
+gr --start --repo OpenSpineConsortium/probe --site wayne; P6=$(newest "$PNAME")
+clear_runs; s0=$SECONDS
+run_job "$P6" PATH="$T/slowmv:$PATH" HPCW_RUNNER_PROBE_SECS=1 HPCW_RUNNER_MIN_FREE_GB=1000000000
+took=$((SECONDS - s0)); P7=$(newest "$PNAME")
+t "a refused node whose status.json hangs still ends as a refusal" rc_is 5
+t "  saying the state was left behind" has "status.json took no state within 1 s"
+t "  its successor queued, kept off the node" bash -c "[ '$P7' != '$P6' ] && grep -q -- '--exclude=$HN ' '$T/slurm/jobs/$P7/extra'"
+t "  in far less time than the hung write takes" [ "$took" -lt 20 ]
+echo "$R/OpenSpineConsortium-probe" > "$T/apptainer/chain"; clear_runs; plan done stop; rm -f "$R/bad-nodes"
+run_job "$P7"; t "  and the successor meets the chain's STOP" has 'STOP is set'
+rm -f "$R/bad-nodes"
 
 echo "== the merge train"
 TR="$R/train"; sha() { printf '%040d' "$1"; }
@@ -678,7 +749,7 @@ t "no registration was minted over an earlier one's files" bash -c "[ ! -s '$T/g
 OUT=$(cat "$T/banned.calls" 2>/dev/null); t "no person's command started a program a login node may ban" [ ! -s "$T/banned.calls" ]
 
 echo "== the ssh gate: tools/tests/test_grid_gate.sh, in an environment of its own"
-OUT=$(env -i HOME=/tmp USER="$USER" PATH=/usr/local/bin:/usr/bin:/bin LANG=C bash "$REPO/tools/tests/test_grid_gate.sh" 2>&1); RC=$?
+OUT=$(env -i HOME=/tmp USER="$USER" HPCW_RUNNER_SITE_BINDS= PATH=/usr/local/bin:/usr/bin:/bin LANG=C bash "$REPO/tools/tests/test_grid_gate.sh" 2>&1); RC=$?
 printf '%s\n' "$OUT" | tail -1
 t "the ssh gate's tests pass" rc_is 0
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
