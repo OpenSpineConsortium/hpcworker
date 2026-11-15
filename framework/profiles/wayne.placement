@@ -43,7 +43,7 @@ card geforce 11 turing
 card tesla 16 volta gvohp
 card tesla 6 kepler
 
-# Framework 36: "bind runner DIR" names a folder of the lab volume that tools/grid_runner.sh binds read-only into
+# Framework 37: "bind runner DIR" names a folder of the lab volume that tools/grid_runner.sh binds read-only into
 # every GitHub runner's container it starts at this site, chains and the autoscaler alike, beside any --ro-bind:
 # the lab's prebuilt check environment, so a restart without --ro-bind cannot drop it (2026-11-15)
 bind runner /rs/rs_grp_oschome/go2432/pixi/SchwingNet
