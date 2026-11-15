@@ -979,9 +979,10 @@ chain_served() { rm -f "$CHAIN/failures"; }
 # and every --ro-bind folder give a listing within HPCW_RUNNER_PROBE_SECS seconds (10), and the node's /tmp,
 # where the runner's work folder is made, has HPCW_RUNNER_MIN_FREE_GB free (20); a listing that errs and one
 # that does not come back in time are said apart (error, timeout). A node that fails is one line of
-# <runner dir>/bad-nodes (the time, the node, the job, the reason), written within HPCW_RUNNER_PROBE_SECS
-# seconds or left, and a chain's job queues its successor within HPCW_RUNNER_QUEUE_SECS seconds (60) or leaves
-# it, since both sit on the volume the node may have lost. Every runner job submitted in the next
+# <runner dir>/bad-nodes (the time, the node, the job, the reason), its chain's status.json says failed, each
+# written within HPCW_RUNNER_PROBE_SECS seconds or left, and a chain's job queues its successor within
+# HPCW_RUNNER_QUEUE_SECS seconds (60) or leaves it, since all three sit on the volume the node may have lost.
+# Every runner job submitted in the next
 # HPCW_RUNNER_BAD_HOURS hours (3), the controller's and a chain's successor alike, is kept off it with
 # --exclude, and off each node where a runner job of the same submitter failed within two minutes, ended in
 # this refusal (exit 5) or lost its node, as sacct says, since a node that lost the volume writes no line
@@ -1016,12 +1017,15 @@ node_probe() { # 0 when this node can serve a runner; else PROBE_WHY says why
   [ "$free" -ge $((floor * 1048576)) ] || { PROBE_WHY="/tmp has $((free / 1024)) MB free, under the floor of $floor GB"; return 1; }
 }
 append_line() { printf '%s\n' "$1" >> "$2"; }   # LINE FILE
-node_refused() { # the node failed its probe: written down and its successor queued, each within its time, and said in one line
+node_refused() { # the node failed its probe: written down, its state written and its successor queued, each within its time, and said in one line
   local node="${SLURMD_NODENAME:-$(hostname -s)}" secs=${HPCW_RUNNER_PROBE_SECS:-10} qsecs=${HPCW_RUNNER_QUEUE_SECS:-60}
   within "$secs" append_line "$(now) $node $SLURM_JOB_ID $PROBE_WHY" "$ROOT/bad-nodes" \
     || log "bad-nodes took no line within $secs s: the submitting side keeps $node off by sacct alone"
   log "node $node fails the runner's probe ($PROBE_WHY): nothing registered; runner jobs are kept off it until $(iso $(( $(now) + ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 )))"
-  status_write failed "node $node fails the runner's probe: $PROBE_WHY"
+  # status.json sits on the same volume, so its write keeps the same time and is left behind, never waited for
+  within "$secs" status_write failed "node $node fails the runner's probe: $PROBE_WHY" \
+    || log "status.json took no state within $secs s: --status shows this job's last state written"
+  LAST_STATE=failed
   [ "$MODE" = once ] && return 0
   job_args
   within "$qsecs" successor; [ $? != 2 ] || log "the next job was not queued within $qsecs s: the queuing is left behind, never waited for"

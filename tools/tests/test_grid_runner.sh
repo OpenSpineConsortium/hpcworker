@@ -639,6 +639,21 @@ t "  and not off one where a runner job failed after an hour's work" bash -c "! 
 run_job "$P5"; t "  and meets the chain's STOP" has 'STOP is set'
 rm -rf "$T/slurm/jobs/0998" "$T/slurm/jobs/0999"
 rm -f "$R/bad-nodes"
+echo "== a refused node whose status.json takes no state in time still queues its successor, never waiting for the write"
+# status.json sits on the volume the node may have lost: its rename hangs here as it would on a hung volume
+mkdir -p "$T/slowmv"
+printf '#!/bin/sh\ncase "$*" in *status.json*) exec /bin/sleep 30;; esac\nexec /bin/mv "$@"\n' > "$T/slowmv/mv"; chmod 755 "$T/slowmv/mv"
+gr --start --repo OpenSpineConsortium/probe --site wayne; P6=$(newest "$PNAME")
+clear_runs; s0=$SECONDS
+run_job "$P6" PATH="$T/slowmv:$PATH" HPCW_RUNNER_PROBE_SECS=1 HPCW_RUNNER_MIN_FREE_GB=1000000000
+took=$((SECONDS - s0)); P7=$(newest "$PNAME")
+t "a refused node whose status.json hangs still ends as a refusal" rc_is 5
+t "  saying the state was left behind" has "status.json took no state within 1 s"
+t "  its successor queued, kept off the node" bash -c "[ '$P7' != '$P6' ] && grep -q -- '--exclude=$HN ' '$T/slurm/jobs/$P7/extra'"
+t "  in far less time than the hung write takes" [ "$took" -lt 20 ]
+echo "$R/OpenSpineConsortium-probe" > "$T/apptainer/chain"; clear_runs; plan done stop; rm -f "$R/bad-nodes"
+run_job "$P7"; t "  and the successor meets the chain's STOP" has 'STOP is set'
+rm -f "$R/bad-nodes"
 
 echo "== the merge train"
 TR="$R/train"; sha() { printf '%040d' "$1"; }
