@@ -532,11 +532,15 @@ gr --autoscale --repos "$GH_REPO" --site wayne; t "--autoscale after a stop star
 gr --autoscale-stop --site wayne --now; t "--autoscale-stop --now cancels the running controller too" has 'cancelled job'
 
 echo "== the site placement file's runner folder: --autoscale with no --ro-bind keeps it"
+# the folder is the grid's own, so the test's sbatch refuses the controller's job for naming it, as it refuses
+# every real cluster path: what is read is that the folder reached autoscale.conf and the controller's sbatch line
 WRB=$(awk '$1 == "bind" && $2 == "runner" { print $3; exit }' "$REPO/framework/profiles/wayne.placement")
+t "no sbatch call was refused before the site's folder is read" [ ! -e "$T/slurm/refused" ]
 OUT=$(env -u HPCW_RUNNER_SITE_BINDS PATH="$T/banned:$PATH" ${TO[@]+"${TO[@]}"} bash "$GR" --autoscale --repos "$GH_REPO" --site wayne 2>&1); RC=$?
-t "--autoscale --site wayne with no --ro-bind is queued" rc_is 0
-t "  writing the site's folder into autoscale.conf" bash -c "[ -n '$WRB' ] && grep -qx 'ro_binds=$WRB' '$AU/autoscale.conf'"
-t "  and handing it to the controller" [ "$(J "$(newest '^hpcw_autoscale$')" args | tr '[:space:]' ' ' | grep -c -- " --ro-bind $WRB ")" = 1 ]
+t "--autoscale --site wayne with no --ro-bind writes the site's folder into autoscale.conf" bash -c "[ -n '$WRB' ] && grep -qx 'ro_binds=$WRB' '$AU/autoscale.conf'"
+t "  and asks sbatch for the controller with it" [ "$(grep -- '^sbatch .*--job-name hpcw_autoscale ' "$T/slurm/calls" | tail -n 1 | tr '[:space:]' ' ' | grep -c -- " --ro-bind $WRB ")" = 1 ]
+t "  which the test's sbatch refuses only for naming a real cluster path" bash -c "[ -s '$T/slurm/refused' ] && ! grep -v -- 'a real cluster path in .*--job-name hpcw_autoscale ' '$T/slurm/refused'"
+rm -f "$T/slurm/refused"   # that one refusal was asked for; the end of the test still finds any other
 gr --autoscale-stop --site wayne --now
 
 echo "== autoscale: runner jobs placed by hpcworker's race, and pending jobs placed again"
