@@ -43,6 +43,7 @@ export PATH="$T/bin:$PATH" SHIM_SLURM="$T/slurm" SHIM_SLURM_ROOT="$T" SHIM_GH="$
 export HPCW_RUNNER_DIR="$T/runner"   # never the lab volume's default
 export HPCW_RUNNER_CLOCK="$T/clock"
 export HPCW_RUNNER_HPCWORKER=none   # the fixed batch queue unless a test names an hpcworker, so the checkout's own never races here
+export HPCW_RUNNER_MIN_FREE_GB=0    # the probe's disk floor, which a test names where it is tested: the test's machine may hold less than a node
 unset HPCW_RUNNER_PARTITION HPCW_RUNNER_QOS SLURM_JOB_ID SLURM_JOB_START_TIME SLURM_JOB_END_TIME TMPDIR
 export GITHUB_TOKEN=ghp_testtoken_must_not_leak GH_TOKEN=gho_testtoken_must_not_leak
 mkdir -p "$T/slurm" "$T/gh" "$T/apptainer/tree/home/runner/bin"
@@ -432,9 +433,13 @@ run_job "$B2"; t "  and meeting the lane's STOP" has 'STOP is set'
 gr --start --repo OpenSpineConsortium/other --site wayne --lane 3 --ro-bind "$RB"; B3=$(newest "$L3NAME")
 mv "$RB" "$RB.gone"; clear_runs; plan stop
 run_job "$B3"
-t "a node without the folder runs the container without it" bash -c "[ '$RC' = 0 ] && [ -s '$T/apptainer/binds' ] && ! grep -q '$RB' '$T/apptainer/binds'"
-t "  and its log says so" has "--ro-bind $RB is not on [^ ]+: the container goes without it"
-mv "$RB.gone" "$RB"; run_job "$(newest "$L3NAME")"; t "  its successor meets the lane's STOP" has 'STOP is set'
+t "a node without the folder fails its probe, running no container" bash -c "[ '$RC' = 5 ] && [ ! -s '$T/apptainer/binds' ]"
+t "  and its log says so" has "node [^ ]+ fails the runner's probe \($RB gave no listing within 10 s\): nothing registered"
+t "  having registered nothing" lacks 'registered runner'
+B4=$(newest "$L3NAME")
+t "  its successor queued, kept off the node" bash -c "[ '$B4' != '$B3' ] && grep -q -- '--exclude=$(hostname -s) ' '$T/slurm/jobs/$B4/extra'"
+mv "$RB.gone" "$RB"; rm -f "$R/bad-nodes"; date -u +%FT%TZ > "$OCH+lane3/STOP"
+run_job "$B4"; t "  its successor meets the lane's STOP" has 'STOP is set'
 
 echo "== autoscale: one runner job for each queued job"
 pending() { local j; for j in $(ids "$1"); do [ "$(J "$j" state)" = PENDING ] && echo "$j"; done; return 0; }
@@ -587,6 +592,25 @@ echo "$AU/$TPL/jobs/$U8" > "$T/apptainer/chain"; clear_runs; plan done
 run_job "$U8"
 t "  which runs its runner with the folder read-only at its own path" bash -c "[ '$RC' = 0 ] && grep -qx '$RB $RB ro' '$T/apptainer/binds'"
 gr --autoscale-stop --site wayne --now
+
+echo "== a node that fails the runner's probe: nothing registered, and runner jobs kept off it for a time"
+PNAME='^hpcw_runner_OpenSpineConsortium-probe$'; HN=$(hostname -s); echo 1000000 > "$T/clock"; rm -f "$R/bad-nodes"
+gr --start --repo OpenSpineConsortium/probe --site wayne; P1=$(newest "$PNAME")
+clear_runs; run_job "$P1" HPCW_RUNNER_MIN_FREE_GB=1000000000
+t "a job whose node has less free disk than the floor ends at once" rc_is 5
+t "  saying the node and why in one line" has "node $HN fails the runner's probe \(/tmp has [0-9]+ MB free, under the floor of 1000000000 GB\): nothing registered"
+t "  having registered nothing and run no container" bash -c "[ ! -s '$T/apptainer/runs' ] && ! grep -q 'registered runner' '$(J "$P1" out)'"
+t "  the node written down with the time, the job and the reason" grep -q "^1000000 $HN $P1 /tmp has [0-9]* MB free" "$R/bad-nodes"
+P2=$(newest "$PNAME")
+t "  its successor queued, kept off the node" bash -c "[ '$P2' != '$P1' ] && grep -q -- '--exclude=$HN ' '$T/slurm/jobs/$P2/extra'"
+echo "$((1000000 - 4 * 3600)) $HN $P1 an older reason" > "$R/bad-nodes"
+echo "$R/OpenSpineConsortium-probe" > "$T/apptainer/chain"; clear_runs; plan done stop
+run_job "$P2"
+t "a node whose failure is older than the window serves again" bash -c "[ '$RC' = 0 ] && grep -q '1 GitHub jobs ran' '$(J "$P2" out)'"
+P3=$(newest "$PNAME")
+t "  and the next job is kept off no node" bash -c "[ '$P3' != '$P2' ] && ! grep -q -- '--exclude' '$T/slurm/jobs/$P3/extra'"
+run_job "$P3"; t "  and meets the chain's STOP" has 'STOP is set'
+rm -f "$R/bad-nodes"
 
 echo "== the merge train"
 TR="$R/train"; sha() { printf '%040d' "$1"; }

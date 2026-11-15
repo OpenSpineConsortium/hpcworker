@@ -850,7 +850,8 @@ successor() { # this job's one successor, queued once even when this job is run 
     fi
   fi
   printf '%s\n' "$SLURM_JOB_ID" > "$CHAIN/next.submitting"
-  out=$(SB --parsable --job-name "$JOB_NAME" --dependency="afterany:$SLURM_JOB_ID,singleton" "${SB_FLAGS[@]}" -D "$ROOT" --output "$CHAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${JOB_ARGS[@]}" 2>&1) \
+  local flags; mapfile -t flags < <(keep_off "${SB_FLAGS[@]}")
+  out=$(SB --parsable --job-name "$JOB_NAME" --dependency="afterany:$SLURM_JOB_ID,singleton" "${flags[@]}" -D "$ROOT" --output "$CHAIN/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --serve "${JOB_ARGS[@]}" 2>&1) \
     || { rm -f "$CHAIN/next.submitting"; log "could not queue the next job: $(printf '%s' "$out" | tail -1)"; return 1; }
   id=$(job_id "$out") || { log "next job: queued, but the scheduler gave no job number ($(printf '%s' "$out" | tail -1))"; return 0; }
   printf '%s %s\n' "$SLURM_JOB_ID" "$id" > "$CHAIN/next" && rm -f "$CHAIN/next.submitting"
@@ -951,6 +952,49 @@ chain_failed() { # REASON
 }
 chain_served() { rm -f "$CHAIN/failures"; }
 
+# Before a runner job registers, unregisters or asks GitHub anything, its node is probed: the runner's folder
+# and every --ro-bind folder give a listing within HPCW_RUNNER_PROBE_SECS seconds (10), and the node's /tmp,
+# where the runner's work folder is made, has HPCW_RUNNER_MIN_FREE_GB free (20). A node that fails is one line
+# of <runner dir>/bad-nodes (the time, the node, the job, the reason), and every runner job submitted in the
+# next HPCW_RUNNER_BAD_HOURS hours (3), the controller's and a chain's successor alike, is kept off it with
+# --exclude (2026-11-14: checks failed for runner jobs whose container had no /rs, and runners warned of 63 MB
+# left). It is not counted as a failure to serve: the node is kept off, so no later job meets it.
+PROBE_WHY=""
+read_within() { # DIR -> 0 when a listing of DIR comes back good in time; a read that hangs is left behind, never waited for
+  local fd r=""
+  exec {fd}< <(ls -f -- "$1" > /dev/null 2>&1; echo "$?")
+  read -r -t "${HPCW_RUNNER_PROBE_SECS:-10}" -u "$fd" r
+  exec {fd}<&-
+  [ "$r" = 0 ]
+}
+node_probe() { # 0 when this node can serve a runner; else PROBE_WHY says why
+  local d free floor=${HPCW_RUNNER_MIN_FREE_GB:-20}
+  for d in "$ROOT" ${RO_BINDS[@]+"${RO_BINDS[@]}"}; do
+    read_within "$d" || { PROBE_WHY="$d gave no listing within ${HPCW_RUNNER_PROBE_SECS:-10} s"; return 1; }
+  done
+  free=$(df -Pk /tmp 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }')
+  [ -n "$free" ] || { PROBE_WHY="df gave no free space for /tmp"; return 1; }
+  [ "$free" -ge $((floor * 1048576)) ] || { PROBE_WHY="/tmp has $((free / 1024)) MB free, under the floor of $floor GB"; return 1; }
+}
+node_refused() { # the node failed its probe: written down, said in one line, and a chain's successor queued off it
+  local node="${SLURMD_NODENAME:-$(hostname -s)}"
+  printf '%s %s %s %s\n' "$(now)" "$node" "$SLURM_JOB_ID" "$PROBE_WHY" >> "$ROOT/bad-nodes"
+  log "node $node fails the runner's probe ($PROBE_WHY): nothing registered; runner jobs are kept off it until $(iso $(( $(now) + ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 )))"
+  status_write failed "node $node fails the runner's probe: $PROBE_WHY"
+  [ "$MODE" = once ] && return 0
+  job_args; successor
+}
+bad_nodes() { # the nodes a runner job failed its probe on in the last HPCW_RUNNER_BAD_HOURS hours (3), comma-joined
+  [ -f "$ROOT/bad-nodes" ] || return 0
+  awk -v t="$(( $(now) - ${HPCW_RUNNER_BAD_HOURS:-3} * 3600 ))" '$1 ~ /^[0-9]+$/ && $1 >= t && $2 ~ /^[A-Za-z0-9_.-]+$/ && !($2 in s) {
+    s[$2] = 1; o = o (o == "" ? "" : ",") $2 } END { printf "%s", o }' "$ROOT/bad-nodes"
+}
+keep_off() { # FLAG...: the flags again, one a line, an --exclude among them joined with the nodes kept off into one
+  local f ex; ex=$(bad_nodes)
+  for f in "$@"; do case "$f" in --exclude=*) ex="${f#--exclude=}${ex:+,$ex}";; *) printf '%s\n' "$f";; esac; done
+  [ -z "$ex" ] || printf -- '--exclude=%s\n' "$ex"
+}
+
 serve() {
   local n=0 fails=0 chained=1 leftover ended=0 end_state=ending end_note=""
   [ -n "${SLURM_JOB_ID:-}" ] || die "--serve runs inside a chain's job; start the chain with --start"
@@ -961,6 +1005,7 @@ serve() {
   mkdir -p "$CHAIN"
   if [ -e "$CHAIN/STOP" ]; then log "STOP is set ($CHAIN/STOP): the chain ends here; tools/grid_runner.sh --start --repo $REPO$LANE_OPT starts it again"; status_write stopped "STOP was set"; return 0; fi
   if [ "$MODE" = once ] && [ -e "$AUTO/STOP" ]; then log "the controller's STOP is set ($AUTO/STOP): this runner job registers nothing"; status_write stopped "the controller's STOP was set"; return 0; fi
+  node_probe || { node_refused; return 5; }
   job_args
   if [ "$MODE" = once ]; then log "one GitHub job, then this job ends; no successor"; else successor || chained=0; fi
   DEADLINE=$(( $(end_time) - MARGIN * 60 ))
@@ -1214,6 +1259,7 @@ auto_look() { # OWNER/NAME: one look at its queue, and the runner jobs it needs 
         [ -n "$CPUS" ] && flags+=(--cpus-per-task "$CPUS")
         [ -n "$MEM" ] && flags+=(--mem "$MEM")
       fi
+      mapfile -t flags < <(keep_off "${flags[@]}")
       out=$(SB --parsable --job-name "$name" "${flags[@]}" -D "$ROOT" --output "$d/runner-%j.log" "$ROOT/bin/grid_runner.sbatch" --once "${JOB_ARGS[@]}" --idle "$IDLE" 2>&1) \
         || { if printf '%s' "$out" | grep -qiE 'limit|MaxSubmit|QOSMax|AssocMax|too many'; then
                log "$r: Slurm's own limit on this account's jobs is reached ($(printf '%s' "$out" | tail -1)); $i submitted at this look, the rest at the next"
